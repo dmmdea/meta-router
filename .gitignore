@@ -1,0 +1,32 @@
+# build output
+/bin/
+/dist/
+*.exe
+*.exe~
+/mr-eval
+/cmd/mr-eval/mr-eval
+
+# local runtime data / catalog
+/.meta-router/
+*.db
+*.sqlite
+*.sqlite3
+
+# usage logs
+*.jsonl
+!testdata/*.jsonl
+
+# secrets / local config
+.env
+config.json
+config.local.*
+
+# language tooling
+__pycache__/
+.venv/
+.tts-venv/
+node_modules/
+
+# os
+.DS_Store
+Thumbs.db

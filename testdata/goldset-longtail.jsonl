@@ -1,0 +1,4 @@
+{"prompt":"create an image-generation prompt for a product poster","expect":["skills:visual-image"]}
+{"prompt":"build a custom gemini gem advisor with persistent drive memory","expect":["skills:super-gem-creator"]}
+{"prompt":"set up a github contribution strategy and repo governance for my project","expect":["skills:repo-craft"]}
+{"prompt":"polish my generated CLI so it passes verification and is publish-ready","expect":["skills:printing-press-polish"]}
