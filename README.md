@@ -176,7 +176,7 @@ Key properties:
 
 Being honest about scope:
 
-- **It does not route models or pick agents.** v1 is purely the *inward* axis — skill awareness. It does not choose between cloud models, orchestrate multi-agent runs, or do quota/budget accounting.
+- **It does not route or *call* models/agents.** What ships today is the *inward* axis — it surfaces relevant skills and nudges toward free local offload tools, both as injected context text. It does not choose between cloud models, orchestrate multi-agent runs, or do quota/budget accounting (that is the planned v3).
 - **It cannot make Claude Code retrieve MCP tools on demand.** It surfaces *skills* (`SKILL.md` files) as context; it does not filter or page the MCP tool list. The offload feature is a one-line text nudge only — it does not call any tool for you.
 - **It does not auto-edit your `settings.json`.** Registering and removing the hooks is always your explicit action.
 - **It does not install, modify, or recommend installing skills.** It only ranks and surfaces what you already have.
@@ -188,7 +188,7 @@ Being honest about scope:
 meta-router is one "capability router" framed around three axes — *given this task, what's the best capability?* — built local-first, one shippable layer at a time:
 
 - **v1 — Skill awareness (shipped).** The per-prompt skill surfacer described above.
-- **v2 — Local offload routing (shipped).** Detect mechanical text work and steer it to free local tools (the offload nudge is the first piece of this).
+- **v2 — Offload nudge (shipped + live).** Detects mechanical text work (summarize / classify / extract / triage over a pasted block) and injects a one-line nudge toward free local offload tools. It is a *suggestion*, not routing — it never calls a tool; the actual local-offload execution lives in the companion [offload-harness](https://github.com/dmmdea/offload-harness) project.
 - **v3 — Headless multi-agent orchestration (planned).** A quota-aware orchestrator that routes across capabilities, picking the best single tool, combination, or sequence per task.
 
 ## Contributing
