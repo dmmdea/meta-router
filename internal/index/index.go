@@ -19,19 +19,22 @@ import (
 // Seams for testing the diff logic without harvesting the real FS or calling
 // the embedder. nil → use the real implementations.
 var (
-	harvestFn func(roots []string) ([]catalog.Skill, error)
+	harvestFn func(roots []catalog.Root) ([]catalog.Skill, error)
 	embedFn   func(endpoint string, timeout time.Duration, inputs []string) ([][]float64, error)
 )
 
-func harvest(roots []string) ([]catalog.Skill, error) {
+// HarvestSkills runs the canonical harvest + hygiene pipeline over the roots.
+// Exported so mr-index can harvest once, apply the removal guard, and then
+// refresh from the same snapshot.
+func HarvestSkills(roots []catalog.Root) ([]catalog.Skill, error) {
 	if harvestFn != nil {
 		return harvestFn(roots)
 	}
-	raw, err := catalog.Harvest(roots)
+	raw, err := catalog.HarvestRoots(roots)
 	if err != nil {
 		return nil, err
 	}
-	return catalog.DedupByID(raw), nil
+	return catalog.Dedup(raw), nil
 }
 
 func embedTexts(endpoint string, timeout time.Duration, inputs []string) ([][]float64, error) {
@@ -102,6 +105,14 @@ func (idx *Index) Save(path string) error {
 		os.Remove(tmp) // don't leave a stale .tmp if rename fails (e.g. dest locked on Windows)
 		return err
 	}
+	// Write the fast-load sidecar AFTER the JSON so its mtime is >= the
+	// JSON's (LoadFast's freshness condition). Best-effort: a failed sidecar
+	// write must not fail the save — but never leave a stale one behind,
+	// because a stale-but-newer-looking sidecar would win the mtime check.
+	if err := idx.saveBin(BinPath(path)); err != nil {
+		os.Remove(BinPath(path))
+		fmt.Fprintf(os.Stderr, "warning: index sidecar not written (%v); hook will parse JSON\n", err)
+	}
 	return nil
 }
 
@@ -133,62 +144,105 @@ func (idx *Index) Vectors() [][]float64 {
 	return out
 }
 
-// Refresh re-harvests skills and re-embeds only those whose content hash
-// changed (or are new); unchanged skills keep their cached vectors, removed
-// skills are dropped. Cheap enough to run on every SessionStart.
-func (idx *Index) Refresh(roots []string, endpoint string, timeout time.Duration) (added, updated, removed int, err error) {
-	cur, err := harvest(roots)
-	if err != nil {
-		return 0, 0, 0, err
+// RefreshPlan is the pure diff between the current index and a fresh
+// harvest: what would be added, re-embedded, and removed. Computing the plan
+// before applying it lets callers refuse suspicious mass removals (MR-6)
+// without having touched the index.
+type RefreshPlan struct {
+	Added      int
+	Updated    int
+	RemovedIDs []string
+
+	entries []Entry  // next entry set; re-embeds have empty Vec
+	toText  []string // texts to embed, parallel to toPos
+	toPos   []int    // positions in entries to receive the vectors
+}
+
+// Reembeds is the number of entries whose vectors must be recomputed
+// (new + changed).
+func (p *RefreshPlan) Reembeds() int { return len(p.toText) }
+
+// RemovalExceeds reports whether removing `removed` of `before` entries
+// crosses maxFrac (e.g. 0.30). An empty index never triggers the guard.
+func RemovalExceeds(before, removed int, maxFrac float64) bool {
+	if before <= 0 || removed <= 0 {
+		return false
 	}
+	return float64(removed)/float64(before) > maxFrac
+}
+
+// PlanRefresh diffs the index against a harvested skill snapshot. Pure: it
+// does not mutate the index and calls no embedder.
+func (idx *Index) PlanRefresh(cur []catalog.Skill) *RefreshPlan {
 	old := make(map[string]Entry, len(idx.Entries))
 	for _, e := range idx.Entries {
 		old[e.Skill.ID] = e
 	}
 	curIDs := make(map[string]bool, len(cur))
 
-	newEntries := make([]Entry, 0, len(cur))
-	var toText []string
-	var toPos []int
+	p := &RefreshPlan{entries: make([]Entry, 0, len(cur))}
 	for _, s := range cur {
 		curIDs[s.ID] = true
 		h := HashSkill(s)
 		if e, ok := old[s.ID]; ok && e.Hash == h {
-			newEntries = append(newEntries, Entry{Skill: s, Vec: e.Vec, Hash: h}) // reuse vector, refresh metadata
+			p.entries = append(p.entries, Entry{Skill: s, Vec: e.Vec, Hash: h}) // reuse vector, refresh metadata
 			continue
 		}
-		newEntries = append(newEntries, Entry{Skill: s, Hash: h}) // vector filled below
-		toText = append(toText, s.EmbedText())
-		toPos = append(toPos, len(newEntries)-1)
+		p.entries = append(p.entries, Entry{Skill: s, Hash: h}) // vector filled on apply
+		p.toText = append(p.toText, s.EmbedText())
+		p.toPos = append(p.toPos, len(p.entries)-1)
 		if _, ok := old[s.ID]; ok {
-			updated++
+			p.Updated++
 		} else {
-			added++
+			p.Added++
 		}
 	}
-	for id := range old {
-		if !curIDs[id] {
-			removed++
+	for _, e := range idx.Entries {
+		if !curIDs[e.Skill.ID] {
+			p.RemovedIDs = append(p.RemovedIDs, e.Skill.ID)
 		}
 	}
-	if len(toText) > 0 {
-		vecs, e := embedTexts(endpoint, timeout, toText)
-		if e != nil {
-			return 0, 0, 0, e
+	return p
+}
+
+// ApplyRefresh embeds the plan's changed texts and installs the new entry
+// set. On embed failure the index is left untouched.
+func (idx *Index) ApplyRefresh(p *RefreshPlan, endpoint string, timeout time.Duration) error {
+	if len(p.toText) > 0 {
+		vecs, err := embedTexts(endpoint, timeout, p.toText)
+		if err != nil {
+			return err
 		}
-		if len(vecs) != len(toText) {
-			return 0, 0, 0, fmt.Errorf("index: embedder returned %d vecs for %d inputs", len(vecs), len(toText))
+		if len(vecs) != len(p.toText) {
+			return fmt.Errorf("index: embedder returned %d vecs for %d inputs", len(vecs), len(p.toText))
 		}
-		for j, pos := range toPos {
-			newEntries[pos].Vec = vecs[j]
+		for j, pos := range p.toPos {
+			p.entries[pos].Vec = vecs[j]
 		}
 		if idx.Dim == 0 && len(vecs) > 0 && len(vecs[0]) > 0 {
 			idx.Dim = len(vecs[0])
 		}
 	}
-	idx.Entries = newEntries
+	idx.Entries = p.entries
 	idx.BuiltUnix = time.Now().Unix()
-	return added, updated, removed, nil
+	return nil
+}
+
+// Refresh re-harvests skills and re-embeds only those whose content hash
+// changed (or are new); unchanged skills keep their cached vectors, removed
+// skills are dropped. Cheap enough to run on every SessionStart. Thin
+// harvest→plan→apply wrapper; callers needing the removal guard use the
+// pieces directly.
+func (idx *Index) Refresh(roots []catalog.Root, endpoint string, timeout time.Duration) (added, updated, removed int, err error) {
+	cur, err := HarvestSkills(roots)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	p := idx.PlanRefresh(cur)
+	if err := idx.ApplyRefresh(p, endpoint, timeout); err != nil {
+		return 0, 0, 0, err
+	}
+	return p.Added, p.Updated, len(p.RemovedIDs), nil
 }
 
 // DefaultIndexPath is ~/.meta-router/index.json.

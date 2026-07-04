@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"time"
@@ -19,10 +20,27 @@ type Embed struct {
 	hc   *http.Client
 }
 
+// ConnectTimeout bounds the TCP dial separately from the total request
+// budget (MR-13): against a dead or unroutable endpoint the dial fails in
+// ~200ms instead of burning the whole per-prompt deadline (up to ~950ms)
+// before mr-hook can fall back. A warm local llama-swap accepts connections
+// in microseconds, so 200ms adds no risk on the happy path.
+var ConnectTimeout = 200 * time.Millisecond
+
+// newHTTPClient builds a client with the split connect/total timeouts.
+func newHTTPClient(total time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: total,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Timeout: ConnectTimeout}).DialContext,
+		},
+	}
+}
+
 // EmbedTexts embeds inputs via the OpenAI-compatible /v1/embeddings endpoint
 // with a caller-chosen timeout. Single shared entrypoint for all embedding.
 func EmbedTexts(endpoint string, timeout time.Duration, inputs []string) ([][]float64, error) {
-	return embed(&http.Client{Timeout: timeout}, endpoint, inputs)
+	return embed(newHTTPClient(timeout), endpoint, inputs)
 }
 
 func embed(hc *http.Client, ep string, inputs []string) ([][]float64, error) {
@@ -87,7 +105,7 @@ type Scored struct {
 }
 
 func NewEmbed(skills []catalog.Skill, endpoint string) (*Embed, error) {
-	hc := &http.Client{Timeout: 30 * time.Second}
+	hc := newHTTPClient(30 * time.Second)
 	texts := make([]string, len(skills))
 	ids := make([]string, len(skills))
 	for i, s := range skills {
@@ -107,7 +125,7 @@ func NewEmbed(skills []catalog.Skill, endpoint string) (*Embed, error) {
 // the persisted index) — it does NOT embed the skills. Only the query is
 // embedded at retrieve time. timeout bounds the per-query embed HTTP call.
 func NewEmbedFromVectors(ids []string, vecs [][]float64, endpoint string, timeout time.Duration) *Embed {
-	return &Embed{ids: ids, vecs: vecs, ep: endpoint, hc: &http.Client{Timeout: timeout}}
+	return &Embed{ids: ids, vecs: vecs, ep: endpoint, hc: newHTTPClient(timeout)}
 }
 
 func (e *Embed) Name() string { return "embed-egemma" }
@@ -129,6 +147,25 @@ func (e *Embed) rankByCosine(prompt string) ([]Scored, error) {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	return out, nil
+}
+
+// RetrieveScored returns the top-k skills by cosine and the max cosine over
+// the whole catalog (the confidence signal the surfacer gates on). Same
+// contract as Hybrid.RetrieveScored, so the hook can rank embed-only.
+func (e *Embed) RetrieveScored(prompt string, k int) ([]Scored, float64, error) {
+	ranked, err := e.rankByCosine(prompt)
+	if err != nil {
+		return nil, 0, err
+	}
+	var topCos float64
+	if len(ranked) > 0 {
+		topCos = ranked[0].Score
+	}
+	out := make([]Scored, 0, k)
+	for i := 0; i < len(ranked) && i < k; i++ {
+		out = append(out, ranked[i])
+	}
+	return out, topCos, nil
 }
 
 func (e *Embed) Retrieve(prompt string, k int) ([]string, error) {

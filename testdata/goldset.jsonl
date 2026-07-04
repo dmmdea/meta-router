@@ -1,232 +1,232 @@
-{"prompt":"set up the local offload harness to delegate grunt work to a free local model","expect":["skills:local-offload-setup"]}
-{"prompt":"QA test this web app end-to-end and fix any bugs found","expect":["skills:gstack-qa"]}
-{"prompt":"plan a brand new multi-phase project with a full roadmap","expect":["skills:gsd-new-project"]}
-{"prompt":"brainstorm a new feature before building it","expect":["skills:brainstorming"]}
-{"prompt":"write an implementation plan from this spec before I start coding","expect":["skills:writing-plans"]}
-{"prompt":"find a skill that can scrape a website for me","expect":["skills:find-skills"]}
-{"prompt":"check the printing-press catalog for existing CLIs","expect":["skills:printing-press-catalog"]}
-{"prompt":"publish this generated CLI to the printing-press-library repo","expect":["skills:printing-press-publish"]}
-{"prompt":"score this generated CLI against the Steinberger bar","expect":["skills:printing-press-score"]}
-{"prompt":"import existing CLIs into the printing press system","expect":["skills:printing-press-import"]}
-{"prompt":"this is a one-off failing test outside any GSD project — debug it systematically using the scientific method","expect":["skills:systematic-debugging"]}
-{"prompt":"I'm about to claim a fix is done — run verification first","expect":["skills:verification-before-completion"]}
-{"prompt":"execute all the plans in the current GSD phase","expect":["skills:gsd-execute-phase"]}
-{"prompt":"create a detailed PLAN.md for this phase","expect":["skills:gsd-plan-phase"]}
-{"prompt":"map out the codebase architecture before starting the build","expect":["skills:gsd-map-codebase"]}
-{"prompt":"extract lessons learned and decisions from this completed phase","expect":["skills:gsd-extract-learnings"]}
-{"prompt":"create a clean PR branch that strips .planning/ commits","expect":["skills:gsd-pr-branch"]}
-{"prompt":"pause work mid-phase and create a handoff document","expect":["skills:gsd-pause-work"]}
-{"prompt":"resume work from last session with full context restored","expect":["skills:gsd-resume-work"]}
-{"prompt":"investigate a post-mortem for a failed GSD workflow","expect":["skills:gsd-forensics"]}
-{"prompt":"run TDD for this new feature — write tests before the implementation","expect":["skills:test-driven-development"]}
-{"prompt":"I have 5 independent tasks — dispatch them to parallel subagents","expect":["skills:dispatching-parallel-agents"]}
-{"prompt":"start feature work in an isolated git worktree","expect":["skills:using-git-worktrees"]}
-{"prompt":"all tests pass — decide how to merge or PR this branch","expect":["skills:finishing-a-development-branch"]}
-{"prompt":"build a net-new React page with high visual quality","expect":["skills:frontend-design"]}
-{"prompt":"browse this live website headlessly to check for visual regressions","expect":["skills:gstack-browse"]}
-{"prompt":"turn vague product intent into a precise executable spec","expect":["skills:gstack-spec"]}
-{"prompt":"scrape structured data from a web page","expect":["skills:gstack-scrape"]}
-{"prompt":"save my current working context before switching tasks","expect":["skills:gstack-context-save"]}
-{"prompt":"restore the context I saved earlier","expect":["skills:gstack-context-restore"]}
-{"prompt":"do a post-deploy retrospective on this release","expect":["skills:gstack-retro"]}
-{"prompt":"monitor the deploy as a canary to catch early regressions","expect":["skills:gstack-canary"]}
-{"prompt":"use gstack to investigate the root cause of this production outage","expect":["skills:gstack-investigate"]}
-{"prompt":"sync mem0 memory to a new PC so I can pick up where I left off","expect":["skills:syncing-mem0-across-pcs"]}
-{"prompt":"clone my full Claude Code setup from the Aorus to a new machine","expect":["skills:replicating-antigravity-across-pcs"]}
-{"prompt":"automate my Project Zomboid dedicated server with systemd on Ubuntu","expect":["skills:pz-server-automation"]}
-{"prompt":"remove the background from this image locally without an API","expect":["skills:remove-background"]}
-{"prompt":"write AI video prompts and storyboard for a short film","expect":["skills:visual-video"]}
-{"prompt":"review this edited video MP4 for factual errors and editorial issues","expect":["skills:video-editor-review"]}
-{"prompt":"scaffold a new Supabase project with RLS and auth","expect":["skills:supabase"]}
-{"prompt":"craft a new reusable skill from this successful scrape flow","expect":["skills:gstack-skillify"]}
-{"prompt":"review the engineering plan before we start building","expect":["skills:gstack-plan-eng-review"]}
-{"prompt":"add a new milestone to this GSD-managed project","expect":["skills:gsd-new-milestone"]}
-{"prompt":"review the backlog and promote items to the active milestone","expect":["skills:gsd-review-backlog"]}
-{"prompt":"do a devex review of the developer experience for this tool","expect":["skills:gstack-devex-review"]}
-{"prompt":"ship and deploy this feature end-to-end including the landing page","expect":["skills:gstack-ship"]}
-{"prompt":"Open my staging site in a headless browser, walk the signup flow, and screenshot any broken steps.","expect":["skills:gstack"]}
-{"prompt":"I'm moving my WSL box to a newer CUDA toolkit and need to rebuild the local llama.cpp inference engine safely.","expect":["skills:cuda-reforge"]}
-{"prompt":"Is there an installable add-on that could give you the ability to handle this task?","expect":["skills:find-skills"]}
-{"prompt":"I'm heading to bed — keep an agent looping on this feature until the tests pass.","expect":["skills:gnhf"]}
-{"prompt":"Write unit and end-to-end tests for the checkout phase I just finished, based on its acceptance criteria.","expect":["skills:gsd-add-tests"]}
-{"prompt":"This next phase builds an LLM-powered system — draft a design contract with an evaluation plan before we code.","expect":["skills:gsd-ai-integration-phase"]}
-{"prompt":"Run an automated pass that finds defects, fixes the easy ones, runs tests, and commits each fix.","expect":["skills:gsd-audit-fix"]}
-{"prompt":"Before I archive this version, verify the whole milestone actually met its original goals and integrates end-to-end.","expect":["skills:gsd-audit-milestone"]}
-{"prompt":"Scan every phase for outstanding manual verification items and give me a prioritized human test plan.","expect":["skills:gsd-audit-uat"]}
-{"prompt":"Just power through all the remaining roadmap phases on your own — plan and build each one.","expect":["skills:gsd-autonomous"]}
-{"prompt":"Jot this idea down into the parking lot so I don't lose it for later.","expect":["skills:gsd-capture"]}
-{"prompt":"My phases folder is cluttered with old finished versions — archive those out of the way.","expect":["skills:gsd-cleanup"]}
-{"prompt":"Review the files I changed in phase 3 for bugs and security issues, then summarize findings by severity.","expect":["skills:gsd-code-review"]}
-{"prompt":"This release is done — archive it as a shipped version and roll the project forward to the next one.","expect":["skills:gsd-complete-milestone"]}
-{"prompt":"Change which model profile and workflow toggles this planning setup uses.","expect":["skills:gsd-config"]}
-{"prompt":"Help me track down this intermittent bug methodically so progress survives across context resets.","expect":["skills:gsd-debug"]}
-{"prompt":"Before I plan this next chunk of work, ask me the open questions so the decisions are locked in.","expect":["skills:gsd-discuss-phase"]}
-{"prompt":"Our README and architecture docs are stale — regenerate them so they match what the code actually does now.","expect":["skills:gsd-docs-update"]}
-{"prompt":"We shipped the AI feature but I'm not sure we tested it properly — audit whether the eval coverage matches what we promised.","expect":["skills:gsd-eval-review"]}
-{"prompt":"Go ahead and build out all the plans for this stage, running the independent ones in parallel.","expect":["skills:gsd-execute-phase"]}
-{"prompt":"I have a rough idea for an auth approach — walk me through it with questions before I commit to anything.","expect":["skills:gsd-explore"]}
-{"prompt":"Now that this stage is done, pull out the decisions, lessons, and surprises into a learnings doc.","expect":["skills:gsd-extract-learnings"]}
-{"prompt":"Just fix this typo in the config and commit it — way too small to bother with a plan.","expect":["skills:gsd-fast"]}
-{"prompt":"This workflow got stuck and I don't know why — dig through the git history and state files to figure out what broke.","expect":["skills:gsd-forensics"]}
-{"prompt":"Build me a knowledge graph of this project so I can query how the pieces connect.","expect":["skills:gsd-graphify"]}
-{"prompt":"Something feels off with my planning folder — check it for missing or inconsistent files and fix what you can.","expect":["skills:gsd-health"]}
-{"prompt":"What commands does this planning system give me — show me the full reference.","expect":["skills:gsd-help"]}
-{"prompt":"I have a plan file from outside this project — bring it in, but flag anything that conflicts with our locked decisions.","expect":["skills:gsd-import"]}
-{"prompt":"Go through all the open issues and pull requests on the repo and check each against our templates.","expect":["skills:gsd-inbox"]}
-{"prompt":"We already have ADRs and a PRD in the repo — bootstrap the planning setup from those existing docs.","expect":["skills:gsd-ingest-docs"]}
-{"prompt":"Give me one dashboard to oversee every stage of this milestone and kick off work in the background.","expect":["skills:gsd-manager"]}
-{"prompt":"Analyze this existing repo and produce structured docs describing its architecture and tech.","expect":["skills:gsd-map-codebase"]}
-{"prompt":"Write a single onboarding overview of everything we built this release so a new teammate can get up to speed.","expect":["skills:gsd-milestone-summary"]}
-{"prompt":"Plan this stage as a thin vertical slice with a user story, and split it if it's too big.","expect":["skills:gsd-mvp-phase"]}
-{"prompt":"Our first release shipped. I want to kick off the next round of work and define what v1.1 should include.","expect":["skills:gsd-new-milestone"]}
-{"prompt":"I'm starting a brand new app from scratch and want to set up the project context and goals before coding.","expect":["skills:gsd-new-project"]}
-{"prompt":"I'm leaving for the day mid-task — save where I am so I can pick it back up cleanly tomorrow.","expect":["skills:gsd-pause-work"]}
-{"prompt":"Add a new stage to the end of the roadmap, and bump that other one to slot in earlier.","expect":["skills:gsd-phase"]}
-{"prompt":"I've got the roadmap stage picked — now write me a detailed, executable build plan for it.","expect":["skills:gsd-plan-phase"]}
-{"prompt":"Keep having other AI tools critique this build plan and rewrite it until none flag serious problems.","expect":["skills:gsd-plan-review-convergence"]}
-{"prompt":"My PR diff is full of planning docs nobody needs to review — give me a clean branch with just the code.","expect":["skills:gsd-pr-branch"]}
-{"prompt":"Build a profile of how I like to code so Claude tailors its responses to my style.","expect":["skills:gsd-profile-user"]}
-{"prompt":"Where am I in this project and what should I work on next? Just move me forward.","expect":["skills:gsd-progress"]}
-{"prompt":"Small ad-hoc change here — do it with proper atomic commits but skip the whole heavy planning pipeline.","expect":["skills:gsd-quick"]}
-{"prompt":"Coming back after a few days off — restore where I left off and tell me what's next.","expect":["skills:gsd-resume-work"]}
-{"prompt":"Go through my parked future ideas and decide which ones to pull into the current cycle.","expect":["skills:gsd-review-backlog"]}
-{"prompt":"Look over the code I changed in the last batch of work and flag any bugs or security holes.","expect":["skills:gsd-code-review"]}
-{"prompt":"We just shipped version 2.0 — archive it and set things up for the next release cycle.","expect":["skills:gsd-complete-milestone"]}
-{"prompt":"I want to change which model my planning workflow uses and toggle some of its options.","expect":["skills:gsd-config"]}
-{"prompt":"Help me track down this bug methodically so progress survives even if my context gets wiped.","expect":["skills:gsd-debug"]}
-{"prompt":"Before we plan the next phase, ask me the questions you need to lock down the decisions.","expect":["skills:gsd-discuss-phase"]}
-{"prompt":"Refresh the README and other project docs so they actually match the current code.","expect":["skills:gsd-docs-update"]}
-{"prompt":"Check whether the AI phase we built actually has the test coverage its design promised.","expect":["skills:gsd-eval-review"]}
-{"prompt":"Run all the plans for this phase, parallelizing the ones that don't depend on each other.","expect":["skills:gsd-execute-phase"]}
-{"prompt":"I have a rough idea for the auth approach — walk me through it with questions before I commit.","expect":["skills:gsd-explore"]}
-{"prompt":"Pull out the decisions, lessons, and surprises from the phase we just finished.","expect":["skills:gsd-extract-learnings"]}
-{"prompt":"Just fix this typo and tweak the config value — too small to bother planning.","expect":["skills:gsd-fast"]}
-{"prompt":"My planning workflow got stuck — do a post-mortem on the git history and figure out what broke.","expect":["skills:gsd-forensics"]}
-{"prompt":"Build a knowledge graph of the project so I can query relationships between artifacts.","expect":["skills:gsd-graphify"]}
-{"prompt":"Check whether my planning directory is in good shape and repair anything broken.","expect":["skills:gsd-health"]}
-{"prompt":"What commands does this project workflow system give me — show me the full reference.","expect":["skills:gsd-help"]}
-{"prompt":"I have an external plan file — bring it in but warn me if it clashes with our locked decisions.","expect":["skills:gsd-import"]}
-{"prompt":"Go through the repo's open issues and pull requests and check each against our templates.","expect":["skills:gsd-inbox"]}
-{"prompt":"We have ADRs and PRDs scattered in docs — bootstrap our planning setup from all of them.","expect":["skills:gsd-ingest-docs"]}
-{"prompt":"I committed a phase that broke things, can you roll those commits back safely with dependency checks?","expect":["skills:gsd-undo"]}
-{"prompt":"Check whether my spec-driven planning toolkit has a newer release and install it, showing me what changed.","expect":["skills:gsd-update"]}
-{"prompt":"Go back over a finished phase and audit whether its sampling-rate validation coverage has any gaps to fill.","expect":["skills:gsd-validate-phase"]}
-{"prompt":"Walk me through testing the feature we just built, one check at a time, to confirm it actually works for users.","expect":["skills:gsd-verify-work"]}
-{"prompt":"Set up an isolated copy of the repo with its own planning folder so I can work without touching the main one.","expect":["skills:gsd-workspace"]}
-{"prompt":"I'm running several parallel tracks for this milestone — list them, switch active one, and show progress.","expect":["skills:gsd-workstreams"]}
-{"prompt":"Run the whole review gauntlet on my plan automatically and make the taste-call decisions for me.","expect":["skills:gstack-autoplan"]}
-{"prompt":"I want to compare how Claude, GPT and Gemini each perform on this skill to decide which model to use.","expect":["skills:gstack-benchmark-models"]}
-{"prompt":"Measure my site's page-load speed and flag any performance regression since last time.","expect":["skills:gstack-benchmark"]}
-{"prompt":"Open this URL in a fast headless browser and grab a screenshot so I can QA the page.","expect":["skills:gstack-browse"]}
-{"prompt":"Right after I deploy, keep watching the live site for errors for a while and alert me.","expect":["skills:gstack-canary"]}
-{"prompt":"Turn on a guardrail that warns me before running anything destructive in the shell.","expect":["skills:gstack-careful"]}
-{"prompt":"Get an independent outside second opinion on my diff — have another AI try to break my code.","expect":["skills:gstack-codex"]}
-{"prompt":"Pick up exactly where I left off earlier — reload the working context I saved.","expect":["skills:gstack-context-restore"]}
-{"prompt":"Save my current progress and working state so I can resume this session later.","expect":["skills:gstack-context-save"]}
-{"prompt":"Do a full security audit of the codebase, hunting for vulnerabilities and OWASP issues.","expect":["skills:gstack-cso"]}
-{"prompt":"Help me design a complete brand and visual system from scratch — typography, color, layout, motion.","expect":["skills:gstack-design-consultation"]}
-{"prompt":"Take the approved mockup and turn it into production-quality HTML and CSS.","expect":["skills:gstack-design-html"]}
-{"prompt":"I have a half-formed idea for a feature and want to think it through before writing any plan","expect":["skills:gsd-explore"]}
-{"prompt":"We just wrapped that phase — pull out the key decisions and lessons we learned from it","expect":["skills:gsd-extract-learnings"]}
-{"prompt":"Just fix this typo in the config quickly, no need for any planning ceremony","expect":["skills:gsd-fast"]}
-{"prompt":"The workflow got stuck and failed halfway — do a post-mortem and tell me what went wrong","expect":["skills:gsd-forensics"]}
-{"prompt":"Build a knowledge graph of this project so I can query relationships between the pieces","expect":["skills:gsd-graphify"]}
-{"prompt":"Check whether my planning folder is intact and repair anything that looks broken or inconsistent","expect":["skills:gsd-health"]}
-{"prompt":"I have a plan written in another file — bring it in and flag any conflicts with our locked decisions","expect":["skills:gsd-import"]}
-{"prompt":"Go through all the open issues and pull requests on the repo and check each against our templates","expect":["skills:gsd-inbox"]}
-{"prompt":"We already have ADRs and a PRD in docs — set up the planning structure from those existing documents","expect":["skills:gsd-ingest-docs"]}
-{"prompt":"Give me a dashboard to oversee all the phases of this milestone and dispatch work from one place","expect":["skills:gsd-manager"]}
-{"prompt":"Analyze this existing codebase and produce structured documents describing its architecture and quality","expect":["skills:gsd-map-codebase"]}
-{"prompt":"Write up a summary of this finished milestone so a new teammate can get up to speed","expect":["skills:gsd-milestone-summary"]}
-{"prompt":"Plan this phase as a thin end-to-end slice driven by a user story, splitting it if it's too big","expect":["skills:gsd-mvp-phase"]}
-{"prompt":"The current release is done — kick off the next cycle with new goals and updated requirements","expect":["skills:gsd-new-milestone"]}
-{"prompt":"Start a brand-new project from scratch, gather the context, and set up the foundational doc","expect":["skills:gsd-new-project"]}
-{"prompt":"Can you get an independent outside opinion on my current diff from another agent?","expect":["skills:claude"]}
-{"prompt":"Pick up where I left off yesterday and reload the state I saved earlier.","expect":["skills:context-restore"]}
-{"prompt":"Stash my current progress, git state, and remaining todos so I can resume later.","expect":["skills:context-save"]}
-{"prompt":"Run a thorough security audit on this repo, check for leaked secrets and supply-chain risks.","expect":["skills:cso"]}
-{"prompt":"I'm starting a fresh product and need a full visual system: fonts, colors, spacing, the works.","expect":["skills:design-consultation"]}
-{"prompt":"Take this approved mockup and turn it into real production-quality HTML and CSS.","expect":["skills:design-html"]}
-{"prompt":"Look over my live site and fix the inconsistent spacing and hierarchy issues you find.","expect":["skills:design-review"]}
-{"prompt":"Generate me several different visual options for this UI so I can compare and pick one.","expect":["skills:design-shotgun"]}
-{"prompt":"Actually walk through my getting-started flow and tell me how good the onboarding feels.","expect":["skills:devex-review"]}
-{"prompt":"There's no documentation for this module yet, write tutorials and reference from scratch.","expect":["skills:document-generate"]}
-{"prompt":"We just merged the PR, now sync the README and changelog to match what shipped.","expect":["skills:document-release"]}
-{"prompt":"While I debug, block any file edits outside this one folder so nothing else gets touched.","expect":["skills:freeze"]}
-{"prompt":"Turn on maximum safety, warn me before destructive commands and lock edits to this directory.","expect":["skills:guard"]}
-{"prompt":"Give me a code quality dashboard with a composite score from the linter, types, and tests.","expect":["skills:health"]}
-{"prompt":"This was working yesterday and now throws a 500, find the actual root cause before fixing.","expect":["skills:investigate"]}
-{"prompt":"Strip out all the debug bridge instrumentation that was added to my iPhone app.","expect":["skills:ios-clean"]}
-{"prompt":"Screenshot every screen on my real iPhone and audit the visuals against Apple's guidelines.","expect":["skills:ios-design-review"]}
-{"prompt":"Take this bug from the iPhone app, fix it, rebuild, and confirm it works on the device.","expect":["skills:ios-fix"]}
-{"prompt":"I already have a bunch of ADRs and a PRD in my docs folder — can you set up the planning structure from those?","expect":["skills:gsd-ingest-docs"]}
-{"prompt":"Give me a dashboard of all my phases so I can run a couple in the background while I work on another","expect":["skills:gsd-manager"]}
-{"prompt":"Analyze this existing repo and produce structured documents describing its architecture and tech stack","expect":["skills:gsd-map-codebase"]}
-{"prompt":"Write a single onboarding overview of everything we built this release so a new teammate can get up to speed","expect":["skills:gsd-milestone-summary"]}
-{"prompt":"Plan phase 4 as a thin vertical slice with a user story, splitting it if it's too big","expect":["skills:gsd-mvp-phase"]}
-{"prompt":"We finished v1, let's kick off the next release cycle and figure out what to build next","expect":["skills:gsd-new-milestone"]}
-{"prompt":"I want to start a brand new project from scratch with full context gathering","expect":["skills:gsd-new-project"]}
-{"prompt":"Pausing for the day mid-phase — save a handoff so I can pick this up later","expect":["skills:gsd-pause-work"]}
-{"prompt":"Insert an urgent task into the roadmap between phase 7 and phase 8","expect":["skills:gsd-phase"]}
-{"prompt":"Build me a detailed executable plan for phase 5 with the research and checking loop","expect":["skills:gsd-plan-phase"]}
-{"prompt":"Loop external AI reviewers on my phase plan and keep replanning until no serious concerns remain","expect":["skills:gsd-plan-review-convergence"]}
-{"prompt":"Make a PR branch that strips out all the planning artifact commits so reviewers only see code","expect":["skills:gsd-pr-branch"]}
-{"prompt":"We just finished v1.0 and want to kick off the next release cycle with fresh goals.","expect":["skills:gsd-new-milestone"]}
-{"prompt":"Help me set up a brand new project from scratch, gathering context and goals first.","expect":["skills:gsd-new-project"]}
-{"prompt":"I'm pausing here for the day mid-phase; save a handoff so I can pick up tomorrow.","expect":["skills:gsd-pause-work"]}
-{"prompt":"Add another step to the roadmap, and let me reorder or drop a couple of the upcoming ones.","expect":["skills:gsd-phase"]}
-{"prompt":"Turn the next roadmap step into a detailed, executable plan with research and verification.","expect":["skills:gsd-plan-phase"]}
-{"prompt":"Loop the plan through external AI reviewers and keep revising until no major concerns remain.","expect":["skills:gsd-plan-review-convergence"]}
-{"prompt":"Make a clean branch for the PR that strips out all the planning artifact commits.","expect":["skills:gsd-pr-branch"]}
-{"prompt":"Analyze my coding habits and build a developer profile that personalizes how you respond.","expect":["skills:gsd-profile-user"]}
-{"prompt":"Where are we on this project, and what should I work on next?","expect":["skills:gsd-progress"]}
-{"prompt":"I have a small one-off task; just do it with atomic commits but skip the heavy planning.","expect":["skills:gsd-quick"]}
-{"prompt":"Pick up where I left off last session with full context restored.","expect":["skills:gsd-resume-work"]}
-{"prompt":"Go through my parked backlog items and promote the worthwhile ones into the current milestone.","expect":["skills:gsd-review-backlog"]}
-{"prompt":"I need to step away mid-task — save where I am so I can pick this up tomorrow","expect":["skills:gsd-pause-work"]}
-{"prompt":"Add a new step to my roadmap, and bump that one urgent task in between two existing ones","expect":["skills:gsd-phase"]}
-{"prompt":"Turn the requirements for this milestone step into a detailed, executable plan file","expect":["skills:gsd-plan-phase"]}
-{"prompt":"Keep running my plan through external AI reviewers and revising until no serious concerns are left","expect":["skills:gsd-plan-review-convergence"]}
-{"prompt":"Make a clean branch for the PR that drops all the planning-doc commits so reviewers only see code","expect":["skills:gsd-pr-branch"]}
-{"prompt":"Analyze how I work from my sessions and build a developer profile that personalizes your responses","expect":["skills:gsd-profile-user"]}
-{"prompt":"Where am I in this project — show me a status report and figure out the next thing to do","expect":["skills:gsd-progress"]}
-{"prompt":"Just knock out this small change with atomic commits and state tracking, skip the heavy ceremony","expect":["skills:gsd-quick"]}
-{"prompt":"Pick up where I left off last session and restore the full project context","expect":["skills:gsd-resume-work"]}
-{"prompt":"Go through my parked future ideas and promote the worthwhile ones into the current milestone","expect":["skills:gsd-review-backlog"]}
-{"prompt":"Have a few other AI command-line tools independently critique my phase plans and collect their feedback","expect":["skills:gsd-review"]}
-{"prompt":"Go back over a finished feature and confirm the security threats we flagged were actually mitigated","expect":["skills:gsd-secure-phase"]}
-{"prompt":"Let me toggle the workflow agent options and pick which model profile this project uses","expect":["skills:gsd-settings"]}
-{"prompt":"Verification passed — now push the branch, open a PR with a generated description, and get it ready to merge","expect":["skills:gsd-ship"]}
-{"prompt":"I approved a mockup for my pricing page, now turn it into real production HTML and CSS","expect":["skills:design-html"]}
-{"prompt":"My live site looks off — inconsistent spacing and weak hierarchy. Audit the visuals and clean it up","expect":["skills:design-review"]}
-{"prompt":"I'm unsure how this dashboard should look. Show me a few visual options to compare and pick from","expect":["skills:design-shotgun"]}
-{"prompt":"Actually walk through our docs and getting-started flow and score how good the onboarding feels","expect":["skills:devex-review"]}
-{"prompt":"This module has no docs at all — write a tutorial, how-to, and reference for it from scratch","expect":["skills:document-generate"]}
-{"prompt":"We just merged a big PR. Update the README and changelog so the docs match what actually shipped","expect":["skills:document-release"]}
-{"prompt":"While I debug, block any edits outside the auth folder so I don't accidentally change unrelated code","expect":["skills:freeze"]}
-{"prompt":"I'm touching production — turn on maximum safety, warn me before destructive commands and lock edits to one folder","expect":["skills:guard"]}
-{"prompt":"Run all the linters, type checks and tests and give me one overall code quality score for this repo","expect":["skills:health"]}
-{"prompt":"Users are hitting 500 errors that started today. Find the actual root cause before changing anything","expect":["skills:investigate"]}
-{"prompt":"Tear out all the debug instrumentation and #if DEBUG hooks we added to the iPhone app earlier","expect":["skills:ios-clean"]}
-{"prompt":"Screenshot every screen on my physical iPhone and grade the visuals against Apple's design guidelines","expect":["skills:ios-design-review"]}
-{"prompt":"There's a bug in my iPhone app on the device — patch it, rebuild, redeploy and confirm the fix","expect":["skills:ios-fix"]}
-{"prompt":"Connect to my real iPhone over USB and run an automated test pass to find bugs in the app","expect":["skills:ios-qa"]}
-{"prompt":"I added new view models to the iPhone app; regenerate the typed debug-bridge accessors to cover them","expect":["skills:ios-sync"]}
-{"prompt":"The PR is approved — merge it, wait for CI and deploy, then confirm production is healthy","expect":["skills:land-and-deploy"]}
-{"prompt":"Show me which version slots are claimed by open PRs and what the next release number would be","expect":["skills:landing-report"]}
-{"prompt":"What patterns have we picked up across past sessions? Show and prune the stale ones","expect":["skills:learn"]}
-{"prompt":"Can you analyze how I work and build a personalized coding-style profile so you adapt to my preferences?","expect":["skills:gsd-profile-user"]}
-{"prompt":"Where are we on this project and what should I tackle next? Just move us forward.","expect":["skills:gsd-progress"]}
-{"prompt":"I just need a small one-off change done with proper commits and tracking, skip the heavy planning.","expect":["skills:gsd-quick"]}
-{"prompt":"Pick up where I left off last time and restore all the context from our previous session.","expect":["skills:gsd-resume-work"]}
-{"prompt":"Go through my parked future ideas and decide which ones to pull into the current milestone.","expect":["skills:gsd-review-backlog"]}
-{"prompt":"Have other AI CLIs like Gemini and Codex independently critique my plan for phase 3.","expect":["skills:gsd-review"]}
-{"prompt":"Go back and confirm the security threats we identified for the finished phase were actually handled.","expect":["skills:gsd-secure-phase"]}
-{"prompt":"I want to change the model and toggle the research and verifier steps in my workflow config.","expect":["skills:gsd-settings"]}
-{"prompt":"Verification passed, so push the branch, open a pull request, and get it ready to merge.","expect":["skills:gsd-ship"]}
-{"prompt":"Let me explore a couple of throwaway HTML layout variations before committing to a design.","expect":["skills:gsd-sketch"]}
-{"prompt":"Before we plan, pin down exactly what this phase must deliver and flag anything ambiguous.","expect":["skills:gsd-spec-phase"]}
-{"prompt":"Build a quick throwaway experiment to prove this approach is feasible before the real build.","expect":["skills:gsd-spike"]}
-{"prompt":"Show me the numbers on this project — phase progress, plan counts, git history, timeline.","expect":["skills:gsd-stats"]}
-{"prompt":"Stop showing me the whole gstack cluster of commands; turn that group off without uninstalling.","expect":["skills:gsd-surface"]}
-{"prompt":"Set up a persistent note that carries context across sessions for work spanning several days.","expect":["skills:gsd-thread"]}
+{"prompt": "set up the local offload harness to delegate grunt work to a free local model", "expect": ["local-offload-setup"]}
+{"prompt": "QA test this web app end-to-end and fix any bugs found", "expect": ["gstack-qa"]}
+{"prompt": "plan a brand new multi-phase project with a full roadmap", "expect": ["gsd-new-project"]}
+{"prompt": "brainstorm a new feature before building it", "expect": ["superpowers:brainstorming"]}
+{"prompt": "write an implementation plan from this spec before I start coding", "expect": ["superpowers:writing-plans"]}
+{"prompt": "find a skill that can scrape a website for me", "expect": ["find-skills"]}
+{"prompt": "check the printing-press catalog for existing CLIs", "expect": ["printing-press-catalog"]}
+{"prompt": "publish this generated CLI to the printing-press-library repo", "expect": ["printing-press-publish"]}
+{"prompt": "score this generated CLI against the Steinberger bar", "expect": ["printing-press-score"]}
+{"prompt": "import existing CLIs into the printing press system", "expect": ["printing-press-import"]}
+{"prompt": "this is a one-off failing test outside any GSD project — debug it systematically using the scientific method", "expect": ["superpowers:systematic-debugging"]}
+{"prompt": "I'm about to claim a fix is done — run verification first", "expect": ["superpowers:verification-before-completion"]}
+{"prompt": "execute all the plans in the current GSD phase", "expect": ["gsd-execute-phase"]}
+{"prompt": "create a detailed PLAN.md for this phase", "expect": ["gsd-plan-phase"]}
+{"prompt": "map out the codebase architecture before starting the build", "expect": ["gsd-map-codebase"]}
+{"prompt": "extract lessons learned and decisions from this completed phase", "expect": ["gsd-extract-learnings"]}
+{"prompt": "create a clean PR branch that strips .planning/ commits", "expect": ["gsd-pr-branch"]}
+{"prompt": "pause work mid-phase and create a handoff document", "expect": ["gsd-pause-work"]}
+{"prompt": "resume work from last session with full context restored", "expect": ["gsd-resume-work"]}
+{"prompt": "investigate a post-mortem for a failed GSD workflow", "expect": ["gsd-forensics"]}
+{"prompt": "run TDD for this new feature — write tests before the implementation", "expect": ["superpowers:test-driven-development"]}
+{"prompt": "I have 5 independent tasks — dispatch them to parallel subagents", "expect": ["superpowers:dispatching-parallel-agents"]}
+{"prompt": "start feature work in an isolated git worktree", "expect": ["superpowers:using-git-worktrees"]}
+{"prompt": "all tests pass — decide how to merge or PR this branch", "expect": ["superpowers:finishing-a-development-branch"]}
+{"prompt": "build a net-new React page with high visual quality", "expect": ["frontend-design:frontend-design"]}
+{"prompt": "browse this live website headlessly to check for visual regressions", "expect": ["gstack"]}
+{"prompt": "turn vague product intent into a precise executable spec", "expect": ["gstack-spec"]}
+{"prompt": "scrape structured data from a web page", "expect": ["gstack-scrape"]}
+{"prompt": "save my current working context before switching tasks", "expect": ["gstack-context-save"]}
+{"prompt": "restore the context I saved earlier", "expect": ["gstack-context-restore"]}
+{"prompt": "do a post-deploy retrospective on this release", "expect": ["gstack-retro"]}
+{"prompt": "monitor the deploy as a canary to catch early regressions", "expect": ["gstack-canary"]}
+{"prompt": "use gstack to investigate the root cause of this production outage", "expect": ["gstack-investigate"]}
+{"prompt": "sync mem0 memory to a new PC so I can pick up where I left off", "expect": ["syncing-mem0-across-pcs"]}
+{"prompt": "clone my full Claude Code setup from my main PC to a new machine", "expect": ["replicating-antigravity-across-pcs"]}
+{"prompt": "automate my Project Zomboid dedicated server with systemd on Ubuntu", "expect": ["pz-server-automation"]}
+{"prompt": "remove the background from this image locally without an API", "expect": ["remove-background"]}
+{"prompt": "write AI video prompts and storyboard for a short film", "expect": ["visual-video"]}
+{"prompt": "review this edited video MP4 for factual errors and editorial issues", "expect": ["video-editor-review"]}
+{"prompt": "scaffold a new Supabase project with RLS and auth", "expect": ["supabase"]}
+{"prompt": "craft a new reusable skill from this successful scrape flow", "expect": ["gstack-skillify"]}
+{"prompt": "review the engineering plan before we start building", "expect": ["gstack-plan-eng-review"]}
+{"prompt": "add a new milestone to this GSD-managed project", "expect": ["gsd-new-milestone"]}
+{"prompt": "review the backlog and promote items to the active milestone", "expect": ["gsd-review-backlog"]}
+{"prompt": "do a devex review of the developer experience for this tool", "expect": ["gstack-devex-review"]}
+{"prompt": "ship and deploy this feature end-to-end including the landing page", "expect": ["gstack-ship"]}
+{"prompt": "Open my staging site in a headless browser, walk the signup flow, and screenshot any broken steps.", "expect": ["gstack"]}
+{"prompt": "I'm moving my WSL box to a newer CUDA toolkit and need to rebuild the local llama.cpp inference engine safely.", "expect": ["cuda-reforge"]}
+{"prompt": "Is there an installable add-on that could give you the ability to handle this task?", "expect": ["find-skills"]}
+{"prompt": "I'm heading to bed — keep an agent looping on this feature until the tests pass.", "expect": ["gnhf"]}
+{"prompt": "Write unit and end-to-end tests for the checkout phase I just finished, based on its acceptance criteria.", "expect": ["gsd-add-tests"]}
+{"prompt": "This next phase builds an LLM-powered system — draft a design contract with an evaluation plan before we code.", "expect": ["gsd-ai-integration-phase"]}
+{"prompt": "Run an automated pass that finds defects, fixes the easy ones, runs tests, and commits each fix.", "expect": ["gsd-audit-fix"]}
+{"prompt": "Before I archive this version, verify the whole milestone actually met its original goals and integrates end-to-end.", "expect": ["gsd-audit-milestone"]}
+{"prompt": "Scan every phase for outstanding manual verification items and give me a prioritized human test plan.", "expect": ["gsd-audit-uat"]}
+{"prompt": "Just power through all the remaining roadmap phases on your own — plan and build each one.", "expect": ["gsd-autonomous"]}
+{"prompt": "Jot this idea down into the parking lot so I don't lose it for later.", "expect": ["gsd-capture"]}
+{"prompt": "My phases folder is cluttered with old finished versions — archive those out of the way.", "expect": ["gsd-cleanup"]}
+{"prompt": "Review the files I changed in phase 3 for bugs and security issues, then summarize findings by severity.", "expect": ["gsd-code-review"]}
+{"prompt": "This release is done — archive it as a shipped version and roll the project forward to the next one.", "expect": ["gsd-complete-milestone"]}
+{"prompt": "Change which model profile and workflow toggles this planning setup uses.", "expect": ["gsd-config"]}
+{"prompt": "Help me track down this intermittent bug methodically so progress survives across context resets.", "expect": ["gsd-debug"]}
+{"prompt": "Before I plan this next chunk of work, ask me the open questions so the decisions are locked in.", "expect": ["gsd-discuss-phase"]}
+{"prompt": "Our README and architecture docs are stale — regenerate them so they match what the code actually does now.", "expect": ["gsd-docs-update"]}
+{"prompt": "We shipped the AI feature but I'm not sure we tested it properly — audit whether the eval coverage matches what we promised.", "expect": ["gsd-eval-review"]}
+{"prompt": "Go ahead and build out all the plans for this stage, running the independent ones in parallel.", "expect": ["gsd-execute-phase"]}
+{"prompt": "I have a rough idea for an auth approach — walk me through it with questions before I commit to anything.", "expect": ["gsd-explore"]}
+{"prompt": "Now that this stage is done, pull out the decisions, lessons, and surprises into a learnings doc.", "expect": ["gsd-extract-learnings"]}
+{"prompt": "Just fix this typo in the config and commit it — way too small to bother with a plan.", "expect": ["gsd-fast"]}
+{"prompt": "This workflow got stuck and I don't know why — dig through the git history and state files to figure out what broke.", "expect": ["gsd-forensics"]}
+{"prompt": "Build me a knowledge graph of this project so I can query how the pieces connect.", "expect": ["gsd-graphify"]}
+{"prompt": "Something feels off with my planning folder — check it for missing or inconsistent files and fix what you can.", "expect": ["gsd-health"]}
+{"prompt": "What commands does this planning system give me — show me the full reference.", "expect": ["gsd-help"]}
+{"prompt": "I have a plan file from outside this project — bring it in, but flag anything that conflicts with our locked decisions.", "expect": ["gsd-import"]}
+{"prompt": "Go through all the open issues and pull requests on the repo and check each against our templates.", "expect": ["gsd-inbox"]}
+{"prompt": "We already have ADRs and a PRD in the repo — bootstrap the planning setup from those existing docs.", "expect": ["gsd-ingest-docs"]}
+{"prompt": "Give me one dashboard to oversee every stage of this milestone and kick off work in the background.", "expect": ["gsd-manager"]}
+{"prompt": "Analyze this existing repo and produce structured docs describing its architecture and tech.", "expect": ["gsd-map-codebase"]}
+{"prompt": "Write a single onboarding overview of everything we built this release so a new teammate can get up to speed.", "expect": ["gsd-milestone-summary"]}
+{"prompt": "Plan this stage as a thin vertical slice with a user story, and split it if it's too big.", "expect": ["gsd-mvp-phase"]}
+{"prompt": "Our first release shipped. I want to kick off the next round of work and define what v1.1 should include.", "expect": ["gsd-new-milestone"]}
+{"prompt": "I'm starting a brand new app from scratch and want to set up the project context and goals before coding.", "expect": ["gsd-new-project"]}
+{"prompt": "I'm leaving for the day mid-task — save where I am so I can pick it back up cleanly tomorrow.", "expect": ["gsd-pause-work"]}
+{"prompt": "Add a new stage to the end of the roadmap, and bump that other one to slot in earlier.", "expect": ["gsd-phase"]}
+{"prompt": "I've got the roadmap stage picked — now write me a detailed, executable build plan for it.", "expect": ["gsd-plan-phase"]}
+{"prompt": "Keep having other AI tools critique this build plan and rewrite it until none flag serious problems.", "expect": ["gsd-plan-review-convergence"]}
+{"prompt": "My PR diff is full of planning docs nobody needs to review — give me a clean branch with just the code.", "expect": ["gsd-pr-branch"]}
+{"prompt": "Build a profile of how I like to code so Claude tailors its responses to my style.", "expect": ["gsd-profile-user"]}
+{"prompt": "Where am I in this project and what should I work on next? Just move me forward.", "expect": ["gsd-progress"]}
+{"prompt": "Small ad-hoc change here — do it with proper atomic commits but skip the whole heavy planning pipeline.", "expect": ["gsd-quick"]}
+{"prompt": "Coming back after a few days off — restore where I left off and tell me what's next.", "expect": ["gsd-resume-work"]}
+{"prompt": "Go through my parked future ideas and decide which ones to pull into the current cycle.", "expect": ["gsd-review-backlog"]}
+{"prompt": "Look over the code I changed in the last batch of work and flag any bugs or security holes.", "expect": ["gsd-code-review"]}
+{"prompt": "We just shipped version 2.0 — archive it and set things up for the next release cycle.", "expect": ["gsd-complete-milestone"]}
+{"prompt": "I want to change which model my planning workflow uses and toggle some of its options.", "expect": ["gsd-config"]}
+{"prompt": "Help me track down this bug methodically so progress survives even if my context gets wiped.", "expect": ["gsd-debug"]}
+{"prompt": "Before we plan the next phase, ask me the questions you need to lock down the decisions.", "expect": ["gsd-discuss-phase"]}
+{"prompt": "Refresh the README and other project docs so they actually match the current code.", "expect": ["gsd-docs-update"]}
+{"prompt": "Check whether the AI phase we built actually has the test coverage its design promised.", "expect": ["gsd-eval-review"]}
+{"prompt": "Run all the plans for this phase, parallelizing the ones that don't depend on each other.", "expect": ["gsd-execute-phase"]}
+{"prompt": "I have a rough idea for the auth approach — walk me through it with questions before I commit.", "expect": ["gsd-explore"]}
+{"prompt": "Pull out the decisions, lessons, and surprises from the phase we just finished.", "expect": ["gsd-extract-learnings"]}
+{"prompt": "Just fix this typo and tweak the config value — too small to bother planning.", "expect": ["gsd-fast"]}
+{"prompt": "My planning workflow got stuck — do a post-mortem on the git history and figure out what broke.", "expect": ["gsd-forensics"]}
+{"prompt": "Build a knowledge graph of the project so I can query relationships between artifacts.", "expect": ["gsd-graphify"]}
+{"prompt": "Check whether my planning directory is in good shape and repair anything broken.", "expect": ["gsd-health"]}
+{"prompt": "What commands does this project workflow system give me — show me the full reference.", "expect": ["gsd-help"]}
+{"prompt": "I have an external plan file — bring it in but warn me if it clashes with our locked decisions.", "expect": ["gsd-import"]}
+{"prompt": "Go through the repo's open issues and pull requests and check each against our templates.", "expect": ["gsd-inbox"]}
+{"prompt": "We have ADRs and PRDs scattered in docs — bootstrap our planning setup from all of them.", "expect": ["gsd-ingest-docs"]}
+{"prompt": "I committed a phase that broke things, can you roll those commits back safely with dependency checks?", "expect": ["gsd-undo"]}
+{"prompt": "Check whether my spec-driven planning toolkit has a newer release and install it, showing me what changed.", "expect": ["gsd-update"]}
+{"prompt": "Go back over a finished phase and audit whether its sampling-rate validation coverage has any gaps to fill.", "expect": ["gsd-validate-phase"]}
+{"prompt": "Walk me through testing the feature we just built, one check at a time, to confirm it actually works for users.", "expect": ["gsd-verify-work"]}
+{"prompt": "Set up an isolated copy of the repo with its own planning folder so I can work without touching the main one.", "expect": ["gsd-workspace"]}
+{"prompt": "I'm running several parallel tracks for this milestone — list them, switch active one, and show progress.", "expect": ["gsd-workstreams"]}
+{"prompt": "Run the whole review gauntlet on my plan automatically and make the taste-call decisions for me.", "expect": ["gstack-autoplan"]}
+{"prompt": "I want to compare how Claude, GPT and Gemini each perform on this skill to decide which model to use.", "expect": ["gstack-benchmark-models"]}
+{"prompt": "Measure my site's page-load speed and flag any performance regression since last time.", "expect": ["gstack-benchmark"]}
+{"prompt": "Open this URL in a fast headless browser and grab a screenshot so I can QA the page.", "expect": ["gstack"]}
+{"prompt": "Right after I deploy, keep watching the live site for errors for a while and alert me.", "expect": ["gstack-canary"]}
+{"prompt": "Turn on a guardrail that warns me before running anything destructive in the shell.", "expect": ["gstack-careful"]}
+{"prompt": "Get an independent outside second opinion on my diff — have another AI try to break my code.", "expect": ["gstack-codex"]}
+{"prompt": "Pick up exactly where I left off earlier — reload the working context I saved.", "expect": ["gstack-context-restore"]}
+{"prompt": "Save my current progress and working state so I can resume this session later.", "expect": ["gstack-context-save"]}
+{"prompt": "Do a full security audit of the codebase, hunting for vulnerabilities and OWASP issues.", "expect": ["gstack-cso"]}
+{"prompt": "Help me design a complete brand and visual system from scratch — typography, color, layout, motion.", "expect": ["gstack-design-consultation"]}
+{"prompt": "Take the approved mockup and turn it into production-quality HTML and CSS.", "expect": ["gstack-design-html"]}
+{"prompt": "I have a half-formed idea for a feature and want to think it through before writing any plan", "expect": ["gsd-explore"]}
+{"prompt": "We just wrapped that phase — pull out the key decisions and lessons we learned from it", "expect": ["gsd-extract-learnings"]}
+{"prompt": "Just fix this typo in the config quickly, no need for any planning ceremony", "expect": ["gsd-fast"]}
+{"prompt": "The workflow got stuck and failed halfway — do a post-mortem and tell me what went wrong", "expect": ["gsd-forensics"]}
+{"prompt": "Build a knowledge graph of this project so I can query relationships between the pieces", "expect": ["gsd-graphify"]}
+{"prompt": "Check whether my planning folder is intact and repair anything that looks broken or inconsistent", "expect": ["gsd-health"]}
+{"prompt": "I have a plan written in another file — bring it in and flag any conflicts with our locked decisions", "expect": ["gsd-import"]}
+{"prompt": "Go through all the open issues and pull requests on the repo and check each against our templates", "expect": ["gsd-inbox"]}
+{"prompt": "We already have ADRs and a PRD in docs — set up the planning structure from those existing documents", "expect": ["gsd-ingest-docs"]}
+{"prompt": "Give me a dashboard to oversee all the phases of this milestone and dispatch work from one place", "expect": ["gsd-manager"]}
+{"prompt": "Analyze this existing codebase and produce structured documents describing its architecture and quality", "expect": ["gsd-map-codebase"]}
+{"prompt": "Write up a summary of this finished milestone so a new teammate can get up to speed", "expect": ["gsd-milestone-summary"]}
+{"prompt": "Plan this phase as a thin end-to-end slice driven by a user story, splitting it if it's too big", "expect": ["gsd-mvp-phase"]}
+{"prompt": "The current release is done — kick off the next cycle with new goals and updated requirements", "expect": ["gsd-new-milestone"]}
+{"prompt": "Start a brand-new project from scratch, gather the context, and set up the foundational doc", "expect": ["gsd-new-project"]}
+{"prompt": "Can you get an independent outside opinion on my current diff from another agent?", "expect": ["claude"]}
+{"prompt": "Pick up where I left off yesterday and reload the state I saved earlier.", "expect": ["gstack-context-restore"]}
+{"prompt": "Stash my current progress, git state, and remaining todos so I can resume later.", "expect": ["gstack-context-save"]}
+{"prompt": "Run a thorough security audit on this repo, check for leaked secrets and supply-chain risks.", "expect": ["gstack-cso"]}
+{"prompt": "I'm starting a fresh product and need a full visual system: fonts, colors, spacing, the works.", "expect": ["gstack-design-consultation"]}
+{"prompt": "Take this approved mockup and turn it into real production-quality HTML and CSS.", "expect": ["gstack-design-html"]}
+{"prompt": "Look over my live site and fix the inconsistent spacing and hierarchy issues you find.", "expect": ["gstack-design-review"]}
+{"prompt": "Generate me several different visual options for this UI so I can compare and pick one.", "expect": ["gstack-design-shotgun"]}
+{"prompt": "Actually walk through my getting-started flow and tell me how good the onboarding feels.", "expect": ["gstack-devex-review"]}
+{"prompt": "There's no documentation for this module yet, write tutorials and reference from scratch.", "expect": ["gstack-document-generate"]}
+{"prompt": "We just merged the PR, now sync the README and changelog to match what shipped.", "expect": ["gstack-document-release"]}
+{"prompt": "While I debug, block any file edits outside this one folder so nothing else gets touched.", "expect": ["gstack-freeze"]}
+{"prompt": "Turn on maximum safety, warn me before destructive commands and lock edits to this directory.", "expect": ["gstack-guard"]}
+{"prompt": "Give me a code quality dashboard with a composite score from the linter, types, and tests.", "expect": ["gstack-health"]}
+{"prompt": "This was working yesterday and now throws a 500, find the actual root cause before fixing.", "expect": ["gstack-investigate"]}
+{"prompt": "Strip out all the debug bridge instrumentation that was added to my iPhone app.", "expect": ["ios-clean"]}
+{"prompt": "Screenshot every screen on my real iPhone and audit the visuals against Apple's guidelines.", "expect": ["ios-design-review"]}
+{"prompt": "Take this bug from the iPhone app, fix it, rebuild, and confirm it works on the device.", "expect": ["ios-fix"]}
+{"prompt": "I already have a bunch of ADRs and a PRD in my docs folder — can you set up the planning structure from those?", "expect": ["gsd-ingest-docs"]}
+{"prompt": "Give me a dashboard of all my phases so I can run a couple in the background while I work on another", "expect": ["gsd-manager"]}
+{"prompt": "Analyze this existing repo and produce structured documents describing its architecture and tech stack", "expect": ["gsd-map-codebase"]}
+{"prompt": "Write a single onboarding overview of everything we built this release so a new teammate can get up to speed", "expect": ["gsd-milestone-summary"]}
+{"prompt": "Plan phase 4 as a thin vertical slice with a user story, splitting it if it's too big", "expect": ["gsd-mvp-phase"]}
+{"prompt": "We finished v1, let's kick off the next release cycle and figure out what to build next", "expect": ["gsd-new-milestone"]}
+{"prompt": "I want to start a brand new project from scratch with full context gathering", "expect": ["gsd-new-project"]}
+{"prompt": "Pausing for the day mid-phase — save a handoff so I can pick this up later", "expect": ["gsd-pause-work"]}
+{"prompt": "Insert an urgent task into the roadmap between phase 7 and phase 8", "expect": ["gsd-phase"]}
+{"prompt": "Build me a detailed executable plan for phase 5 with the research and checking loop", "expect": ["gsd-plan-phase"]}
+{"prompt": "Loop external AI reviewers on my phase plan and keep replanning until no serious concerns remain", "expect": ["gsd-plan-review-convergence"]}
+{"prompt": "Make a PR branch that strips out all the planning artifact commits so reviewers only see code", "expect": ["gsd-pr-branch"]}
+{"prompt": "We just finished v1.0 and want to kick off the next release cycle with fresh goals.", "expect": ["gsd-new-milestone"]}
+{"prompt": "Help me set up a brand new project from scratch, gathering context and goals first.", "expect": ["gsd-new-project"]}
+{"prompt": "I'm pausing here for the day mid-phase; save a handoff so I can pick up tomorrow.", "expect": ["gsd-pause-work"]}
+{"prompt": "Add another step to the roadmap, and let me reorder or drop a couple of the upcoming ones.", "expect": ["gsd-phase"]}
+{"prompt": "Turn the next roadmap step into a detailed, executable plan with research and verification.", "expect": ["gsd-plan-phase"]}
+{"prompt": "Loop the plan through external AI reviewers and keep revising until no major concerns remain.", "expect": ["gsd-plan-review-convergence"]}
+{"prompt": "Make a clean branch for the PR that strips out all the planning artifact commits.", "expect": ["gsd-pr-branch"]}
+{"prompt": "Analyze my coding habits and build a developer profile that personalizes how you respond.", "expect": ["gsd-profile-user"]}
+{"prompt": "Where are we on this project, and what should I work on next?", "expect": ["gsd-progress"]}
+{"prompt": "I have a small one-off task; just do it with atomic commits but skip the heavy planning.", "expect": ["gsd-quick"]}
+{"prompt": "Pick up where I left off last session with full context restored.", "expect": ["gsd-resume-work"]}
+{"prompt": "Go through my parked backlog items and promote the worthwhile ones into the current milestone.", "expect": ["gsd-review-backlog"]}
+{"prompt": "I need to step away mid-task — save where I am so I can pick this up tomorrow", "expect": ["gsd-pause-work"]}
+{"prompt": "Add a new step to my roadmap, and bump that one urgent task in between two existing ones", "expect": ["gsd-phase"]}
+{"prompt": "Turn the requirements for this milestone step into a detailed, executable plan file", "expect": ["gsd-plan-phase"]}
+{"prompt": "Keep running my plan through external AI reviewers and revising until no serious concerns are left", "expect": ["gsd-plan-review-convergence"]}
+{"prompt": "Make a clean branch for the PR that drops all the planning-doc commits so reviewers only see code", "expect": ["gsd-pr-branch"]}
+{"prompt": "Analyze how I work from my sessions and build a developer profile that personalizes your responses", "expect": ["gsd-profile-user"]}
+{"prompt": "Where am I in this project — show me a status report and figure out the next thing to do", "expect": ["gsd-progress"]}
+{"prompt": "Just knock out this small change with atomic commits and state tracking, skip the heavy ceremony", "expect": ["gsd-quick"]}
+{"prompt": "Pick up where I left off last session and restore the full project context", "expect": ["gsd-resume-work"]}
+{"prompt": "Go through my parked future ideas and promote the worthwhile ones into the current milestone", "expect": ["gsd-review-backlog"]}
+{"prompt": "Have a few other AI command-line tools independently critique my phase plans and collect their feedback", "expect": ["gsd-review"]}
+{"prompt": "Go back over a finished feature and confirm the security threats we flagged were actually mitigated", "expect": ["gsd-secure-phase"]}
+{"prompt": "Let me toggle the workflow agent options and pick which model profile this project uses", "expect": ["gsd-settings"]}
+{"prompt": "Verification passed — now push the branch, open a PR with a generated description, and get it ready to merge", "expect": ["gsd-ship"]}
+{"prompt": "I approved a mockup for my pricing page, now turn it into real production HTML and CSS", "expect": ["gstack-design-html"]}
+{"prompt": "My live site looks off — inconsistent spacing and weak hierarchy. Audit the visuals and clean it up", "expect": ["gstack-design-review"]}
+{"prompt": "I'm unsure how this dashboard should look. Show me a few visual options to compare and pick from", "expect": ["gstack-design-shotgun"]}
+{"prompt": "Actually walk through our docs and getting-started flow and score how good the onboarding feels", "expect": ["gstack-devex-review"]}
+{"prompt": "This module has no docs at all — write a tutorial, how-to, and reference for it from scratch", "expect": ["gstack-document-generate"]}
+{"prompt": "We just merged a big PR. Update the README and changelog so the docs match what actually shipped", "expect": ["gstack-document-release"]}
+{"prompt": "While I debug, block any edits outside the auth folder so I don't accidentally change unrelated code", "expect": ["gstack-freeze"]}
+{"prompt": "I'm touching production — turn on maximum safety, warn me before destructive commands and lock edits to one folder", "expect": ["gstack-guard"]}
+{"prompt": "Run all the linters, type checks and tests and give me one overall code quality score for this repo", "expect": ["gstack-health"]}
+{"prompt": "Users are hitting 500 errors that started today. Find the actual root cause before changing anything", "expect": ["gstack-investigate"]}
+{"prompt": "Tear out all the debug instrumentation and #if DEBUG hooks we added to the iPhone app earlier", "expect": ["ios-clean"]}
+{"prompt": "Screenshot every screen on my physical iPhone and grade the visuals against Apple's design guidelines", "expect": ["ios-design-review"]}
+{"prompt": "There's a bug in my iPhone app on the device — patch it, rebuild, redeploy and confirm the fix", "expect": ["ios-fix"]}
+{"prompt": "Connect to my real iPhone over USB and run an automated test pass to find bugs in the app", "expect": ["ios-qa"]}
+{"prompt": "I added new view models to the iPhone app; regenerate the typed debug-bridge accessors to cover them", "expect": ["ios-sync"]}
+{"prompt": "The PR is approved — merge it, wait for CI and deploy, then confirm production is healthy", "expect": ["gstack-land-and-deploy"]}
+{"prompt": "Show me which version slots are claimed by open PRs and what the next release number would be", "expect": ["gstack-landing-report"]}
+{"prompt": "What patterns have we picked up across past sessions? Show and prune the stale ones", "expect": ["gstack-learn"]}
+{"prompt": "Can you analyze how I work and build a personalized coding-style profile so you adapt to my preferences?", "expect": ["gsd-profile-user"]}
+{"prompt": "Where are we on this project and what should I tackle next? Just move us forward.", "expect": ["gsd-progress"]}
+{"prompt": "I just need a small one-off change done with proper commits and tracking, skip the heavy planning.", "expect": ["gsd-quick"]}
+{"prompt": "Pick up where I left off last time and restore all the context from our previous session.", "expect": ["gsd-resume-work"]}
+{"prompt": "Go through my parked future ideas and decide which ones to pull into the current milestone.", "expect": ["gsd-review-backlog"]}
+{"prompt": "Have other AI CLIs like Gemini and Codex independently critique my plan for phase 3.", "expect": ["gsd-review"]}
+{"prompt": "Go back and confirm the security threats we identified for the finished phase were actually handled.", "expect": ["gsd-secure-phase"]}
+{"prompt": "I want to change the model and toggle the research and verifier steps in my workflow config.", "expect": ["gsd-settings"]}
+{"prompt": "Verification passed, so push the branch, open a pull request, and get it ready to merge.", "expect": ["gsd-ship"]}
+{"prompt": "Let me explore a couple of throwaway HTML layout variations before committing to a design.", "expect": ["gsd-sketch"]}
+{"prompt": "Before we plan, pin down exactly what this phase must deliver and flag anything ambiguous.", "expect": ["gsd-spec-phase"]}
+{"prompt": "Build a quick throwaway experiment to prove this approach is feasible before the real build.", "expect": ["gsd-spike"]}
+{"prompt": "Show me the numbers on this project — phase progress, plan counts, git history, timeline.", "expect": ["gsd-stats"]}
+{"prompt": "Stop showing me the whole gstack cluster of commands; turn that group off without uninstalling.", "expect": ["gsd-surface"]}
+{"prompt": "Set up a persistent note that carries context across sessions for work spanning several days.", "expect": ["gsd-thread"]}

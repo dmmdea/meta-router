@@ -26,32 +26,77 @@ type hookInput struct {
 type scoredRetriever interface {
 	RetrieveScored(prompt string, k int) ([]retrievers.Scored, float64, error)
 }
-type lexicalRetriever interface {
-	Retrieve(prompt string, k int) ([]string, error)
+type lexicalScorer interface {
+	RetrieveScored(prompt string, k int) []retrievers.Scored
 }
 
-// failedRetriever stands in for a hybrid that could not be built, so decide
-// uniformly takes its BM25-fallback branch (no untested side path in main).
+// failedRetriever stands in for a primary ranker that could not be built, so
+// decide uniformly takes its BM25-fallback branch (no untested side path in main).
 type failedRetriever struct{ err error }
 
 func (f failedRetriever) RetrieveScored(string, int) ([]retrievers.Scored, float64, error) {
 	return nil, 0, f.err
 }
 
-// decide is the pure surfacing decision: try the hybrid (semantic+lexical) and
-// gate on the top cosine; if the embedder errored, surface nothing (mode
+// BM25-fallback precision gate, derived 2026-07-04 from the 236-case goldset
+// (testdata/goldset*.jsonl) over the real 148-skill corpus:
+//   - raw top-1 BM25 >= 18 OR top-1/(prompt tokens) >= 1.5 fired on 14
+//     winnable cases with 14 correct top-1s (precision 1.000, recall 0.165),
+//     and on only 3/151 cases whose target skill is not installed — each a
+//     plausible neighbor (e.g. "execute all plans in the current GSD phase"
+//     → superpowers:executing-plans).
+//   - the obvious alternative — an exact skill-name token in the prompt —
+//     measured only 0.25 precision (a name mention usually refers to the
+//     FAMILY: "use gstack to investigate…" expects gstack-investigate), so
+//     it is deliberately NOT a gate here.
+//
+// The per-token component catches short, sharply lexical prompts; the raw
+// component catches longer prompts with an overwhelming match. Only the
+// single top match is surfaced: this path runs with the embedder down, where
+// a wrong surfacing is worse than silence (the reason the old ungated
+// fallback was removed). ~16% recall is acceptable for a fallback whose
+// alternative is surfacing nothing.
+const (
+	bm25RawGate      = 18.0
+	bm25PerTokenGate = 1.5
+)
+
+// bm25Fallback returns at most one id: the top BM25 match, and only when it
+// clears the precision gate above.
+func bm25Fallback(prompt string, lex lexicalScorer) []string {
+	if lex == nil {
+		return nil
+	}
+	top := lex.RetrieveScored(prompt, 1)
+	if len(top) == 0 {
+		return nil
+	}
+	qTokens := len(strings.Fields(prompt))
+	if qTokens < 1 {
+		qTokens = 1
+	}
+	if top[0].Score >= bm25RawGate || top[0].Score/float64(qTokens) >= bm25PerTokenGate {
+		return []string{top[0].ID}
+	}
+	return nil
+}
+
+// decide is the pure surfacing decision: rank with the primary retriever
+// (embed-only by default; hybrid RRF behind -ranker=hybrid) and gate on the
+// top cosine. If the embedder errored, fall back to BM25 under a strict
+// precision gate (mode "bm25-fallback") or stay silent (mode
 // "embedder-down"); if the prompt is too short, surface nothing (mode
 // "too-short"). Returns the ids to surface, the top cosine (0 when not
 // applicable), and the mode for logging.
-func decide(prompt string, k int, minCos float64, minLen int, hyb scoredRetriever, lex lexicalRetriever) ([]string, float64, string) {
+func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string) {
 	if len(strings.TrimSpace(prompt)) < minLen {
 		return nil, 0, "too-short"
 	}
-	res, topCos, err := hyb.RetrieveScored(prompt, k)
+	res, topCos, err := primary.RetrieveScored(prompt, k)
 	if err != nil {
-		// Embedder unavailable — log the mode but surface nothing.
-		// The lexical retriever (lex) remains wired for a future gated path.
-		_ = lex
+		if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
+			return ids, 0, "bm25-fallback"
+		}
 		return nil, 0, "embedder-down"
 	}
 	if topCos < minCos {
@@ -61,7 +106,7 @@ func decide(prompt string, k int, minCos float64, minLen int, hyb scoredRetrieve
 	for i, s := range res {
 		ids[i] = s.ID
 	}
-	return ids, topCos, "hybrid"
+	return ids, topCos, primaryMode
 }
 
 func formatContext(byID map[string]catalog.Skill, ids []string) string {
@@ -80,7 +125,9 @@ func formatContext(byID map[string]catalog.Skill, ids []string) string {
 		if len(desc) > 140 {
 			desc = desc[:140] + "…"
 		}
-		fmt.Fprintf(&b, "- %s (%s): %s\n", s.Name, s.Source, desc)
+		// s.ID is the INVOCABLE name ("gstack-qa", "superpowers:brainstorming")
+		// — surface exactly what the Skill tool accepts, never an internal name.
+		fmt.Fprintf(&b, "- %s (%s): %s\n", s.ID, s.Source, desc)
 		wrote++
 	}
 	if wrote == 0 {
@@ -116,9 +163,10 @@ func main() {
 	indexPath := flag.String("index", "", "index path (default ~/.meta-router/index.json)")
 	logPath := flag.String("log", "", "usage log path (default ~/.meta-router/usage.jsonl)")
 	minCos := flag.Float64("min-cosine", 0.55, "min top cosine to surface (gate)")
-	minLen := flag.Int("min-len", 12, "min prompt length (chars, trimmed) to attempt retrieval")
+	minLen := flag.Int("min-len", 6, "min prompt length (chars, trimmed) to attempt retrieval")
 	k := flag.Int("k", 3, "max skills to surface")
 	timeoutMs := flag.Int("timeout-ms", 300, "hard deadline for the whole retrieve")
+	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only; measured better on the goldset) or "hybrid" (BM25+embed RRF)`)
 	flag.Parse()
 
 	// Always exit 0 — fail-open is absolute.
@@ -159,7 +207,7 @@ func main() {
 			ip = p
 		}
 	}
-	idx, err := index.Load(ip)
+	idx, err := index.LoadFast(ip) // index.bin sidecar when fresh, else JSON
 	if err != nil {
 		rec.Err = "load index: " + err.Error()
 		return // no index yet → surface nothing (run mr-index build)
@@ -175,12 +223,28 @@ func main() {
 	if *timeoutMs > 50 {
 		embedTO = time.Duration(*timeoutMs-50) * time.Millisecond
 	}
-	hyb, herr := retrievers.NewHybridFromIndex(skills, idx.Vectors(), *endpoint, embedTO)
+	primaryMode := *ranker
 	var sr scoredRetriever
-	if herr != nil {
-		sr = failedRetriever{herr}
-	} else {
-		sr = hyb
+	switch *ranker {
+	case "hybrid":
+		hyb, herr := retrievers.NewHybridFromIndex(skills, idx.Vectors(), *endpoint, embedTO)
+		if herr != nil {
+			sr = failedRetriever{herr}
+		} else {
+			sr = hyb
+		}
+	default: // "embed" — primary ranking is embed-only cosine ordering
+		primaryMode = "embed"
+		vecs := idx.Vectors()
+		if len(skills) != len(vecs) {
+			sr = failedRetriever{fmt.Errorf("index: %d skills but %d vectors", len(skills), len(vecs))}
+		} else {
+			ids := make([]string, len(skills))
+			for i, s := range skills {
+				ids[i] = s.ID
+			}
+			sr = retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO)
+		}
 	}
 	bm25 := retrievers.NewBM25(skills)
 
@@ -192,7 +256,7 @@ func main() {
 	}
 	ch := make(chan result, 1)
 	go func() {
-		ids, topCos, mode := decide(in.Prompt, *k, *minCos, *minLen, sr, bm25)
+		ids, topCos, mode := decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
 		ch <- result{ids, topCos, mode}
 	}()
 

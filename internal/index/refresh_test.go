@@ -19,7 +19,7 @@ func TestRefresh_OnlyEmbedsChanged(t *testing.T) {
 	// harvest seam returns: a (unchanged), b (changed desc), c (new); b's old is gone
 	bNew := catalog.Skill{ID: "skills:b", Name: "b", Description: "beta-NEW"}
 	c := catalog.Skill{ID: "skills:c", Name: "c", Description: "gamma"}
-	harvestFn = func(roots []string) ([]catalog.Skill, error) {
+	harvestFn = func(roots []catalog.Root) ([]catalog.Skill, error) {
 		return []catalog.Skill{a, bNew, c}, nil
 	}
 	var embedded []string

@@ -17,16 +17,18 @@
 
 Claude Code can install far more skills than it can keep in context. The skill list is budgeted to a small fraction of the context window, with a per-skill description cap, and **once you pass roughly 30–50 skills the least-recently-used ones get silently dropped** — so your long-tail skills exist on disk but never get surfaced to the model.
 
-**meta-router** is a `UserPromptSubmit` hook that fixes this with *retrieve-before-expose*: for every prompt, it retrieves the few most relevant installed skills using a hybrid lexical + semantic search over a locally built index, and injects them as `additionalContext`. The model sees exactly the skills that matter for *this* task, even if you have hundreds installed. It runs entirely on your machine — no API keys, no data leaves the box — by reusing a local embedding endpoint you already have. And it is **strictly additive and fail-open**: on any error, timeout, or cold embedder, it surfaces nothing and exits cleanly, so it can never block or break a prompt.
+**meta-router** is a `UserPromptSubmit` hook that fixes this with *retrieve-before-expose*: for every prompt, it retrieves the few most relevant installed skills using semantic search over a locally built index, and injects them as `additionalContext`. The model sees exactly the skills that matter for *this* task, even if you have hundreds installed. It runs entirely on your machine — no API keys, no data leaves the box — by reusing a local embedding endpoint you already have. And it is **strictly additive and fail-open**: on any error, timeout, or cold embedder, it degrades to a precision-gated lexical fallback or to silence, and always exits cleanly — it can never block or break a prompt.
 
 ## Features
 
 - **Fixes the dropped-long-tail problem** — relevant skills get surfaced regardless of how many you have installed.
-- **Hybrid retrieval** — BM25 (lexical) + EmbeddingGemma cosine (semantic), fused with Reciprocal Rank Fusion (RRF) for robust ranking.
+- **Covers plugin skills too** — indexes `~/.claude/skills` *and* every installed plugin's skills (superpowers, huggingface-skills, …), surfacing them under their invocable names (`superpowers:brainstorming`).
+- **Embed-primary retrieval** — EmbeddingGemma cosine ranking (measured better than the previous BM25+RRF hybrid on the gold-set; the hybrid remains available via `-ranker=hybrid`).
 - **Confidence-gated** — only surfaces when the top semantic match clears a cosine threshold, so quiet prompts stay quiet (no noise).
 - **Fully local & private** — embeddings run against a local OpenAI-compatible endpoint; prompts are never sent to any cloud, and the usage log stores only a hash + length, never raw text.
-- **Fail-open by design** — a 300 ms hard deadline, BM25 fallback when the embedder is cold, and an unconditional clean exit. It cannot wedge your prompt.
-- **Cheap incremental index** — a hash-diff `refresh` re-embeds only the skills whose content changed, fast enough to run on every session start.
+- **Fail-open by design** — a hard per-prompt deadline, a ~200 ms connect timeout so a dead embedder fails fast, a *precision-gated* BM25 fallback when the embedder is down (it surfaces the single top lexical match only on overwhelming evidence — otherwise silence), and an unconditional clean exit. It cannot wedge your prompt.
+- **Cheap incremental index** — a hash-diff `refresh` re-embeds only the skills whose content changed, fast enough to run on every session start; a `refresh.log` status line and a mass-removal guard (`--force` to override) make it safe to run unattended.
+- **Fast per-prompt loads** — a binary `index.bin` sidecar (float32 vectors, gob) parses ~10× faster than the JSON index; JSON stays the source of truth and the automatic fallback.
 - **Single static Go binaries** — no runtime, no daemon of its own.
 - **Bonus offload nudge** — detects mechanical text tasks (summarize / classify / extract / triage over a pasted block) and gently points at free local tools instead of burning cloud context.
 
@@ -85,20 +87,24 @@ meta-router runs as two Claude Code hooks. **It never edits `settings.json` for 
 
 > On Windows, supplying `args` makes Claude Code spawn the binary directly without a shell, which avoids any misinterpretation of a `C:\\...` path. `mr-hook` takes no arguments (it reads the prompt JSON from stdin); `mr-index` takes `refresh` as a single argument.
 
-To disable instantly, remove the two hook entries again — nothing else persists except the index and log under `~/.meta-router/`.
+To disable instantly, remove the two hook entries again — nothing else persists except the files under `~/.meta-router/` (`index.json` + `index.bin` sidecar, one dated `index.json.bak-*`, `roots.json`, `refresh.log`, `usage.jsonl`, and — once the outcome hook is wired — `outcomes.jsonl`).
 
 ## Usage
 
 ### `mr-index` — build and refresh the index
 
 ```bash
-mr-index build      # embed all skills from scratch → ~/.meta-router/index.json
+mr-index build      # embed all skills from scratch → ~/.meta-router/index.json (+ index.bin sidecar)
 mr-index refresh    # hash-diff: re-embed only changed/new skills, drop removed ones (fast)
 ```
 
-Flags: `-skill-roots` (comma-separated, default `~/.claude/skills`), `-endpoint` (default `http://127.0.0.1:11436`), `-out` (default `~/.meta-router/index.json`).
+Flags: `-skill-roots` (comma-separated override), `-endpoint` (default `http://127.0.0.1:11436`), `-out` (default `~/.meta-router/index.json`), `-force` (refresh only: allow removing >30% of entries).
 
-The indexer walks each root for `*/SKILL.md`, parses the YAML frontmatter (`name`, `description`, `when_to_use` — including block-scalar `>`/`|` descriptions, which most skills use), dedups by id, and embeds the combined text. Unparseable skills are skipped, never fatal.
+**Root discovery & `roots.json`.** With no `-skill-roots`, the root set is `~/.claude/skills` (the user pack) plus every installed plugin's skills dir, discovered from `~/.claude/plugins/installed_plugins.json` (which pins each plugin's active version; a direct cache scan is the fallback). `build` re-discovers and persists the set to `roots.json` next to the index; `refresh` reads `roots.json` (creating it if absent) — so the no-flags SessionStart `mr-index refresh` always sees the full set without touching `settings.json`.
+
+The indexer walks each root for `SKILL.md` files (skipping hidden dirs like `.agents/`, installer `temp_git_*`/`temp_subdir_*` clones, and `node_modules`), parses the YAML frontmatter (`name`, `description`, `when_to_use` — including block-scalar `>`/`|` descriptions), collapses description-identical twin copies to the top-level invocable one, dedups by id, and embeds the combined text. Skills are identified by their **invocable** name: the skill's dir name for user skills, `<plugin>:<skill>` for plugin skills. Unparseable skills are skipped, never fatal.
+
+**Refresh safety.** Every `refresh` run appends one JSON status line to `refresh.log` (timestamp, entries before/after, added/removed/re-embedded, duration, ok/error). A refresh that would remove more than 30% of existing entries — usually a symptom of a wrong root set, not of mass uninstalls — is refused, printing exactly what it would remove; rerun with `-force` if intended. Each index overwrite also keeps exactly one dated backup (`index.json.bak-YYYYMMDD-HHMMSS`), pruning older ones.
 
 ### `mr-hook` — the per-prompt surfacer
 
@@ -114,23 +120,41 @@ Tuning flags (pass them in the hook `command`, e.g. `mr-hook -min-cosine 0.60`):
 |---|---|---|
 | `-min-cosine` | `0.55` | Confidence gate: minimum top cosine to surface anything. Raise it if irrelevant skills appear; lower it if relevant ones are missed. |
 | `-k` | `3` | Max skills to surface per prompt. |
-| `-min-len` | `12` | Min trimmed prompt length (chars) before retrieval is attempted. |
+| `-min-len` | `6` | Min trimmed prompt length (chars) before retrieval is attempted. |
+| `-ranker` | `embed` | Primary ranking: `embed` (cosine-only) or `hybrid` (BM25+embed RRF). |
 | `-timeout-ms` | `300` | Hard deadline for the whole retrieve. On overrun, surface nothing. |
 | `-endpoint` | `http://127.0.0.1:11436` | Embedding endpoint. |
-| `-index` | `~/.meta-router/index.json` | Index path. |
+| `-index` | `~/.meta-router/index.json` | Index path (`index.bin` sidecar is used automatically when fresh). |
 | `-log` | `~/.meta-router/usage.jsonl` | Usage-log path. |
 
 ### `mr-eval` — measure retrieval quality
 
-A benchmarking tool that scores retrievers (BM25, embedding-only, hybrid) against a labeled gold-set, reporting recall@1/@3/@5, MRR, and median latency — useful for tuning or for validating a change to the retrieval logic.
+A benchmarking tool that scores retrievers (BM25, embedding-only, hybrid) against a labeled gold-set, reporting recall@1/@3/@5, MRR, and median latency — useful for tuning or for validating a change to the retrieval logic. It evaluates over the same discovered root set the hook indexes, and reports both the full gold-set and the *covered-only* subset (cases whose expected skill is actually installed), so uninstalled targets can't mask ranking regressions.
 
 ```bash
 mr-eval -goldset testdata/goldset.jsonl
 ```
 
+### `mr-outcomes` — did surfaced skills get used?
+
+Joins `usage.jsonl` surfacings with Skill-tool invocations and reports the surfaced→invoked hit-rate, overall and per skill:
+
+```bash
+mr-outcomes                 # ~/.meta-router/{usage,outcomes}.jsonl, 30-minute window
+mr-outcomes -window-min 10  # stricter attribution
+```
+
+It reads `~/.meta-router/outcomes.jsonl`, one JSON object per line:
+
+```json
+{"ts_unix": 1751600000, "skill": "superpowers:brainstorming"}
+```
+
+where `skill` is the invocable skill name exactly as the Skill tool receives it (identical to the ids mr-hook surfaces). The file is expected to be written by a `PostToolUse` hook on the Skill tool — wiring that hook is a deployment step outside these binaries; until it exists, `mr-outcomes` reports the surfacing side against zero invocations.
+
 ## How it works
 
-The pipeline is **retrieve → fuse → gate → inject**:
+The pipeline is **retrieve → gate → inject**:
 
 ```
 prompt (stdin JSON)
@@ -138,39 +162,49 @@ prompt (stdin JSON)
    ├─ too short? ───────────────────────────────────► surface nothing
    │
    ▼
-Load ~/.meta-router/index.json  (cached skill vectors, built once)
+Load ~/.meta-router/index.bin (fast sidecar; falls back to index.json)
    │
-   ├──────────────┐
-   ▼              ▼
-BM25 over      EmbeddingGemma cosine
-skill texts    (embed the QUERY once,
-(lexical)       score vs cached vectors)
-   │              │  └─► top cosine = confidence signal
-   └──────┬───────┘
-          ▼
-   Reciprocal Rank Fusion (RRF)  →  fused top-k
-          │
-          ▼
-   top cosine ≥ -min-cosine ?  ──no──►  surface nothing (gated-empty)
-          │ yes
-          ▼
-   inject top-k skills as additionalContext  →  stdout hook JSON
+   ▼
+EmbeddingGemma cosine ranking          embedder down?
+(embed the QUERY once,          ──────► BM25 fallback under a strict
+ score vs cached vectors)               precision gate: surface the single
+   │  └─► top cosine = confidence       top lexical match only on
+   ▼      signal                        overwhelming evidence, else silence
+top cosine ≥ -min-cosine ?  ──no──►  surface nothing (gated-empty)
+   │ yes
+   ▼
+inject top-k skills as additionalContext  →  stdout hook JSON
 ```
 
 Key properties:
 
-- **The index is built once; only the query is embedded per prompt.** Skill vectors are cached on disk (JSON, ~200 skills × 768 floats loads in well under the latency budget), so the hot path is a single small embedding call plus in-memory math.
-- **RRF fuses the two rankings** rather than trusting either alone — lexical catches exact term matches, semantic catches paraphrase, and rank fusion is robust to the score scales differing.
+- **The index is built once; only the query is embedded per prompt.** Skill vectors are cached on disk (the gob/float32 `index.bin` sidecar parses in ~3 ms; the JSON is the source of truth and automatic fallback), so the hot path is a single small embedding call plus in-memory math.
+- **Embed-primary ranking** — measured better than the BM25+RRF hybrid on the 236-case gold-set (covered-only recall@3 0.829 vs 0.732); the hybrid remains one flag away (`-ranker=hybrid`) and in `mr-eval` for comparison.
 - **The gate uses the top raw cosine** as a confidence floor: a prompt with no good semantic match surfaces nothing, which is what keeps the hook quiet and trustworthy.
-- **Fail-open is absolute.** No index, cold embedder, malformed input, or blown deadline all resolve to "inject nothing, exit 0." When the embedder is unavailable the hook records the mode and stays silent; the BM25 path is wired for future gated use.
-- **Hash-diff refresh** keeps the index current: each entry stores a hash of exactly the embedded text, so `refresh` re-embeds only what changed.
+- **Fail-open is absolute.** No index, malformed input, or blown deadline resolve to "inject nothing, exit 0." A cold/dead embedder fails the dial in ~200 ms and drops to the precision-gated BM25 fallback — tuned on the gold-set for zero wrong surfacings (a wrong fallback surfacing is worse than silence).
+- **Hash-diff refresh** keeps the index current: each entry stores a hash of exactly the embedded text, so `refresh` re-embeds only what changed — with a status line per run in `refresh.log`, a >30% mass-removal guard, and a single dated `.bak` of the replaced index.
 - **Privacy:** the usage log (`~/.meta-router/usage.jsonl`) records a SHA-256 hash of the prompt, its length, which skills were surfaced, the top cosine, latency, and the decision mode — never the raw prompt.
 
 ## Requirements
 
 - **Go 1.26+** to build.
-- A **local OpenAI-compatible embedding endpoint** serving an `embeddinggemma` model (POST `/v1/embeddings`), reachable at `http://127.0.0.1:11436` by default. No cloud account or API key is required. The hook reuses a warm local embedder; it ships no model of its own.
+- A **local OpenAI-compatible embedding endpoint** serving an `embeddinggemma` model (POST `/v1/embeddings`), reachable at `http://127.0.0.1:11436` by default (override with `-endpoint`). No cloud account or API key is required. The hook reuses a warm local embedder; it ships no model of its own.
 - **Claude Code** with hooks support (`UserPromptSubmit` injecting `additionalContext`, `SessionStart` running a command).
+
+### Recipe: a dedicated `llama-server` sidecar
+
+Any server exposing OpenAI-compatible `/v1/embeddings` works. If you don't already run one, a single [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` binary is the simplest sidecar — and on Windows it runs natively (`llama-server.exe`), which removes any WSL or Docker dependency:
+
+```bash
+# 1. Grab a llama.cpp release binary + an EmbeddingGemma GGUF, then serve it on a spare port:
+llama-server --embeddings -m embeddinggemma-300M-Q8_0.gguf --host 127.0.0.1 --port 18793
+# 2. Point the indexer at it:
+mr-index build -endpoint http://127.0.0.1:18793
+# 3. And add the same flag to the hook command in settings.json:
+#    "command": "/absolute/path/to/bin/mr-hook", "args": ["-endpoint", "http://127.0.0.1:18793"]
+```
+
+The model stays resident in the sidecar, so per-prompt query embeddings are a few milliseconds — well inside `mr-hook`'s 300 ms deadline.
 
 ## What it does NOT do
 
@@ -181,7 +215,7 @@ Being honest about scope:
 - **It does not auto-edit your `settings.json`.** Registering and removing the hooks is always your explicit action.
 - **It does not install, modify, or recommend installing skills.** It only ranks and surfaces what you already have.
 - **It does not guarantee a suggestion every prompt.** By design it stays silent when nothing clears the confidence gate — empty output is correct, not a failure.
-- **It depends on a local embedder for the semantic half.** If that endpoint is down, the hook fails open (surfaces nothing) rather than degrading silently to lexical-only.
+- **It depends on a local embedder for the semantic ranking.** If that endpoint is down, the hook only surfaces the single top lexical match when the BM25 evidence is overwhelming (a gate tuned for precision on the gold-set) — otherwise it surfaces nothing rather than guessing.
 
 ## Roadmap
 

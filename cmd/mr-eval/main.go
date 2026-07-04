@@ -14,41 +14,51 @@ import (
 	"github.com/dmmdea/meta-router/internal/eval"
 	"github.com/dmmdea/meta-router/internal/goldset"
 	"github.com/dmmdea/meta-router/internal/retrievers"
+	"github.com/dmmdea/meta-router/internal/roots"
 )
 
 const version = "0.1.0"
 
 func main() {
-	skillRoots := flag.String("skill-roots", "", "comma-separated skill root dirs (default ~/.claude/skills)")
+	skillRoots := flag.String("skill-roots", "", "comma-separated skill root dirs (default: discovered ~/.claude/skills + installed plugin packs)")
 	goldsetPath := flag.String("goldset", "testdata/goldset.jsonl", "path to gold-set JSONL")
 	endpoint := flag.String("endpoint", "http://127.0.0.1:11436", "embedder endpoint")
 	flag.Parse()
 
-	skillRootsValue := *skillRoots
-	if skillRootsValue == "" {
-		home, herr := os.UserHomeDir()
+	var rootSet []catalog.Root
+	if *skillRoots != "" {
+		for _, p := range strings.Split(*skillRoots, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			rootSet = append(rootSet, catalog.Root{Path: p, Pack: filepath.Base(filepath.Clean(p))})
+		}
+	} else {
+		// Same corpus the production hook indexes: user skills + plugin packs.
+		// Read-only discovery — mr-eval never writes roots.json.
+		claudeDir, herr := roots.DefaultClaudeDir()
 		if herr != nil {
 			fmt.Fprintf(os.Stderr, "cannot resolve home dir: %v\n", herr)
 			os.Exit(1)
 		}
-		skillRootsValue = filepath.Join(home, ".claude", "skills")
+		rootSet = roots.Discover(claudeDir)
 	}
-
-	roots := strings.Split(skillRootsValue, ",")
-	for i, r := range roots {
-		roots[i] = strings.TrimSpace(r)
+	if len(rootSet) == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: no skill roots")
+		os.Exit(1)
 	}
 
 	// Harvest
-	raw, err := catalog.Harvest(roots)
+	raw, err := catalog.HarvestRoots(rootSet)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "harvest error: %v\n", err)
 		os.Exit(1)
 	}
 	rawCount := len(raw)
 
-	// Dedup by ID (keep first)
-	skills := catalog.DedupByID(raw)
+	// Hygiene pipeline: description-twin collapse + ID dedup (keep first)
+	skills := catalog.Dedup(raw)
 	dedupCount := len(skills)
 
 	fmt.Printf("Catalog: %d raw → %d unique skills (deduped %d)\n", rawCount, dedupCount, rawCount-dedupCount)
@@ -64,12 +74,30 @@ func main() {
 		fmt.Fprintf(os.Stderr, "goldset load error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Gold-set: %d cases\n\n", len(cases))
-
 	if len(cases) == 0 {
 		fmt.Fprintln(os.Stderr, "ERROR: gold-set is empty")
 		os.Exit(1)
 	}
+
+	// Coverage: a case is only winnable if at least one expected skill is
+	// actually installed. Reporting recall over uncovered cases (e.g. a gold
+	// set written when GSD was installed) would punish every retriever
+	// equally and hide real ranking regressions — so both views are printed.
+	idSet := make(map[string]bool, len(skills))
+	for _, s := range skills {
+		idSet[s.ID] = true
+	}
+	var covered []goldset.Case
+	for _, c := range cases {
+		for _, e := range c.Expect {
+			if idSet[e] {
+				covered = append(covered, c)
+				break
+			}
+		}
+	}
+	fmt.Printf("Gold-set: %d cases (%d covered by installed skills, %d dead)\n\n",
+		len(cases), len(covered), len(cases)-len(covered))
 
 	// Check embedder availability
 	embedUp := isEndpointUp(*endpoint)
@@ -99,9 +127,9 @@ func main() {
 		}
 	}
 
-	// Evaluate
+	// Evaluate: full set + covered-only subset.
 	ks := []int{1, 3, 5}
-	var results []eval.Metrics
+	var resultsAll, resultsCov []eval.Metrics
 	for _, r := range rlist {
 		fmt.Printf("Scoring %s ...\n", r.Name())
 		m, err := eval.Score(r, cases, ks)
@@ -109,11 +137,22 @@ func main() {
 			fmt.Fprintf(os.Stderr, "ERROR scoring %s: %v\n", r.Name(), err)
 			os.Exit(1)
 		}
-		results = append(results, m)
+		resultsAll = append(resultsAll, m)
+		mc, err := eval.Score(r, covered, ks)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR scoring %s (covered): %v\n", r.Name(), err)
+			os.Exit(1)
+		}
+		resultsCov = append(resultsCov, mc)
 	}
 
-	// Print markdown metrics table
+	printTable(fmt.Sprintf("All %d cases", len(cases)), resultsAll)
+	printTable(fmt.Sprintf("Covered-only (%d cases with an installed expected skill)", len(covered)), resultsCov)
+}
+
+func printTable(title string, results []eval.Metrics) {
 	fmt.Println()
+	fmt.Println(title + ":")
 	fmt.Printf("| retriever     | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n")
 	fmt.Printf("|---------------|----------|----------|----------|-------|-----------|\n")
 	for _, m := range results {

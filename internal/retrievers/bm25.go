@@ -36,12 +36,14 @@ func NewBM25(skills []catalog.Skill) *BM25 {
 
 func (b *BM25) Name() string { return "bm25" }
 
-func (b *BM25) Retrieve(prompt string, k int) ([]string, error) {
+// RetrieveScored returns the top-k documents by raw BM25 score (positive
+// scores only). The scores are unnormalized; callers gating on them should
+// normalize per query (see mr-hook's bm25 fallback).
+func (b *BM25) RetrieveScored(prompt string, k int) []Scored {
 	const k1, bb = 1.2, 0.75
 	n := float64(len(b.docs))
 	q := tokenize(prompt)
-	type sc struct{ id string; s float64 }
-	scores := make([]sc, len(b.docs))
+	scores := make([]Scored, len(b.docs))
 	for i, doc := range b.docs {
 		tf := map[string]int{}
 		for _, t := range doc { tf[t]++ }
@@ -54,13 +56,22 @@ func (b *BM25) Retrieve(prompt string, k int) ([]string, error) {
 			den := float64(tf[t]) + k1*(1-bb+bb*dl/b.avgLen)
 			s += idf * num / den
 		}
-		scores[i] = sc{b.ids[i], s}
+		scores[i] = Scored{b.ids[i], s}
 	}
-	sort.SliceStable(scores, func(i, j int) bool { return scores[i].s > scores[j].s })
-	var out []string
+	sort.SliceStable(scores, func(i, j int) bool { return scores[i].Score > scores[j].Score })
+	out := make([]Scored, 0, k)
 	for i := 0; i < len(scores) && i < k; i++ {
-		if scores[i].s <= 0 { break }
-		out = append(out, scores[i].id)
+		if scores[i].Score <= 0 { break }
+		out = append(out, scores[i])
+	}
+	return out
+}
+
+func (b *BM25) Retrieve(prompt string, k int) ([]string, error) {
+	top := b.RetrieveScored(prompt, k)
+	out := make([]string, len(top))
+	for i, s := range top {
+		out[i] = s.ID
 	}
 	return out, nil
 }
