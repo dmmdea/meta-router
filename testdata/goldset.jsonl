@@ -31,12 +31,12 @@
 {"prompt": "do a post-deploy retrospective on this release", "expect": ["gstack-retro"]}
 {"prompt": "monitor the deploy as a canary to catch early regressions", "expect": ["gstack-canary"]}
 {"prompt": "use gstack to investigate the root cause of this production outage", "expect": ["gstack-investigate"]}
-{"prompt": "sync mem0 memory to a new PC so I can pick up where I left off", "expect": ["syncing-mem0-across-pcs"]}
-{"prompt": "clone my full Claude Code setup from my main PC to a new machine", "expect": ["replicating-antigravity-across-pcs"]}
-{"prompt": "automate my Project Zomboid dedicated server with systemd on Ubuntu", "expect": ["pz-server-automation"]}
+{"prompt": "restore the working context I saved before clearing my last session", "expect": ["gstack-context-restore"]}
+{"prompt": "set up branch protection, CODEOWNERS and a release strategy for my repo", "expect": ["repo-craft"]}
+{"prompt": "generate a ship-ready CLI for a public REST API with a research and build loop", "expect": ["printing-press"]}
 {"prompt": "remove the background from this image locally without an API", "expect": ["remove-background"]}
 {"prompt": "write AI video prompts and storyboard for a short film", "expect": ["visual-video"]}
-{"prompt": "review this edited video MP4 for factual errors and editorial issues", "expect": ["video-editor-review"]}
+{"prompt": "audit the visual design of my live web app with a designer's eye and fix the spacing issues", "expect": ["gstack-design-review"]}
 {"prompt": "scaffold a new Supabase project with RLS and auth", "expect": ["supabase"]}
 {"prompt": "craft a new reusable skill from this successful scrape flow", "expect": ["gstack-skillify"]}
 {"prompt": "review the engineering plan before we start building", "expect": ["gstack-plan-eng-review"]}
@@ -45,9 +45,9 @@
 {"prompt": "do a devex review of the developer experience for this tool", "expect": ["gstack-devex-review"]}
 {"prompt": "ship and deploy this feature end-to-end including the landing page", "expect": ["gstack-ship"]}
 {"prompt": "Open my staging site in a headless browser, walk the signup flow, and screenshot any broken steps.", "expect": ["gstack"]}
-{"prompt": "I'm moving my WSL box to a newer CUDA toolkit and need to rebuild the local llama.cpp inference engine safely.", "expect": ["cuda-reforge"]}
+{"prompt": "write RLS policies and fix my Supabase auth session handling in Next.js", "expect": ["supabase"]}
 {"prompt": "Is there an installable add-on that could give you the ability to handle this task?", "expect": ["find-skills"]}
-{"prompt": "I'm heading to bed — keep an agent looping on this feature until the tests pass.", "expect": ["gnhf"]}
+{"prompt": "is there an installable skill that can do OCR on scanned PDFs for me?", "expect": ["find-skills"]}
 {"prompt": "Write unit and end-to-end tests for the checkout phase I just finished, based on its acceptance criteria.", "expect": ["gsd-add-tests"]}
 {"prompt": "This next phase builds an LLM-powered system — draft a design contract with an evaluation plan before we code.", "expect": ["gsd-ai-integration-phase"]}
 {"prompt": "Run an automated pass that finds defects, fixes the easy ones, runs tests, and commits each fix.", "expect": ["gsd-audit-fix"]}

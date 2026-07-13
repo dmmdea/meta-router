@@ -8,7 +8,7 @@ surfaces the right Claude Code skills for each prompt. Contributions of all size
 This is a single-module Go project with two binaries under `cmd/`. From the repository root:
 
 ```bash
-go build ./...   # build mr-hook, mr-index, mr-eval
+go build ./...   # build mr-hook, mr-index, mr-eval, mr-outcomes
 go vet ./...     # static analysis — keep this clean
 go test ./...    # run the full test suite
 ```

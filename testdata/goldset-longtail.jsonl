@@ -1,4 +1,4 @@
 {"prompt": "create an image-generation prompt for a product poster", "expect": ["visual-image"]}
-{"prompt": "build a custom gemini gem advisor with persistent drive memory", "expect": ["super-gem-creator"]}
+{"prompt": "design a distinctive landing page that doesn't look like a generic template", "expect": ["frontend-design:frontend-design"]}
 {"prompt": "set up a github contribution strategy and repo governance for my project", "expect": ["repo-craft"]}
 {"prompt": "polish my generated CLI so it passes verification and is publish-ready", "expect": ["printing-press-polish"]}
