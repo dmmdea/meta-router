@@ -98,7 +98,7 @@ mr-index build      # embed all skills from scratch → ~/.meta-router/index.jso
 mr-index refresh    # hash-diff: re-embed only changed/new skills, drop removed ones (fast)
 ```
 
-Flags: `-skill-roots` (comma-separated override), `-endpoint` (default `http://127.0.0.1:11436`), `-out` (default `~/.meta-router/index.json`), `-force` (refresh only: allow removing >30% of entries).
+Flags: `-skill-roots` (comma-separated override), `-endpoint` (empty = per-machine resolution: `$MR_EMBED_ENDPOINT`, then `~/.meta-router/endpoints.json`, then the built-in `:11436`→`:18793` failover chain), `-out` (default `~/.meta-router/index.json`), `-force` (refresh only: allow removing >30% of entries).
 
 **Root discovery & `roots.json`.** With no `-skill-roots`, the root set is `~/.claude/skills` (the user pack) plus every installed plugin's skills dir, discovered from `~/.claude/plugins/installed_plugins.json` (which pins each plugin's active version; a direct cache scan is the fallback). `build` re-discovers and persists the set to `roots.json` next to the index; `refresh` reads `roots.json` (creating it if absent) — so the no-flags SessionStart `mr-index refresh` always sees the full set without touching `settings.json`.
 
@@ -123,7 +123,7 @@ Tuning flags (pass them in the hook `command`, e.g. `mr-hook -min-cosine 0.60`):
 | `-min-len` | `6` | Min trimmed prompt length (chars) before retrieval is attempted. |
 | `-ranker` | `embed` | Primary ranking: `embed` (cosine-only) or `hybrid` (BM25+embed RRF). |
 | `-timeout-ms` | `300` | Hard deadline for the whole retrieve. On overrun, surface nothing. |
-| `-endpoint` | `http://127.0.0.1:11436` | Embedding endpoint. |
+| `-endpoint` | *(empty)* | Embedding endpoint. Empty = per-machine resolution: `$MR_EMBED_ENDPOINT`, then `~/.meta-router/endpoints.json`, then the `:11436`→`:18793` failover chain. Set it to pin one endpoint exactly. |
 | `-index` | `~/.meta-router/index.json` | Index path (`index.bin` sidecar is used automatically when fresh). |
 | `-log` | `~/.meta-router/usage.jsonl` | Usage-log path. |
 

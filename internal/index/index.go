@@ -101,8 +101,8 @@ func (idx *Index) Save(path string) error {
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil { // atomic replace
-		os.Remove(tmp) // don't leave a stale .tmp if rename fails (e.g. dest locked on Windows)
+	if err := renameAtomic(tmp, path); err != nil { // atomic replace, retried past a transient Windows lock
+		os.Remove(tmp) // don't leave a stale .tmp if the replace never lands
 		return err
 	}
 	// Write the fast-load sidecar AFTER the JSON so its mtime is >= the
@@ -215,6 +215,14 @@ func (idx *Index) ApplyRefresh(p *RefreshPlan, endpoint string, timeout time.Dur
 		}
 		if len(vecs) != len(p.toText) {
 			return fmt.Errorf("index: embedder returned %d vecs for %d inputs", len(vecs), len(p.toText))
+		}
+		// A refresh re-embeds only the CHANGED skills and keeps the cached vectors
+		// for the rest. If the endpoint that answered serves a different model than
+		// the one that built the index, writing these vectors in would produce a
+		// mixed-dimension index on disk — a silent corruption that survives the
+		// rotate-backup and reports success. Refuse instead; the index stays intact.
+		if idx.Dim != 0 && len(vecs) > 0 && len(vecs[0]) != idx.Dim {
+			return fmt.Errorf("index: embedder returned dim %d but the index is dim %d — the endpoint serves a different model than the one that built the index; rebuild it (`mr-index build`) or pin the right endpoint", len(vecs[0]), idx.Dim)
 		}
 		for j, pos := range p.toPos {
 			p.entries[pos].Vec = vecs[j]

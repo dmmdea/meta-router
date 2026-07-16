@@ -33,7 +33,7 @@ func parseArgs(argv []string) (config, error) {
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	skillRoots := fs.String("skill-roots", "", "comma-separated skill root dirs (default: roots.json / auto-discovery of ~/.claude/skills + installed plugin packs)")
-	endpoint := fs.String("endpoint", "http://127.0.0.1:11436", "embedder endpoint")
+	endpoint := fs.String("endpoint", "", "embedder endpoint; empty = resolve for this machine ($MR_EMBED_ENDPOINT, ~/.meta-router/endpoints.json, then the built-in :11436→:18793 failover chain). Setting it pins that endpoint exactly.")
 	out := fs.String("out", "", "index path (default ~/.meta-router/index.json)")
 	force := fs.Bool("force", false, "refresh: allow removing more than 30% of existing entries")
 	if err := fs.Parse(argv[1:]); err != nil {

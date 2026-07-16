@@ -1,8 +1,8 @@
 package retrievers
 
 import (
-	"testing"
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"testing"
 )
 
 func TestHybridRanks(t *testing.T) {

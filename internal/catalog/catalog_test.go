@@ -7,9 +7,15 @@ import (
 
 func TestParseSkillMD(t *testing.T) {
 	s, err := ParseSkillMD("testdata/valid.md")
-	if err != nil { t.Fatal(err) }
-	if s.Name != "gstack-qa" { t.Fatalf("name=%q", s.Name) }
-	if s.Description == "" || s.WhenToUse == "" { t.Fatalf("missing text: %+v", s) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != "gstack-qa" {
+		t.Fatalf("name=%q", s.Name)
+	}
+	if s.Description == "" || s.WhenToUse == "" {
+		t.Fatalf("missing text: %+v", s)
+	}
 }
 
 func TestParseSkillMD_NoFrontmatter(t *testing.T) {
@@ -20,14 +26,22 @@ func TestParseSkillMD_NoFrontmatter(t *testing.T) {
 
 func TestParseSkillMD_Minimal(t *testing.T) {
 	s, err := ParseSkillMD("testdata/minimal.md") // name+description only
-	if err != nil { t.Fatal(err) }
-	if s.Name != "tiny" || s.WhenToUse != "" { t.Fatalf("%+v", s) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != "tiny" || s.WhenToUse != "" {
+		t.Fatalf("%+v", s)
+	}
 }
 
 func TestParseSkillMD_BlockFolded(t *testing.T) {
 	s, err := ParseSkillMD("testdata/block-folded.md")
-	if err != nil { t.Fatal(err) }
-	if s.Name != "img-skill" { t.Fatalf("name=%q", s.Name) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != "img-skill" {
+		t.Fatalf("name=%q", s.Name)
+	}
 	// The full block-scalar description must be captured, not just ">".
 	for _, want := range []string{"Image prompting", "Use when", "blog covers", "storyboards"} {
 		if !strings.Contains(s.Description, want) {
@@ -44,7 +58,9 @@ func TestParseSkillMD_BlockFolded(t *testing.T) {
 
 func TestParseSkillMD_BlockLiteral(t *testing.T) {
 	s, err := ParseSkillMD("testdata/block-literal.md")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{"Line one", "Line two", "alpha", "gamma"} {
 		if !strings.Contains(s.Description, want) {
 			t.Fatalf("literal block missing %q; got %q", want, s.Description)
@@ -54,8 +70,12 @@ func TestParseSkillMD_BlockLiteral(t *testing.T) {
 
 func TestParseSkillMD_NestedMetadataNoLeak(t *testing.T) {
 	s, err := ParseSkillMD("testdata/nested-metadata.md")
-	if err != nil { t.Fatal(err) }
-	if s.Name != "meta-skill" { t.Fatalf("name=%q", s.Name) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != "meta-skill" {
+		t.Fatalf("name=%q", s.Name)
+	}
 	if !strings.Contains(s.Description, "fork and sync") {
 		t.Fatalf("description after nested metadata not captured: %q", s.Description)
 	}

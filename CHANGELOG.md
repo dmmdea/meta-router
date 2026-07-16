@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.4.0] — 2026-07-15
+
+### Added
+- **Machine-agnostic embedder endpoint resolution** (`internal/retrievers/endpoint.go`): the `-endpoint` flag now defaults to empty and resolves per machine — `$MR_EMBED_ENDPOINT` first, then `~/.meta-router/endpoints.json`, then a built-in `:11436`→`:18793` failover chain probed under one shared deadline. A hardcoded per-machine port in shared config can no longer silently kill semantic surfacing on a second machine.
+- `mr-eval` probes the *resolved* endpoint candidates (not the raw flag), so an empty flag no longer reports the embedder down and silently scores BM25 only.
+- Index entry-rename handling (`internal/index/rename.go`): a skill whose ID changes is treated as remove+add, never a stale duplicate.
+
+### Fixed
+- Shared failover deadline, dimension-guard, and error-classification hardening in the embed client (adversarial-review fixes riding the endpoint-resolution change).
+
 ## [0.3.0] — 2026-07-04
 
 ### Added

@@ -159,7 +159,7 @@ func emit(ctx string) string {
 }
 
 func main() {
-	endpoint := flag.String("endpoint", "http://127.0.0.1:11436", "embedder endpoint")
+	endpoint := flag.String("endpoint", "", "embedder endpoint; empty = resolve for this machine ($MR_EMBED_ENDPOINT, ~/.meta-router/endpoints.json, then the built-in :11436→:18793 failover chain). Setting it pins that endpoint exactly.")
 	indexPath := flag.String("index", "", "index path (default ~/.meta-router/index.json)")
 	logPath := flag.String("log", "", "usage log path (default ~/.meta-router/usage.jsonl)")
 	minCos := flag.Float64("min-cosine", 0.55, "min top cosine to surface (gate)")

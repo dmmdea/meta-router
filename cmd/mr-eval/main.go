@@ -22,7 +22,7 @@ const version = "0.1.0"
 func main() {
 	skillRoots := flag.String("skill-roots", "", "comma-separated skill root dirs (default: discovered ~/.claude/skills + installed plugin packs)")
 	goldsetPath := flag.String("goldset", "testdata/goldset.jsonl", "path to gold-set JSONL")
-	endpoint := flag.String("endpoint", "http://127.0.0.1:11436", "embedder endpoint")
+	endpoint := flag.String("endpoint", "", "embedder endpoint; empty = resolve for this machine (see retrievers.ResolveEndpoints)")
 	flag.Parse()
 
 	var rootSet []catalog.Root
@@ -99,10 +99,20 @@ func main() {
 	fmt.Printf("Gold-set: %d cases (%d covered by installed skills, %d dead)\n\n",
 		len(cases), len(covered), len(cases)-len(covered))
 
-	// Check embedder availability
-	embedUp := isEndpointUp(*endpoint)
+	// Check embedder availability. Probe the RESOLVED candidates, not the raw
+	// spec: the spec is empty by default (it resolves per-machine), and probing
+	// "" would report the embedder down and silently score BM25 only — exactly
+	// the silent-degradation this design exists to prevent.
+	eps := retrievers.ResolveEndpoints(*endpoint)
+	embedUp := false
+	for _, ep := range eps {
+		if isEndpointUp(ep) {
+			embedUp = true
+			break
+		}
+	}
 	if !embedUp {
-		fmt.Printf("WARNING: embedder at %s is unreachable — skipping Embed and Hybrid\n\n", *endpoint)
+		fmt.Printf("WARNING: no embedder reachable at %v — skipping Embed and Hybrid\n\n", eps)
 	}
 
 	// Build retrievers

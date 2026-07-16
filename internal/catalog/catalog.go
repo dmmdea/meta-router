@@ -49,7 +49,9 @@ func InvocableID(pack, name string) string {
 // never leak into the description.
 func ParseSkillMD(path string) (Skill, error) {
 	f, err := os.Open(path)
-	if err != nil { return Skill{}, err }
+	if err != nil {
+		return Skill{}, err
+	}
 	defer f.Close()
 
 	sc := bufio.NewScanner(f)
@@ -115,11 +117,17 @@ func ParseSkillMD(path string) (Skill, error) {
 		joined := strings.Trim(strings.Join(parts, " "), `"'`)
 		switch key {
 		case "name":
-			if s.Name == "" { s.Name = joined }
+			if s.Name == "" {
+				s.Name = joined
+			}
 		case "description":
-			if s.Description == "" { s.Description = joined }
+			if s.Description == "" {
+				s.Description = joined
+			}
 		case "when_to_use", "whenToUse":
-			if s.WhenToUse == "" { s.WhenToUse = joined }
+			if s.WhenToUse == "" {
+				s.WhenToUse = joined
+			}
 		}
 	}
 	if s.Name == "" {
