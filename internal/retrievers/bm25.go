@@ -2,10 +2,10 @@
 package retrievers
 
 import (
+	"github.com/dmmdea/meta-router/internal/catalog"
 	"math"
 	"sort"
 	"strings"
-	"github.com/dmmdea/meta-router/internal/catalog"
 )
 
 type BM25 struct {
@@ -27,10 +27,15 @@ func NewBM25(skills []catalog.Skill) *BM25 {
 		total += len(toks)
 		seen := map[string]bool{}
 		for _, t := range toks {
-			if !seen[t] { b.df[t]++; seen[t] = true }
+			if !seen[t] {
+				b.df[t]++
+				seen[t] = true
+			}
 		}
 	}
-	if len(b.docs) > 0 { b.avgLen = float64(total) / float64(len(b.docs)) }
+	if len(b.docs) > 0 {
+		b.avgLen = float64(total) / float64(len(b.docs))
+	}
 	return b
 }
 
@@ -46,11 +51,15 @@ func (b *BM25) RetrieveScored(prompt string, k int) []Scored {
 	scores := make([]Scored, len(b.docs))
 	for i, doc := range b.docs {
 		tf := map[string]int{}
-		for _, t := range doc { tf[t]++ }
+		for _, t := range doc {
+			tf[t]++
+		}
 		var s float64
 		dl := float64(len(doc))
 		for _, t := range q {
-			if tf[t] == 0 { continue }
+			if tf[t] == 0 {
+				continue
+			}
 			idf := math.Log(1 + (n-float64(b.df[t])+0.5)/(float64(b.df[t])+0.5))
 			num := float64(tf[t]) * (k1 + 1)
 			den := float64(tf[t]) + k1*(1-bb+bb*dl/b.avgLen)
@@ -61,7 +70,9 @@ func (b *BM25) RetrieveScored(prompt string, k int) []Scored {
 	sort.SliceStable(scores, func(i, j int) bool { return scores[i].Score > scores[j].Score })
 	out := make([]Scored, 0, k)
 	for i := 0; i < len(scores) && i < k; i++ {
-		if scores[i].Score <= 0 { break }
+		if scores[i].Score <= 0 {
+			break
+		}
 		out = append(out, scores[i])
 	}
 	return out

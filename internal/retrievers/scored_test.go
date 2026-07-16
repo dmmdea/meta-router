@@ -1,12 +1,12 @@
 package retrievers
 
 import (
+	"github.com/dmmdea/meta-router/internal/catalog"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-	"github.com/dmmdea/meta-router/internal/catalog"
 )
 
 func TestNewHybridFromIndex_CountMismatch(t *testing.T) {

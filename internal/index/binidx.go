@@ -73,7 +73,7 @@ func (idx *Index) saveBin(path string) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameAtomic(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}

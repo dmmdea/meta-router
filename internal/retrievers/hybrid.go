@@ -2,9 +2,9 @@ package retrievers
 
 import (
 	"fmt"
+	"github.com/dmmdea/meta-router/internal/catalog"
 	"sort"
 	"time"
-	"github.com/dmmdea/meta-router/internal/catalog"
 )
 
 // Hybrid fuses BM25 (lexical) and embeddinggemma (semantic) rankings via
