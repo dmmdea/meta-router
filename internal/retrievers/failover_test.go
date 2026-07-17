@@ -27,7 +27,7 @@ func embedStatus(t *testing.T, code int, hits *int32) *httptest.Server {
 	}))
 }
 
-// The core PC-agnostic behavior: the first candidate is dead (this is Qube's
+// The core PC-agnostic behavior: the first candidate is dead (this is one machine's
 // :18793 — nothing listening), so the second one must serve the request. No
 // config change, no per-host settings.json edit.
 func TestEmbed_FailsOverToLiveEndpoint(t *testing.T) {

@@ -20,6 +20,7 @@ type Record struct {
 	Mode         string   `json:"mode"` // embed | hybrid | bm25-fallback | gated-empty | embedder-down | too-short | error
 	Err          string   `json:"err,omitempty"`
 	NudgeOffload bool     `json:"nudge_offload,omitempty"` // an offload-suitability nudge was appended
+	QuotaHint    bool     `json:"quota_hint,omitempty"`    // a quota+route hint was appended (§6c RS1)
 }
 
 func HashPrompt(prompt string) string {

@@ -167,6 +167,7 @@ func main() {
 	k := flag.Int("k", 3, "max skills to surface")
 	timeoutMs := flag.Int("timeout-ms", 300, "hard deadline for the whole retrieve")
 	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only; measured better on the goldset) or "hybrid" (BM25+embed RRF)`)
+	quotaHintOn := flag.Bool("quota-hint", true, "append the mr-orchestrate quota+route hint (ledger-direct, fail-open, zero policy)")
 	flag.Parse()
 
 	// Always exit 0 — fail-open is absolute.
@@ -248,16 +249,26 @@ func main() {
 	}
 	bm25 := retrievers.NewBM25(skills)
 
-	// Run the decision under a hard deadline; if it overruns, surface nothing.
+	// Run the decision AND the quota hint under ONE hard deadline; if either
+	// overruns, surface nothing (A2R-#11: the quota-hint file reads used to run
+	// AFTER the select resolved, outside the deadline — now they are inside the
+	// bounded goroutine so the ~300ms budget genuinely covers them).
 	type result struct {
 		ids    []string
 		topCos float64
 		mode   string
+		hint   string // §6c RS1 quota+route hint ("" on any error / disabled)
 	}
 	ch := make(chan result, 1)
 	go func() {
 		ids, topCos, mode := decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
-		ch <- result{ids, topCos, mode}
+		// Quota+route hint computed INSIDE the deadline-bounded goroutine:
+		// ledger-direct, fail-open ("" on any error), zero policy content.
+		var hint string
+		if *quotaHintOn {
+			hint = quotaHint(time.Now().UTC())
+		}
+		ch <- result{ids, topCos, mode, hint}
 	}()
 
 	select {
@@ -267,6 +278,10 @@ func main() {
 		if offloadNudge(in.Prompt) {
 			rec.NudgeOffload = true
 			ctx = appendNudge(ctx)
+		}
+		if r.hint != "" {
+			rec.QuotaHint = true
+			ctx = appendHint(ctx, r.hint)
 		}
 		if out := emit(ctx); out != "" {
 			fmt.Fprintln(os.Stdout, out)
