@@ -1,0 +1,40 @@
+{"id":"g1-sum","snippet":"func Sum(xs []int) int {\n\ttotal := 0\n\tfor _, x := range xs {\n\t\ttotal += x\n\t}\n\treturn total\n}","label":"good"}
+{"id":"g2-max","snippet":"func Max(xs []int) (int, bool) {\n\tif len(xs) == 0 {\n\t\treturn 0, false\n\t}\n\tm := xs[0]\n\tfor _, x := range xs[1:] {\n\t\tif x \u003e m {\n\t\t\tm = x\n\t\t}\n\t}\n\treturn m, true\n}","label":"good"}
+{"id":"g3-contains","snippet":"func Contains(xs []string, t string) bool {\n\tfor _, x := range xs {\n\t\tif x == t {\n\t\t\treturn true\n\t\t}\n\t}\n\treturn false\n}","label":"good"}
+{"id":"g4-count","snippet":"func Count(words []string) map[string]int {\n\tm := make(map[string]int)\n\tfor _, w := range words {\n\t\tm[w]++\n\t}\n\treturn m\n}","label":"good"}
+{"id":"g5-reverse","snippet":"func Reverse(xs []int) {\n\tfor i, j := 0, len(xs)-1; i \u003c j; i, j = i+1, j-1 {\n\t\txs[i], xs[j] = xs[j], xs[i]\n\t}\n}","label":"good"}
+{"id":"g6-abs","snippet":"func Abs(n int) int {\n\tif n \u003c 0 {\n\t\treturn -n\n\t}\n\treturn n\n}","label":"good"}
+{"id":"g7-iseven","snippet":"func IsEven(n int) bool {\n\treturn n%2 == 0\n}","label":"good"}
+{"id":"g8-clamp","snippet":"func Clamp(x, lo, hi int) int {\n\tif x \u003c lo {\n\t\treturn lo\n\t}\n\tif x \u003e hi {\n\t\treturn hi\n\t}\n\treturn x\n}","label":"good"}
+{"id":"g9-gcd","snippet":"func GCD(a, b int) int {\n\tfor b != 0 {\n\t\ta, b = b, a%b\n\t}\n\treturn a\n}","label":"good"}
+{"id":"g10-fib","snippet":"func Fib(n int) int {\n\ta, b := 0, 1\n\tfor i := 0; i \u003c n; i++ {\n\t\ta, b = b, a+b\n\t}\n\treturn a\n}","label":"good"}
+{"id":"g11-unique","snippet":"func Unique(xs []int) []int {\n\tseen := make(map[int]bool)\n\tvar out []int\n\tfor _, x := range xs {\n\t\tif !seen[x] {\n\t\t\tseen[x] = true\n\t\t\tout = append(out, x)\n\t\t}\n\t}\n\treturn out\n}","label":"good"}
+{"id":"g12-safediv","snippet":"func SafeDiv(a, b int) (int, bool) {\n\tif b == 0 {\n\t\treturn 0, false\n\t}\n\treturn a / b, true\n}","label":"good"}
+{"id":"g13-keys","snippet":"func Keys(m map[string]string) []string {\n\tout := make([]string, 0, len(m))\n\tfor k := range m {\n\t\tout = append(out, k)\n\t}\n\treturn out\n}","label":"good"}
+{"id":"g14-runecount","snippet":"func RuneCount(s string) int {\n\treturn len([]rune(s))\n}","label":"good"}
+{"id":"g15-min","snippet":"func Min(a, b int) int {\n\tif a \u003c b {\n\t\treturn a\n\t}\n\treturn b\n}","label":"good"}
+{"id":"g16-sumevens","snippet":"func SumEvens(xs []int) int {\n\ts := 0\n\tfor _, x := range xs {\n\t\tif x%2 == 0 {\n\t\t\ts += x\n\t\t}\n\t}\n\treturn s\n}","label":"good"}
+{"id":"g17-swap","snippet":"func Swap(a, b *int) {\n\t*a, *b = *b, *a\n}","label":"good"}
+{"id":"g18-palindrome","snippet":"func IsPalindrome(s string) bool {\n\tr := []rune(s)\n\tfor i, j := 0, len(r)-1; i \u003c j; i, j = i+1, j-1 {\n\t\tif r[i] != r[j] {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true\n}","label":"good"}
+{"id":"g19-lastindex","snippet":"func LastIndex(xs []int, t int) int {\n\tlast := -1\n\tfor i, x := range xs {\n\t\tif x == t {\n\t\t\tlast = i\n\t\t}\n\t}\n\treturn last\n}","label":"good"}
+{"id":"g20-booltoint","snippet":"func BoolToInt(b bool) int {\n\tif b {\n\t\treturn 1\n\t}\n\treturn 0\n}","label":"good"}
+{"id":"b1-sum-init","snippet":"func Sum(xs []int) int {\n\ttotal := 1\n\tfor _, x := range xs {\n\t\ttotal += x\n\t}\n\treturn total\n}","label":"bad"}
+{"id":"b2-max-empty","snippet":"func Max(xs []int) int {\n\tm := xs[0]\n\tfor _, x := range xs {\n\t\tif x \u003e m {\n\t\t\tm = x\n\t\t}\n\t}\n\treturn m\n}","label":"bad"}
+{"id":"b3-contains-inv","snippet":"func Contains(xs []string, t string) bool {\n\tfor _, x := range xs {\n\t\tif x != t {\n\t\t\treturn true\n\t\t}\n\t}\n\treturn false\n}","label":"bad"}
+{"id":"b4-count-nilmap","snippet":"func Count(words []string) map[string]int {\n\tvar m map[string]int\n\tfor _, w := range words {\n\t\tm[w]++\n\t}\n\treturn m\n}","label":"bad"}
+{"id":"b5-reverse-noop","snippet":"func Reverse(xs []int) {\n\tfor i := 0; i \u003c len(xs); i++ {\n\t\tj := len(xs) - 1 - i\n\t\txs[i], xs[j] = xs[j], xs[i]\n\t}\n}","label":"bad"}
+{"id":"b6-abs-nonneg","snippet":"func Abs(n int) int {\n\tif n \u003c 0 {\n\t\treturn n\n\t}\n\treturn n\n}","label":"bad"}
+{"id":"b7-iseven-odd","snippet":"func IsEven(n int) bool {\n\treturn n%2 == 1\n}","label":"bad"}
+{"id":"b8-clamp-swap","snippet":"func Clamp(x, lo, hi int) int {\n\tif x \u003c lo {\n\t\treturn hi\n\t}\n\tif x \u003e hi {\n\t\treturn lo\n\t}\n\treturn x\n}","label":"bad"}
+{"id":"b9-gcd-div","snippet":"func GCD(a, b int) int {\n\tfor b != 0 {\n\t\ta, b = b, a/b\n\t}\n\treturn a\n}","label":"bad"}
+{"id":"b10-fib-offbyone","snippet":"func Fib(n int) int {\n\ta, b := 0, 1\n\tfor i := 0; i \u003c n; i++ {\n\t\ta, b = b, a+b\n\t}\n\treturn b\n}","label":"bad"}
+{"id":"b11-unique-nodedup","snippet":"func Unique(xs []int) []int {\n\tvar out []int\n\tfor _, x := range xs {\n\t\tout = append(out, x)\n\t}\n\treturn out\n}","label":"bad"}
+{"id":"b12-safediv-noguard","snippet":"func SafeDiv(a, b int) (int, bool) {\n\treturn a / b, true\n}","label":"bad"}
+{"id":"b13-keys-values","snippet":"func Keys(m map[string]string) []string {\n\tout := make([]string, 0, len(m))\n\tfor _, v := range m {\n\t\tout = append(out, v)\n\t}\n\treturn out\n}","label":"bad"}
+{"id":"b14-runecount-bytes","snippet":"func RuneCount(s string) int {\n\treturn len(s)\n}","label":"bad"}
+{"id":"b15-min-returnsmax","snippet":"func Min(a, b int) int {\n\tif a \u003e b {\n\t\treturn a\n\t}\n\treturn b\n}","label":"bad"}
+{"id":"b16-sumevens-odd","snippet":"func SumEvens(xs []int) int {\n\ts := 0\n\tfor _, x := range xs {\n\t\tif x%2 != 0 {\n\t\t\ts += x\n\t\t}\n\t}\n\treturn s\n}","label":"bad"}
+{"id":"b17-swap-noop","snippet":"func Swap(a, b *int) {\n\ta, b = b, a\n}","label":"bad"}
+{"id":"b18-palindrome-inv","snippet":"func IsPalindrome(s string) bool {\n\tr := []rune(s)\n\tfor i, j := 0, len(r)-1; i \u003c j; i, j = i+1, j-1 {\n\t\tif r[i] == r[j] {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true\n}","label":"bad"}
+{"id":"b19-lastindex-first","snippet":"func LastIndex(xs []int, t int) int {\n\tfor i, x := range xs {\n\t\tif x == t {\n\t\t\treturn i\n\t\t}\n\t}\n\treturn -1\n}","label":"bad"}
+{"id":"b20-booltoint-inv","snippet":"func BoolToInt(b bool) int {\n\tif b {\n\t\treturn 0\n\t}\n\treturn 1\n}","label":"bad"}
