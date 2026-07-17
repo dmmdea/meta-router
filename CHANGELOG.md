@@ -4,6 +4,17 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.5.0] — 2026-07-17
+
+### Changed
+- **This repo is now the PRIMARY development repo** (operator-agnostic single-source inversion): all product code lives here, operator-neutral at rest; personal gold sets and operator config live outside the repo. All merges via PR.
+
+### Added
+- **The v3 multi-lane orchestrator** (`mr-orchestrate` + `internal/orch`, 20 packages): routes tasks across claude / codex / GLM / local lanes with a quota ledger, admission gates, burn-rate pacing, per-lane error taxonomies, dispatch receipts, strategy templates, and an MCP surface.
+- **The eval substrate**: `internal/oracle` (V0 null/trivial audit gate), `internal/goldtask` (routing gold-set schema + pure verifier engine), `cmd/mr-goldverify` (execution verifier: worktree at parent → apply candidate diff → held-out tests), `internal/verifierceiling` + `cmd/mr-verifier` (local-verifier ceiling: AURC/AUGRC + defer-discounted effective ceiling), with generic verifier corpora. Bring your own gold set via `-goldset` — gold-set-dependent tests skip when none is present.
+- `mr-hook` **quota+route hint** restored (`-quota-hint`, ledger-direct, fail-open) now that its orchestrator dependency ships here.
+- `scripts/mr-statusline-tee.js` — statusline tee that feeds the quota trace.
+
 ## [0.4.0] — 2026-07-15
 
 ### Added

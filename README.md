@@ -233,6 +233,12 @@ Contributions are welcome. Build with `go build ./...` and run the full suite wi
 
 meta-router runs entirely on your machine and sends prompt text only to the local embedding endpoint you configure — never to any third party. The usage log stores only hashed prompts. If you find a security issue, please report it privately rather than opening a public issue.
 
+## The v3 orchestrator + eval harness (v0.5.0)
+
+Beyond the surfacer, this repo now carries the **multi-lane orchestrator** (`mr-orchestrate`): it routes headless tasks across claude / codex / GLM / local-model lanes under a quota ledger with admission gates, burn-rate pacing, and per-lane error handling. State lives under `~/.meta-router/orchestrate/` (config, ledger, dispatch receipts) — nothing operator-specific is in the repo.
+
+The **eval substrate** ships too: a routing gold-set schema + verifier engine (`internal/goldtask`), an execution verifier harness (`mr-goldverify`: checkout parent → apply candidate diff → run held-out tests), and a local-verifier ceiling meter (`mr-verifier`, AURC/AUGRC). **Bring your own gold set**: point `-goldset` at your own task JSONL; the repo's gold-set-dependent tests skip when none is present.
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
