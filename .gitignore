@@ -14,7 +14,7 @@
 
 # usage logs
 *.jsonl
-!testdata/*.jsonl
+!testdata/**/*.jsonl
 
 # secrets / local config
 .env
