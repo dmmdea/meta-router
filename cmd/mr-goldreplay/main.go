@@ -78,6 +78,67 @@ func extractDiff(text string) string {
 	return ""
 }
 
+// truncateDiff cuts a printed diff at the first line that violates unified-diff
+// grammar (agents narrate after the final hunk; git apply calls that corrupt).
+func truncateDiff(d string) string {
+	if d == "" {
+		return ""
+	}
+	prefixes := []string{"diff --git", "index ", "--- ", "+++ ", "@@ ", "+", "-", " ",
+		"new file mode", "deleted file mode", "old mode", "new mode", "similarity ",
+		"rename ", "copy ", "Binary files", "\\ No newline"}
+	var out []string
+	for _, line := range strings.Split(d, "\n") {
+		if line == "" { // blank lines end a printed diff (context lines keep their leading space)
+			break
+		}
+		ok := false
+		for _, p := range prefixes {
+			if strings.HasPrefix(line, p) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			break
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// decodeAgentText recovers the agent's REAL text from structured lane stdout:
+// codex event JSONL carries it JSON-escaped in item.text (agent_message), and
+// claude/glm result JSON carries it in .result — extracting a diff from the
+// RAW stream yields escaped garbage ("git diff header lacks filename").
+// Returns "" when the output has no decodable agent text.
+func decodeAgentText(stdout string) string {
+	var parts []string
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var ev struct {
+			Type string `json:"type"`
+			Item *struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+			Result string `json:"result"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			continue
+		}
+		if ev.Item != nil && ev.Item.Type == "agent_message" && ev.Item.Text != "" {
+			parts = append(parts, ev.Item.Text)
+		} else if ev.Type == "result" && ev.Result != "" {
+			parts = append(parts, ev.Result)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 // routerClass maps a gold-task class to the router's task-class vocabulary
 // (receipt/classifier input only — the lane is forced by the replay).
 func routerClass(goldClass string) string {
@@ -253,11 +314,23 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 		}
 	}
 	if diff == "" {
-		diff = extractDiff(stdout) // fallback: the agent printed a diff instead
+		// Fallback: the agent PRINTED its diff. Decode structured lane output
+		// first (codex events / result JSON) so the diff isn't JSON-escaped,
+		// then cut trailing prose — agents narrate after the last hunk and
+		// git apply rejects it as a corrupt patch.
+		if txt := decodeAgentText(stdout); txt != "" {
+			diff = truncateDiff(extractDiff(txt))
+		}
+	}
+	if diff == "" {
+		diff = truncateDiff(extractDiff(stdout)) // last resort: raw stream
 	}
 	if diff == "" {
 		row.Note = "no diff in output"
 		return row
+	}
+	if !strings.HasSuffix(diff, "\n") {
+		diff += "\n" // git apply requires the trailing newline
 	}
 	pf := filepath.Join(os.TempDir(), fmt.Sprintf("goldreplay-%s-%s-%d.diff", strings.ToLower(t.ID), lane, trial))
 	if err := os.WriteFile(pf, []byte(diff), 0o644); err != nil {

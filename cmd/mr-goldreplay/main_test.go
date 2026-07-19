@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,6 +45,47 @@ not json — torn line survives
 	}
 	if loadDone(filepath.Join(t.TempDir(), "absent.jsonl")) == nil {
 		t.Fatal("missing file must return empty set, not nil")
+	}
+}
+
+func TestDecodeAgentText(t *testing.T) {
+	codexEvents := `{"type":"thread.started","thread_id":"x"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Here is the fix:\n\ndiff --git a/x.go b/x.go\n--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-a\n+b"}}
+{"type":"turn.completed","usage":{"input_tokens":1}}`
+	got := decodeAgentText(codexEvents)
+	if !strings.Contains(got, "diff --git a/x.go") || strings.Contains(got, `\n`) {
+		t.Fatalf("codex decode wrong: %q", got)
+	}
+	if d := extractDiff(got); !strings.HasPrefix(d, "diff --git a/x.go") {
+		t.Fatalf("extract from decoded failed: %q", d)
+	}
+
+	claudeResult := `{"type":"result","subtype":"success","result":"done:\ndiff --git a/y.go b/y.go\n@@ -1 +1 @@\n-c\n+d","num_turns":1}`
+	if got := decodeAgentText(claudeResult); !strings.Contains(got, "diff --git a/y.go") {
+		t.Fatalf("claude result decode wrong: %q", got)
+	}
+
+	if got := decodeAgentText("plain prose, no json"); got != "" {
+		t.Fatalf("non-json must decode empty, got %q", got)
+	}
+}
+
+func TestTruncateDiff(t *testing.T) {
+	withProse := "diff --git a/x.go b/x.go\n--- a/x.go\n+++ b/x.go\n@@ -1,2 +1,2 @@\n-a\n+b\n context\n\nThis change fixes the bug by..."
+	got := truncateDiff(withProse)
+	if strings.Contains(got, "This change") {
+		t.Fatalf("prose not cut: %q", got)
+	}
+	if !strings.HasSuffix(got, " context") {
+		t.Fatalf("diff body truncated too early: %q", got)
+	}
+	if truncateDiff("") != "" {
+		t.Fatal("empty must stay empty")
+	}
+	clean := "diff --git a/x.go b/x.go\n--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-a\n+b"
+	if truncateDiff(clean) != clean {
+		t.Fatalf("clean diff altered: %q", truncateDiff(clean))
 	}
 }
 
