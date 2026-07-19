@@ -111,3 +111,18 @@ func TestOtherLaneIgnored(t *testing.T) {
 		t.Fatalf("another lane's buckets must not gate this lane: %+v", d)
 	}
 }
+
+// A bucket whose reset moment has passed is stale history — it must never
+// gate admission (found live: the GLM 5h window stayed "exhausted" forever
+// because nothing rolled the read path past resets_at).
+func TestExpiredWindowNeverGates(t *testing.T) {
+	now := time.Now().UTC()
+	bs := []ledger.Bucket{{
+		Lane: "glm", Window: ledger.Win5h, UsedPct: 100,
+		ResetsAt: now.Add(-10 * time.Minute), Source: "provider",
+	}}
+	d := Decide(bs, "glm", now, Thresholds{80, 95})
+	if !d.Admit || d.State != Open {
+		t.Fatalf("expired window gated admission: %+v", d)
+	}
+}

@@ -55,6 +55,12 @@ func Decide(bs []ledger.Bucket, lane string, now time.Time, th Thresholds) Decis
 		if b.Lane != lane {
 			continue
 		}
+		if !b.ResetsAt.IsZero() && now.After(b.ResetsAt) {
+			// The window's reset moment has PASSED: its percentages are stale
+			// history, not live pressure — they must never gate admission. The
+			// ledger persists the roll on its next write (Bucket.roll).
+			continue
+		}
 		switch {
 		case b.UsedPct < 0:
 			if d.State == Open && d.Reason == "" {
