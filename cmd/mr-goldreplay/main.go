@@ -237,12 +237,24 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 		return row
 	}
 
-	// Verify: pure in-process; exec via mr-goldverify on the extracted diff.
+	// Verify: pure in-process; exec via mr-goldverify on the candidate diff.
 	if t.Verify.Kind == "pure" {
 		row.VerifierPass = goldtask.PureCheck(t.Verify, stdout)
 		return row
 	}
-	diff := extractDiff(stdout)
+	// Prefer the WORKTREE diff: a tool-enabled agent edits files in place and
+	// rarely prints a diff. `add -N` makes new files diffable; the leakage
+	// guard downstream still rejects test-file tampering.
+	diff := ""
+	if cwd != "" {
+		_, _ = gitC(cwd, 60, "add", "-N", ".")
+		if b, err := gitC(cwd, 120, "diff", "HEAD"); err == nil {
+			diff = strings.TrimSpace(string(b))
+		}
+	}
+	if diff == "" {
+		diff = extractDiff(stdout) // fallback: the agent printed a diff instead
+	}
 	if diff == "" {
 		row.Note = "no diff in output"
 		return row
