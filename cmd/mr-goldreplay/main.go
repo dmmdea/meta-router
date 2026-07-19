@@ -105,7 +105,7 @@ func main() {
 	verifyBin := flag.String("goldverify", defaultHomeBin("mr-goldverify.exe"), "mr-goldverify binary (exec tasks)")
 	reposFlag := flag.String("repos", "", "logical repo overrides for exec tasks: name=path,...")
 	claudeModel := flag.String("claude-model", "claude-sonnet-5", "model pin for the claude lane")
-	codexModel := flag.String("codex-model", "gpt-5.5-codex", "model pin for the codex lane")
+	codexModel := flag.String("codex-model", "gpt-5.5", "model pin for the codex lane")
 	glmModel := flag.String("glm-model", "glm-5.2", "model pin for the glm lane")
 	localModel := flag.String("local-model", "gemma4-cascade", "model tag for the local lane")
 	timeoutSec := flag.Int("timeout", 900, "per-dispatch timeout (seconds)")
