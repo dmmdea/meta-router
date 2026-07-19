@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"SYNTHETIC"}
+{"type":"turn.started"}
+{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again at 3:00 PM."}}
