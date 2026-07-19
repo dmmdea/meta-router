@@ -248,8 +248,8 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 	diff := ""
 	if cwd != "" {
 		_, _ = gitC(cwd, 60, "add", "-N", ".")
-		if b, err := gitC(cwd, 120, "diff", "HEAD"); err == nil {
-			diff = strings.TrimSpace(string(b))
+		if b, err := gitC(cwd, 120, "diff", "HEAD"); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+			diff = string(b) // RAW bytes — git apply needs the trailing newline
 		}
 	}
 	if diff == "" {
@@ -275,10 +275,26 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 		row.VerifierPass = true
 	} else if ee, ok := vErr.(*exec.ExitError); ok && ee.ExitCode() == 1 {
 		row.VerifierPass = false
+		row.Note = "verify-fail: " + verdictDetail(vOut) // WHY it failed, never silent
 	} else {
 		row.Note = "goldverify: " + firstLine(vOut, vErr)
 	}
 	return row
+}
+
+// verdictDetail extracts the failure stage from goldverify's verdict JSON.
+func verdictDetail(out []byte) string {
+	var v struct {
+		Detail string `json:"detail"`
+	}
+	if json.Unmarshal(out, &v) == nil && v.Detail != "" {
+		s := strings.ReplaceAll(v.Detail, "\n", " | ")
+		if len(s) > 220 {
+			s = s[:220]
+		}
+		return s
+	}
+	return firstLine(out, nil)
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────
