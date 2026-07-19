@@ -60,7 +60,9 @@ func loadDone(path string) map[string]bool {
 			continue
 		}
 		var r Row
-		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" {
+		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && r.OutcomeClass != "deferred" {
+			// A deferred row is a HOLE (admission was closed), not an
+			// observation — resume must refill it when the window reopens.
 			done[rowKey(r.Task, r.Lane, r.Trial)] = true
 		}
 	}

@@ -40,6 +40,14 @@ not json — torn line survives
 	if !done[rowKey("AC-04", "local", 1)] || !done[rowKey("RS-03", "claude", 2)] {
 		t.Fatalf("resume set wrong: %v", done)
 	}
+	// A deferred row is a hole — resume must NOT count it as done.
+	deferredLine := `{"ts":"t","task":"EX-01","class":"extraction","lane":"glm","model":"m","trial":1,"dispatched":false,"outcome_class":"deferred","verifier_pass":false,"latency_ms":1}` + "\n"
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString(deferredLine)
+	f.Close()
+	if loadDone(p)[rowKey("EX-01", "glm", 1)] {
+		t.Fatal("deferred row wrongly counted as done — the window-reopen refill would no-op")
+	}
 	if done[rowKey("AC-04", "local", 2)] || len(done) != 2 {
 		t.Fatalf("resume set has phantom rows: %v", done)
 	}
