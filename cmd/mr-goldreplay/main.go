@@ -109,6 +109,9 @@ func main() {
 	glmModel := flag.String("glm-model", "glm-5.2", "model pin for the glm lane")
 	localModel := flag.String("local-model", "gemma4-cascade", "model tag for the local lane")
 	timeoutSec := flag.Int("timeout", 900, "per-dispatch timeout (seconds)")
+	maxNotional := flag.Float64("max-notional", 10, "claude-lane notional guard ceiling (real coding tasks exceed the $2 default)")
+	claudeExtra := flag.String("claude-extra", "--dangerously-skip-permissions",
+		"extra claude-lane flags via run -extra (headless replay agents work tool-enabled in disposable worktrees; empty to disable)")
 	flag.Parse()
 
 	tasks, err := goldtask.Load(*goldset)
@@ -157,7 +160,7 @@ func main() {
 					skip++
 					continue
 				}
-				row := replayOne(t, lane, laneModel[lane], trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec)
+				row := replayOne(t, lane, laneModel[lane], trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
 				b, _ := json.Marshal(row)
 				fmt.Fprintln(out, string(b))
 				run++
@@ -170,7 +173,7 @@ func main() {
 }
 
 // replayOne runs one (task,lane,trial) cell end to end.
-func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBin, repos string, timeoutSec int) Row {
+func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBin, repos string, timeoutSec int, maxNotional float64, claudeExtra string) Row {
 	row := Row{TS: time.Now().UTC().Format(time.RFC3339), Task: t.ID, Class: t.Class,
 		Lane: lane, Model: model, Trial: trial}
 	start := time.Now()
@@ -191,7 +194,11 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 	}
 
 	args := []string{"run", t.Prompt, "-lane", lane, "-model", model, "-live",
-		"-origin", "goldreplay", "-desc", "goldreplay " + t.ID}
+		"-origin", "goldreplay", "-desc", "goldreplay " + t.ID,
+		"-max-notional-usd", fmt.Sprintf("%g", maxNotional)}
+	if lane == "claude" && claudeExtra != "" {
+		args = append(args, "-extra", claudeExtra)
+	}
 	if rc := routerClass(t.Class); rc != "" {
 		args = append(args, "-class", rc)
 	}
