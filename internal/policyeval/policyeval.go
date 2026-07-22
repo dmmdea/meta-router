@@ -197,15 +197,41 @@ func RCI(assignment map[string]string) float64 {
 }
 
 // SignFlipP is the paired sign-flip permutation test (Q1): the two-sided
-// p-value that the mean of deltas is 0, under random sign flips.
+// p-value that the mean of deltas is 0. For n ≤ 20 it enumerates ALL 2^n sign
+// patterns — an EXACT p, immune to seed luck (a Monte-Carlo estimate can dip
+// under a threshold by chance and defeat small-n refusal guarantees). Larger n
+// falls back to Monte-Carlo with the add-one estimator (hits+1)/(iters+1),
+// which cannot underestimate to zero.
 func SignFlipP(deltas []float64, iters int, seed int64) float64 {
-	if len(deltas) == 0 {
+	n := len(deltas)
+	if n == 0 {
 		return 1
 	}
 	obs := math.Abs(mean(deltas))
+	if n <= 20 { // exact enumeration: ≤ 1,048,576 patterns
+		total := 1 << uint(n)
+		hits := 0
+		for mask := 0; mask < total; mask++ {
+			sum := 0.0
+			for j, d := range deltas {
+				if mask&(1<<uint(j)) != 0 {
+					sum -= d
+				} else {
+					sum += d
+				}
+			}
+			if math.Abs(sum/float64(n)) >= obs-1e-12 {
+				hits++
+			}
+		}
+		return float64(hits) / float64(total)
+	}
+	if iters < 1 {
+		iters = 1
+	}
 	rng := rand.New(rand.NewSource(seed))
 	hits := 0
-	flipped := make([]float64, len(deltas))
+	flipped := make([]float64, n)
 	for i := 0; i < iters; i++ {
 		for j, d := range deltas {
 			if rng.Intn(2) == 0 {
@@ -218,7 +244,7 @@ func SignFlipP(deltas []float64, iters int, seed int64) float64 {
 			hits++
 		}
 	}
-	return float64(hits) / float64(iters)
+	return float64(hits+1) / float64(iters+1)
 }
 
 // BootstrapCI is the BCa bootstrap CI for the mean of xs (Q1's interval).
@@ -226,6 +252,9 @@ func BootstrapCI(xs []float64, conf float64, iters int, seed int64) (lo, hi floa
 	n := len(xs)
 	if n == 0 {
 		return 0, 0
+	}
+	if iters < 2 {
+		iters = 2 // a CI needs ≥2 resamples; guards a caller's zero/negative
 	}
 	obs := mean(xs)
 	rng := rand.New(rand.NewSource(seed))

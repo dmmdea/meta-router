@@ -4,6 +4,17 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.6.0] — 2026-07-22
+
+### Added
+- **V7 — the equal-budget strategy-template promotion gate** (`internal/promotion` + `mr-promote`): a template earns default status ONLY via the conjunctive rule on paired template-vs-solo runs at matched token budget — paired BCa CI lower bound > 0 AND sign-flip permutation p < 0.05. Budget-skewed pairs (>25% divergence) are excluded and counted; at small n the gate refuses by arithmetic (5/5 perfect wins still refuse at p=0.0625). Until promoted, templates remain manual `--strategy` seams.
+- **V3+V5 — policy evaluator + WF@Q scorecard** (`internal/policyeval` + `mr-scorecard`): exact-lookup policy evaluation over the oracle replay table, oracle-best/frontier/regret/RCI, BCa bootstrap + sign-flip statistics, pre-registered non-inferiority verdict; `router-live` measured via the REAL shipped classifier on raw prompts.
+- **V2 — the oracle replay runner** (`mr-goldreplay`): every gold task × lane × trial through `mr-orchestrate run` (ledger-metered, receipted), verified by the pure engine or `mr-goldverify`; resumable by cell; deferred rows are holes that refill when a window reopens.
+
+### Fixed
+- Admission: an expired quota window never gates (stale percentages are history, not pressure).
+- Replay chain robustness: worktree diff harvest (raw bytes), printed-diff decode/truncate/`--recount`, tool-enabled headless claude agents, codex model ids, notional ceiling flag.
+
 ## [0.5.0] — 2026-07-17
 
 ### Changed
