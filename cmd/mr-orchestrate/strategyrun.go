@@ -106,7 +106,7 @@ func prodNodeRunner(dispatchID string, alt strategy.Alternatives) strategy.NodeR
 		// broken/all-masked oracle → lane "auto" (doRun's relegation path). (Caught by the
 		// S3R-9 live gate; the fake-based unit tests never require a model.)
 		if lane == "" || model == "" {
-			dec := computeRunRec(step.Class, step.Instruction, 0, false, false, 0, time.Now().UTC())
+			dec := computeRunRec(step.Class, step.Instruction, 0, false, spendDownReq{}, time.Now().UTC())
 			if lane == "" {
 				if dec.Lane != "" {
 					lane = dec.Lane
@@ -276,7 +276,7 @@ func prodResolve(step strategy.Step) string {
 	if step.LaneHint != "" {
 		return step.LaneHint
 	}
-	dec := computeRunRec(step.Class, step.Instruction, 0, false, false, 0, time.Now().UTC())
+	dec := computeRunRec(step.Class, step.Instruction, 0, false, spendDownReq{}, time.Now().UTC())
 	return dec.Lane
 }
 
@@ -285,7 +285,7 @@ func prodResolve(step strategy.Step) string {
 // ok=false when no different lane is available → the failure stands. Wraps
 // computeRunRec/buildRouteDecision with the failed lane masked.
 func prodAlternatives(step strategy.Step, excludeLane string) (lane, model, effort string, ok bool) {
-	dec := computeRunRec(step.Class, step.Instruction, 0, false, false, 0, time.Now().UTC())
+	dec := computeRunRec(step.Class, step.Instruction, 0, false, spendDownReq{}, time.Now().UTC())
 	// The primary recommendation is a candidate too (unless it IS the excluded
 	// lane), then each Pareto alternative — pick the first that is not the failed
 	// lane and not the operator's explicit hint that just failed.

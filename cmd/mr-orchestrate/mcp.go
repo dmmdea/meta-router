@@ -270,12 +270,12 @@ func errText(s string) toolResult {
 // answer with resume_at.
 func toolRoute(args json.RawMessage) toolResult {
 	var a struct {
-		Task       string `json:"task"`
-		Class      string `json:"class"`
-		CtxTokens  int64  `json:"ctx_tokens"`
-		Latency    bool   `json:"latency_sensitive"`
-		Batch      bool   `json:"batch"`
-		EstMinutes int64  `json:"est_minutes"`
+		Task       string  `json:"task"`
+		Class      string  `json:"class"`
+		CtxTokens  int64   `json:"ctx_tokens"`
+		Latency    bool    `json:"latency_sensitive"`
+		Batch      bool    `json:"batch"`
+		EstMinutes float64 `json:"est_minutes"` // float: the schema says number; fractional minutes must not fail the call
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return errText("bad route arguments: " + err.Error())
@@ -312,10 +312,12 @@ func toolRoute(args json.RawMessage) toolResult {
 	} else {
 		class, _ = router.Classify(a.Task, a.CtxTokens, a.Latency)
 	}
-	d := buildRouteDecision(cfg, fzs, snap, class, a.CtxTokens, now, a.Batch, time.Duration(a.EstMinutes)*time.Minute)
+	d := buildRouteDecision(cfg, fzs, snap, class, a.CtxTokens, now, spendDownReq{
+		Batch: a.Batch, Est: time.Duration(a.EstMinutes * float64(time.Minute)), Persist: a.Batch,
+	})
 
 	// Consult receipt (Origin "mcp"): the delegation-coverage numerator.
-	writeRouteReceipt(d, class, a.Task, "mcp", now)
+	writeRouteReceipt(d, class, a.Task, "mcp", a.Batch, now)
 
 	if d.Lane == "" {
 		dj := deferral{Deferred: true, Reason: d.Reason}
@@ -341,10 +343,10 @@ func toolRun(args json.RawMessage) toolResult {
 		Effort     string `json:"effort"`
 		Class      string `json:"class"`
 		CWD        string `json:"cwd"`
-		TimeoutSec int    `json:"timeout_sec"`
-		DryRun     bool   `json:"dry_run"`
-		Batch      bool   `json:"batch"`
-		EstMinutes int64  `json:"est_minutes"`
+		TimeoutSec int     `json:"timeout_sec"`
+		DryRun     bool    `json:"dry_run"`
+		Batch      bool    `json:"batch"`
+		EstMinutes float64 `json:"est_minutes"` // float: the schema says number; fractional minutes must not fail the call
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return errText("bad run arguments: " + err.Error())

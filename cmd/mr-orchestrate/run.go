@@ -144,6 +144,11 @@ type recFields struct {
 	RecRule         string
 	Deviated        bool
 	DeviationReason string
+	// E2 spend-down provenance: the batch tag and the boost the recommendation
+	// carried, so boost-influenced dispatches are countable from receipts alone
+	// (the calibration substrate the spend_down_* priors depend on).
+	Batch          bool
+	SpendDownBoost int
 }
 
 // strategyFields (S3R-4) ties the ONE receipt a lane path writes to a strategy
@@ -170,7 +175,7 @@ func (sf strategyFields) stamp(r *dispatch.Record) {
 // any panic/error in the oracle path is swallowed to an empty Decision so a
 // broken table/ledger never blocks dispatch (the plan's fail-open law). The
 // class is the explicit --class or the fallback heuristic on --desc.
-func computeRunRec(classFlag, desc string, ctxTokens int64, latency, batch bool, est time.Duration, now time.Time) (dec router.Decision) {
+func computeRunRec(classFlag, desc string, ctxTokens int64, latency bool, sd spendDownReq, now time.Time) (dec router.Decision) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintln(os.Stderr, "warn: route recommendation failed, proceeding without rec fields (fail-open):", r)
@@ -186,7 +191,7 @@ func computeRunRec(classFlag, desc string, ctxTokens int64, latency, batch bool,
 	cfg := orchcfg.Load(configPath())
 	fzs, _ := fuses.Load(fusesPath())
 	l, _ := ledger.OpenChecked(ledgerPath())
-	return buildRouteDecision(cfg, fzs, l.Snapshot(), class, ctxTokens, now, batch, est)
+	return buildRouteDecision(cfg, fzs, l.Snapshot(), class, ctxTokens, now, sd)
 }
 
 // resolveLane reconciles the internal route recommendation with the operator's
@@ -269,9 +274,10 @@ type runOpts struct {
 	Deviation   string
 	// E2 spend-down (Q2): Batch tags an already-queued batch task (never set
 	// on interactive dispatches); EstMinutes is its expected duration for the
-	// completion-fit gate (0 = unknown → no boost).
+	// completion-fit gate (0 = unknown → no boost). Float: fractional minutes
+	// are natural on the MCP surface.
 	Batch      bool
-	EstMinutes int64
+	EstMinutes float64
 
 	// Strategy seam (S3R-4): when the strategy executor drives a DAG node
 	// through doRun (Origin:"strategy"), these tie the ONE receipt doRun writes
@@ -317,11 +323,18 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	// rec-vs-action is COUNTABLE from receipts alone. FAIL-OPEN: a broken
 	// table/ledger read leaves rec empty + WARNs; a dead oracle must never
 	// block dispatch.
-	rec := computeRunRec(opts.Class, opts.Desc, opts.CtxTokens, opts.Latency, opts.Batch, time.Duration(opts.EstMinutes)*time.Minute, nowRec)
+	// Latch persistence is gated on Live: a dry-run consult previews the boost
+	// but must not advance persistent spend-down state (review: no state side
+	// effects from a "print the decision" surface).
+	rec := computeRunRec(opts.Class, opts.Desc, opts.CtxTokens, opts.Latency, spendDownReq{
+		Batch: opts.Batch, Est: time.Duration(opts.EstMinutes * float64(time.Minute)),
+		Persist: opts.Batch && opts.Live,
+	}, nowRec)
 
 	// Reconcile with the operator's explicit flags (R11). --lane auto adopts the
 	// rec; S2R-4(b) auto→local falls to the first dispatchable alternative.
 	resolvedLane, resolvedModel, resolvedEffort, rf := resolveLane(rec, opts.Lane, opts.Model, opts.Effort, opts.Deviation)
+	rf.Batch, rf.SpendDownBoost = opts.Batch, rec.SpendDownBoost
 	if opts.Lane == "auto" && resolvedLane == "" {
 		// auto resolved to nothing dispatchable (local with no alternative, or a
 		// broken oracle) — relegate rather than dispatch a phantom.
@@ -333,7 +346,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		rec := dispatch.Record{
 			TS: nowRec, OutcomeClass: "deferred", Origin: opts.Origin, TaskClass: rf.TaskClass,
 			RecLane: rf.RecLane, RecModel: rf.RecModel, RecRule: rf.RecRule,
-			Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
+			Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 			Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: opts.Desc,
 		}
 		sf.stamp(&rec)
@@ -393,7 +406,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		rec := dispatch.Record{
 			TS: now, Lane: "claude", Model: resolvedModel, OutcomeClass: "deferred",
 			Origin: opts.Origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
+			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 			Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: opts.Desc,
 		}
 		sf.stamp(&rec)
@@ -442,7 +455,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
 		TokensIn: in, TokensOut: outTok, NumTurns: o.NumTurns, NotionalUSD: o.NotionalUSD,
 		Origin: opts.Origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Desc: opts.Desc,
+		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: opts.Desc,
 	}
 	sf.stamp(&drec)
 	warnIf(dispatch.Append(dispatchPath(), drec), "dispatch append")
@@ -505,7 +518,7 @@ func runRun(args []string) error {
 	origin := fs.String("origin", "cli", "receipt origin tag (S2R-1: cli|mcp|route|nightshift)")
 	deviation := fs.String("deviation", "", "reason recorded when the chosen lane differs from the recommendation (R11)")
 	batch := fs.Bool("batch", false, "E2 spend-down tag: this is an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost")
-	estMinutes := fs.Int64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
+	estMinutes := fs.Float64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
 	strategyName := fs.String("strategy", "", "run a named strategy template as an async DAG dispatch (R11 seam): solo|plan-work-verify|cascade|fan-out-judge|single-critique. Expands from the prompt (goal) + --class, then spawns a detached supervisor and prints {dispatch_id}. Poll via the strategy_status MCP tool.")
 	_ = fs.Parse(args)
 

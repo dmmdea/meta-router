@@ -26,14 +26,28 @@ func samples(usedAgo, usedNow float64, ago time.Duration) []calib.Sample {
 	}
 }
 
-// A near-reset, under-utilized, provider-sourced window arms the latch at 1.
+// A near-reset, under-utilized, provider-sourced window with a live windowed
+// trace read arms the latch at 1, stamped with the transition time and epoch.
 func TestArmsOnUnderUtilizedNearReset(t *testing.T) {
-	e := Assess(samples(9, 10, 15*time.Minute), bucket(10, time.Hour), Entry{}, t0, Defaults())
+	b := bucket(10, time.Hour)
+	e := Assess(samples(9, 10, 15*time.Minute), b, Entry{}, t0, Defaults())
 	if e.Level != 1 {
 		t.Fatalf("want level 1, got %+v", e)
 	}
-	if !e.ChangedAt.Equal(t0) {
-		t.Fatalf("ChangedAt must stamp the transition, got %v", e.ChangedAt)
+	if !e.ChangedAt.Equal(t0) || !e.ResetsAt.Equal(b.ResetsAt) {
+		t.Fatalf("transition must stamp time + epoch, got %+v", e)
+	}
+}
+
+// The latch is epoch-scoped: a persisted entry earned in an earlier window
+// (different ResetsAt) is zeroed, so a fresh window re-arms at 1 — it never
+// inherits a full-level boost from the last window.
+func TestEpochChangeResetsLatch(t *testing.T) {
+	b := bucket(10, time.Hour)
+	stale := Entry{Level: 2, ChangedAt: t0.Add(-2 * time.Hour), ResetsAt: t0.Add(-time.Hour)}
+	e := Assess(samples(9, 10, 15*time.Minute), b, stale, t0, Defaults())
+	if e.Level != 1 || !e.ResetsAt.Equal(b.ResetsAt) {
+		t.Fatalf("new epoch must restart the ramp at 1, got %+v", e)
 	}
 }
 
@@ -59,11 +73,12 @@ func TestForecastBlocksFastBurner(t *testing.T) {
 // Hysteresis: between Raise (25) and Drop (35) an armed latch HOLDS and a
 // disarmed latch stays disarmed.
 func TestHysteresisBand(t *testing.T) {
-	prev := Entry{Level: 1, ChangedAt: t0.Add(-time.Hour)}
-	if e := Assess(samples(29, 30, 15*time.Minute), bucket(30, time.Hour), prev, t0, Defaults()); e.Level != 1 {
+	b := bucket(30, time.Hour)
+	prev := Entry{Level: 1, ChangedAt: t0.Add(-time.Hour), ResetsAt: b.ResetsAt}
+	if e := Assess(samples(29, 30, 15*time.Minute), b, prev, t0, Defaults()); e.Level != 1 {
 		t.Fatalf("armed latch must hold in the band, got %+v", e)
 	}
-	if e := Assess(samples(29, 30, 15*time.Minute), bucket(30, time.Hour), Entry{}, t0, Defaults()); e.Level != 0 {
+	if e := Assess(samples(29, 30, 15*time.Minute), b, Entry{}, t0, Defaults()); e.Level != 0 {
 		t.Fatalf("disarmed latch must not arm in the band, got %+v", e)
 	}
 }
@@ -71,8 +86,9 @@ func TestHysteresisBand(t *testing.T) {
 // Above DropPct the latch drops immediately (no cooldown on the safety
 // direction).
 func TestDropAboveDropPct(t *testing.T) {
-	prev := Entry{Level: 2, ChangedAt: t0.Add(-time.Second)}
-	if e := Assess(samples(39, 40, 15*time.Minute), bucket(40, time.Hour), prev, t0, Defaults()); e.Level != 0 {
+	b := bucket(40, time.Hour)
+	prev := Entry{Level: 2, ChangedAt: t0.Add(-time.Second), ResetsAt: b.ResetsAt}
+	if e := Assess(samples(39, 40, 15*time.Minute), b, prev, t0, Defaults()); e.Level != 0 {
 		t.Fatalf("above DropPct must disarm immediately, got %+v", e)
 	}
 }
@@ -81,17 +97,18 @@ func TestDropAboveDropPct(t *testing.T) {
 // MaxBoost; inside the cooldown it holds.
 func TestRampCooldownAndBound(t *testing.T) {
 	opt := Defaults()
-	armed := Entry{Level: 1, ChangedAt: t0.Add(-opt.Cooldown - time.Second)}
-	e := Assess(samples(9, 10, 15*time.Minute), bucket(10, time.Hour), armed, t0, opt)
+	b := bucket(10, time.Hour)
+	armed := Entry{Level: 1, ChangedAt: t0.Add(-opt.Cooldown - time.Second), ResetsAt: b.ResetsAt}
+	e := Assess(samples(9, 10, 15*time.Minute), b, armed, t0, opt)
 	if e.Level != 2 {
 		t.Fatalf("elapsed cooldown must ramp 1→2, got %+v", e)
 	}
-	fresh := Entry{Level: 1, ChangedAt: t0.Add(-opt.Cooldown / 2)}
-	if e := Assess(samples(9, 10, 15*time.Minute), bucket(10, time.Hour), fresh, t0, opt); e.Level != 1 {
+	fresh := Entry{Level: 1, ChangedAt: t0.Add(-opt.Cooldown / 2), ResetsAt: b.ResetsAt}
+	if e := Assess(samples(9, 10, 15*time.Minute), b, fresh, t0, opt); e.Level != 1 {
 		t.Fatalf("inside cooldown must hold, got %+v", e)
 	}
-	max := Entry{Level: opt.MaxBoost, ChangedAt: t0.Add(-opt.Cooldown - time.Second)}
-	if e := Assess(samples(9, 10, 15*time.Minute), bucket(10, time.Hour), max, t0, opt); e.Level != opt.MaxBoost {
+	max := Entry{Level: opt.MaxBoost, ChangedAt: t0.Add(-opt.Cooldown - time.Second), ResetsAt: b.ResetsAt}
+	if e := Assess(samples(9, 10, 15*time.Minute), b, max, t0, opt); e.Level != opt.MaxBoost {
 		t.Fatalf("ramp must bound at MaxBoost, got %+v", e)
 	}
 }
@@ -124,22 +141,40 @@ func TestDisqualifiers(t *testing.T) {
 }
 
 // A trace whose newest row predates the bucket's budget epoch (row pct >
-// bucket pct) must not feed the average or rate — fall back to the bucket's
-// own measured pct (rate 0).
-func TestStaleEpochTraceFallsBackToBucket(t *testing.T) {
+// bucket pct) is pre-reset history: it must never ARM (no live windowed read),
+// but the bucket's own live pct still holds or drops the latch.
+func TestStaleEpochTraceNeverArms(t *testing.T) {
 	stale := samples(85, 90, 15*time.Minute) // pre-reset epoch rows
-	if e := Assess(stale, bucket(10, time.Hour), Entry{}, t0, Defaults()); e.Level != 1 {
-		t.Fatalf("stale-epoch trace must fall back to the bucket pct and arm, got %+v", e)
+	b := bucket(10, time.Hour)
+	if e := Assess(stale, b, Entry{}, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("stale-epoch trace must not arm (no-data-no-boost), got %+v", e)
+	}
+	armed := Entry{Level: 1, ChangedAt: t0.Add(-time.Hour), ResetsAt: b.ResetsAt}
+	if e := Assess(stale, b, armed, t0, Defaults()); e.Level != 1 {
+		t.Fatalf("stale-epoch trace must hold an armed latch on an idle bucket, got %+v", e)
 	}
 }
 
-// With no usable trace at all, the bucket's own measured pct decides (rate 0).
-func TestNoTraceUsesBucketPct(t *testing.T) {
-	if e := Assess(nil, bucket(10, time.Hour), Entry{}, t0, Defaults()); e.Level != 1 {
-		t.Fatalf("no trace: bucket pct must arm, got %+v", e)
+// With no usable trace (empty or single-point) the latch can HOLD or DROP on
+// the bucket's own measured pct but never arm or ramp — the E1 mirror
+// (no-data-no-brake) in the promote direction (no-data-no-boost).
+func TestNoTraceNeverArmsButStillDrops(t *testing.T) {
+	idle := bucket(10, time.Hour)
+	if e := Assess(nil, idle, Entry{}, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("no trace must never arm, got %+v", e)
 	}
-	if e := Assess(nil, bucket(60, time.Hour), Entry{}, t0, Defaults()); e.Level != 0 {
-		t.Fatalf("no trace: high bucket pct must not arm, got %+v", e)
+	one := []calib.Sample{{TS: t0, Lane: "claude", Window: "5h", UsedPct: 10}}
+	if e := Assess(one, idle, Entry{}, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("single-point trace must never arm, got %+v", e)
+	}
+	armed := Entry{Level: 2, ChangedAt: t0.Add(-time.Hour), ResetsAt: idle.ResetsAt}
+	if e := Assess(nil, idle, armed, t0, Defaults()); e.Level != 2 {
+		t.Fatalf("no trace must hold an armed latch on an idle bucket (not ramp), got %+v", e)
+	}
+	busy := bucket(60, time.Hour)
+	busyArmed := Entry{Level: 2, ChangedAt: t0.Add(-time.Hour), ResetsAt: busy.ResetsAt}
+	if e := Assess(nil, busy, busyArmed, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("no trace must still DROP on the bucket's own high pct, got %+v", e)
 	}
 }
 

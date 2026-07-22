@@ -25,9 +25,13 @@
 //
 // R14-compliant by construction: the only trigger is a real measured
 // under-utilization (provider-sourced or fitted percentages — estimate-sourced
-// buckets never arm a boost), and with an unknown pct, an unanchored window,
-// or a window far from reset the assessor is a no-op. All thresholds are
-// CONFIG priors (orchcfg → Options) awaiting live-trace calibration.
+// buckets never arm a boost), and ARMING additionally requires a live windowed
+// trace read (≥2 same-epoch samples): with an empty, single-point, or
+// stale-epoch trace the latch can HOLD or DROP on the bucket's own measured
+// pct but never arm or ramp — no-data-no-boost, mirroring E1's
+// no-data-no-brake. The latch is epoch-scoped: a bucket whose ResetsAt moved
+// is a NEW window that never armed, so the ramp restarts at 1. All thresholds
+// are CONFIG priors (orchcfg → Options) awaiting live-trace calibration.
 package spenddown
 
 import (
@@ -94,11 +98,17 @@ func Normalize(o Options) Options {
 	return o
 }
 
-// Entry is one bucket's persisted latch: the current boost level and when it
-// last changed (the cooldown anchor).
+// Entry is one bucket's persisted latch: the current boost level, when it last
+// changed (the cooldown anchor), and the budget epoch it belongs to.
 type Entry struct {
 	Level     int       `json:"level"`
 	ChangedAt time.Time `json:"changed_at"`
+	// ResetsAt stamps the bucket's reset moment the transition was earned in.
+	// A bucket whose live ResetsAt differs is a NEW window that never armed —
+	// Assess zeroes the stale entry so the ramp restarts at 1 (a fresh window
+	// must never inherit a full-level boost from the last one; the paced-finish
+	// rule is per window).
+	ResetsAt time.Time `json:"resets_at"`
 }
 
 // State is the persisted latch set, keyed lane+"|"+window (the ledger's key
@@ -123,18 +133,36 @@ func LoadState(path string) State {
 	return s
 }
 
-// SaveState writes the latch atomically (temp + rename) so a torn write can
-// never corrupt the file into a fail-open reset mid-band.
+// SaveState writes the latch via a UNIQUE temp file + rename: a torn write
+// never lands, and two concurrent writers (MCP server + CLI) cannot interleave
+// on a shared temp name. Concurrent saves are still last-writer-wins on the
+// whole map — acceptable because the next Assess recomputes every entry from
+// live bucket/trace data, so a clobbered transition self-heals within one
+// consult (it can cost one cooldown, never correctness).
 func SaveState(path string, s State) error {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(filepath.Dir(path), ".spend-down.tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".spend-down-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	name := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // Fits is the completion-fit start gate (Q2 refinement 1): the task's expected
@@ -152,14 +180,24 @@ func Fits(b ledger.Bucket, est time.Duration, now time.Time, opt Options) bool {
 // Assess grades one bucket's latch transition from the quota trace + the
 // bucket's live numbers. Pure given prev — it never touches disk; the caller
 // owns Load/Save. Disqualified or over-band buckets drop to 0 immediately;
-// arming and ramping are cooldown-gated.
+// arming and ramping are cooldown-gated AND require a live windowed trace read
+// (ok below) — holding and dropping work off the bucket's own measured pct, so
+// a dead trace can end a boost but never start one (the asymmetry is the
+// safety direction both ways).
 func Assess(samples []calib.Sample, b ledger.Bucket, prev Entry, now time.Time, opt Options) Entry {
 	opt = Normalize(opt)
+	// Epoch guard: a persisted latch from a different budget window is a
+	// stale artifact — the new window never armed, so the ramp must restart
+	// (a Level-2 latch surviving a reset would fire full-strength into a
+	// fresh window, exactly the un-paced blast Q2 refinement 5 forbids).
+	if !prev.ResetsAt.IsZero() && !prev.ResetsAt.Equal(b.ResetsAt) {
+		prev = Entry{}
+	}
 	drop := func() Entry {
 		if prev.Level == 0 {
 			return prev // no transition — keep the cooldown anchor as-is
 		}
-		return Entry{Level: 0, ChangedAt: now}
+		return Entry{Level: 0, ChangedAt: now, ResetsAt: b.ResetsAt}
 	}
 
 	// Disqualifiers: no real measured fact → no boost (R14).
@@ -176,12 +214,18 @@ func Assess(samples []calib.Sample, b ledger.Bucket, prev Entry, now time.Time, 
 		return drop() // not near reset — spend-down is an end-of-window mechanism
 	}
 
-	avg, rate := windowedRead(samples, b, now, opt.AvgWindow)
+	avg, last, rate, ok := windowedRead(samples, b, now, opt.AvgWindow)
 
-	// Forecast (Q2 refinement 2): project the averaged trajectory to ResetsAt.
-	projected := avg + rate*b.ResetsAt.Sub(now).Hours()
+	// Forecast (Q2 refinement 2): project the trajectory to ResetsAt from the
+	// NEWEST measured point (the backward-looking mean lags a rising trajectory
+	// by ~rate·lookback/2 — projecting from it would overstate the unused
+	// fraction in the risk direction).
+	projected := last + rate*b.ResetsAt.Sub(now).Hours()
 	if projected > 100 {
 		projected = 100
+	}
+	if projected < 0 {
+		projected = 0
 	}
 	if 100-projected < opt.FloorUnusedPct {
 		return drop() // window on pace to be well-used — nothing to reclaim
@@ -192,18 +236,22 @@ func Assess(samples []calib.Sample, b ledger.Bucket, prev Entry, now time.Time, 
 		return drop()
 	}
 	cooled := prev.ChangedAt.IsZero() || now.Sub(prev.ChangedAt) >= opt.Cooldown
-	if avg < opt.RaisePct && cooled && prev.Level < opt.MaxBoost {
-		return Entry{Level: prev.Level + 1, ChangedAt: now} // arm or ramp (refinement 5)
+	if ok && avg < opt.RaisePct && cooled && prev.Level < opt.MaxBoost {
+		return Entry{Level: prev.Level + 1, ChangedAt: now, ResetsAt: b.ResetsAt} // arm or ramp (refinement 5)
 	}
-	return prev // in-band, cooling, or at bound: hold
+	return prev // no windowed read, in-band, cooling, or at bound: hold
 }
 
-// windowedRead returns the averaged UsedPct over the trace's recent samples
-// plus the trajectory rate (pct/hour), falling back to the bucket's own live
-// pct with rate 0 when the trace is empty, single-point, or stale-epoch
-// (newest row's pct above the bucket's — pre-reset history, the burnrate epoch
-// guard; 1pct tolerance absorbs observation skew).
-func windowedRead(samples []calib.Sample, b ledger.Bucket, now time.Time, look time.Duration) (avg, rate float64) {
+// windowedRead returns the averaged UsedPct over the trace's recent same-epoch
+// samples, the newest sample's pct (the projection anchor), and the trajectory
+// rate (pct/hour). ok reports a usable windowed read (≥2 same-epoch points) —
+// the precondition for ARMING. On an empty, single-point, or stale-epoch trace
+// (newest row's pct above the bucket's — pre-reset history; 1pct tolerance
+// absorbs observation skew) it falls back to the bucket's own live pct with
+// rate 0 and ok=false: enough to hold or drop, never to arm. Rows from an
+// earlier epoch VISIBLE inside the lookback (a used_pct decrease) are cut by
+// the same nondecreasing-suffix rule as burnrate before any math.
+func windowedRead(samples []calib.Sample, b ledger.Bucket, now time.Time, look time.Duration) (avg, last, rate float64, ok bool) {
 	cut := now.Add(-look)
 	var pts []calib.Sample
 	for _, s := range samples {
@@ -212,20 +260,31 @@ func windowedRead(samples []calib.Sample, b ledger.Bucket, now time.Time, look t
 		}
 	}
 	sort.Slice(pts, func(i, j int) bool { return pts[i].TS.Before(pts[j].TS) })
+	// Epoch suffix (burnrate rule): drop everything before the last visible
+	// reset — mixed-epoch points corrupt both the average and the rate.
+	start := 0
+	for i := 1; i < len(pts); i++ {
+		if pts[i].UsedPct < pts[i-1].UsedPct {
+			start = i
+		}
+	}
+	pts = pts[start:]
 	if len(pts) == 0 || pts[len(pts)-1].UsedPct > b.UsedPct+1.0 {
-		return b.UsedPct, 0
+		return b.UsedPct, b.UsedPct, 0, false
 	}
 	sum := 0.0
 	for _, p := range pts {
 		sum += p.UsedPct
 	}
 	avg = sum / float64(len(pts))
-	if len(pts) >= 2 {
-		if span := pts[len(pts)-1].TS.Sub(pts[0].TS); span >= look/4 {
-			// Same min-span guard as burnrate: two points a minute apart must
-			// not extrapolate an hourly rate.
-			rate = (pts[len(pts)-1].UsedPct - pts[0].UsedPct) / span.Hours()
-		}
+	last = pts[len(pts)-1].UsedPct
+	if len(pts) < 2 {
+		return avg, last, 0, false // one live point holds/drops but never arms
 	}
-	return avg, rate
+	if span := pts[len(pts)-1].TS.Sub(pts[0].TS); span >= look/4 {
+		// Same min-span guard as burnrate: two points a minute apart must
+		// not extrapolate an hourly rate.
+		rate = (pts[len(pts)-1].UsedPct - pts[0].UsedPct) / span.Hours()
+	}
+	return avg, last, rate, true
 }

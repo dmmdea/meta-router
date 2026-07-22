@@ -190,8 +190,9 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 		// 3c. E2 spend-down boost (slice-4): a bounded rank RAISE for tagged
 		//     batch work toward a window measured on pace to strand budget at
 		//     reset (Q2: rank-delta, never scalar; the caller owns the batch
-		//     tag, forecast, hysteresis, and completion-fit gates). Stacks with
-		//     the demotions — all three are independent measured facts.
+		//     tag, forecast, hysteresis, and completion-fit gates — and never
+		//     sets Boost on a throttled, downshifted, or masked lane, so the
+		//     demotions above and this raise cannot fight over one lane).
 		eff -= st.Boost
 		pool = append(pool, scored{e: e, effRank: eff,
 			usedPct: normPct(st.WorstPct), priority: lanePriority(e.Lane)})
