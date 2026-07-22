@@ -24,6 +24,7 @@ type LaneStatus struct {
 	ResumeAt      *time.Time      `json:"resume_at,omitempty"`
 	Windows       []ledger.Bucket `json:"windows"`
 	BurnDownshift int             `json:"burn_downshift,omitempty"` // E1: 0-3, >=2 demotes in Route
+	SpendDown     int             `json:"spend_down,omitempty"`     // E2: armed latch level a batch consult would boost by (pre fit-gate)
 }
 
 type Status struct {
@@ -68,7 +69,8 @@ func buildQuotaHealth(bs []ledger.Bucket, tracePath string, cfg orchcfg.Config, 
 }
 
 // buildStatus is the pure core of the status command (unit-tested directly).
-func buildStatus(bs []ledger.Bucket, fs []fuses.Fuse, cfg orchcfg.Config, now time.Time, down map[string]int) Status {
+// sd is the E2 armed-latch view (spendDownArmedByLane); nil when off.
+func buildStatus(bs []ledger.Bucket, fs []fuses.Fuse, cfg orchcfg.Config, now time.Time, down, sd map[string]int) Status {
 	byLane := map[string][]ledger.Bucket{}
 	for _, b := range bs {
 		byLane[b.Lane] = append(byLane[b.Lane], b)
@@ -76,7 +78,8 @@ func buildStatus(bs []ledger.Bucket, fs []fuses.Fuse, cfg orchcfg.Config, now ti
 	st := Status{Lanes: map[string]LaneStatus{}, ActiveFuses: fuses.Active(fs, now), BillingMode: cfg.ClaudeBillingMode}
 	for lane, buckets := range byLane {
 		d := admission.Decide(bs, lane, now, defaultThresholds)
-		ls := LaneStatus{State: string(d.State), Reason: d.Reason, Windows: buckets, BurnDownshift: down[lane]}
+		ls := LaneStatus{State: string(d.State), Reason: d.Reason, Windows: buckets,
+			BurnDownshift: down[lane], SpendDown: sd[lane]}
 		if !d.ResumeAt.IsZero() {
 			t := d.ResumeAt
 			ls.ResumeAt = &t
@@ -149,8 +152,9 @@ func runStatus(args []string) error {
 	}
 	fzs, _ := fuses.Load(fusesPath())
 	cfg := orchcfg.Load(configPath())
-	down := burnDownshiftByLane(snap, calib.Load(quotaTracePath()), cfg, now)
-	st := buildStatus(snap, fzs, cfg, now, down)
+	samples := calib.Load(quotaTracePath())
+	down := burnDownshiftByLane(snap, samples, cfg, now)
+	st := buildStatus(snap, fzs, cfg, now, down, spendDownArmedByLane(snap, samples, cfg, now))
 	st.QuotaHealth = buildQuotaHealth(snap, quotaTracePath(), cfg, now)
 	if raw, err := os.ReadFile(policyAlertPath()); err == nil && json.Valid(raw) {
 		st.PolicyAlert = raw

@@ -13,6 +13,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 	"github.com/dmmdea/meta-router/internal/orch/router"
+	"github.com/dmmdea/meta-router/internal/orch/spenddown"
 )
 
 var rnow = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
@@ -57,7 +58,7 @@ func TestBuildRouteDecisionMasksToGLM(t *testing.T) {
 	snap := []ledger.Bucket{
 		{Lane: "claude", Window: "7d", UsedPct: 99, Source: "provider", ResetsAt: rnow.Add(3 * time.Hour)},
 	}
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow)
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, false, 0)
 	if d.Lane != "glm" || d.Model != "glm-5.2" {
 		t.Fatalf("claude exhausted → glm-5.2 for hard-repo: %+v", d)
 	}
@@ -71,7 +72,7 @@ func TestBuildRouteDecisionMasksToGLM(t *testing.T) {
 func TestUnclassifiableDescRoutesToOpus(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir()) // hermeticity: buildRouteDecision loads the real quota trace + rank table
 	c, _ := router.Classify("do something vague and unusual", 5000, false)
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, c, 5000, rnow)
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, c, 5000, rnow, false, 0)
 	if d.Model != "claude-opus-4-8" {
 		t.Fatalf("unclassifiable desc must route to claude-opus-4-8 (S2R-11): %+v", d)
 	}
@@ -82,7 +83,7 @@ func TestUnclassifiableDescRoutesToOpus(t *testing.T) {
 func TestDispatchViaField(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir()) // hermeticity: buildRouteDecision loads the real quota trace + rank table
 	// mechanical-text at small ctx → local wins → local-offload-mcp
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, router.MechanicalText, 2000, rnow)
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, router.MechanicalText, 2000, rnow, false, 0)
 	if d.Lane != "local" {
 		t.Fatalf("precondition: mechanical-text small ctx should win local: %+v", d)
 	}
@@ -98,7 +99,7 @@ func TestDispatchViaField(t *testing.T) {
 // including dispatch_via and class/rule.
 func TestRouteJSONContract(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir()) // hermeticity: buildRouteDecision loads the real quota trace + rank table
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, router.HardRepo, 0, rnow)
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, router.HardRepo, 0, rnow, false, 0)
 	b := routeJSON(d)
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -175,7 +176,7 @@ func TestRouteAllMaskedShape(t *testing.T) {
 	}
 	// hard-repo lists claude, claude, glm; local not in the class. With claude +
 	// glm exhausted, all candidates are masked.
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow)
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, false, 0)
 	if d.Lane != "" {
 		t.Fatalf("all masked must relegate (Lane empty): %+v", d)
 	}
@@ -237,7 +238,7 @@ func TestBuildRouteDecisionEndToEndBurnDownshift(t *testing.T) {
 
 	// workhorse-coding: Seed ranks glm#1, claude-sonnet-5#2. The fast burn must
 	// demote glm below claude on the real route path.
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.Workhorse, 0, now)
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.Workhorse, 0, now, false, 0)
 	if d.Lane == "glm" {
 		t.Fatalf("fast-burning rank-1 glm must be demoted off the win on the real route path: %+v", d)
 	}
@@ -269,5 +270,57 @@ func TestBurnDownshiftThresholdOverrides(t *testing.T) {
 	}
 	if floor["glm"] != 2 {
 		t.Fatalf("with FastX defaulted and MedX default 1.5, m=1.5 must be medium (2), got %d", floor["glm"])
+	}
+}
+
+// E2 wiring end-to-end: a BATCH-tagged consult with an armed latch on an
+// under-utilized near-reset glm window boosts glm to parity (eff rank 1) where
+// it wins the depletion tie against claude; the same consult untagged — or
+// without a duration for the completion-fit gate — routes claude un-boosted.
+func TestBuildRouteDecisionSpendDownBoost(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	snap := []ledger.Bucket{
+		{Lane: "claude", Window: "5h", UsedPct: 40, Source: "provider", ResetsAt: rnow.Add(3 * time.Hour)},
+		{Lane: "glm", Window: "5h", UsedPct: 10, Source: "provider", ResetsAt: rnow.Add(time.Hour)},
+	}
+	// Pre-seeded latch: glm armed at 2 with a fresh cooldown anchor → the
+	// consult HOLDS it at 2 (hard-repo glm is seed rank 3 → eff 1).
+	seed := spenddown.State{"glm|5h": {Level: 2, ChangedAt: rnow.Add(-time.Minute)}}
+	if err := spenddown.SaveState(spendDownPath(), seed); err != nil {
+		t.Fatal(err)
+	}
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, true, 30*time.Minute)
+	if d.Lane != "glm" || d.SpendDownBoost != 2 || !strings.Contains(d.Reason, "spend-down") {
+		t.Fatalf("batch consult must boost armed glm to the winning tie: %+v", d)
+	}
+	if d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, false, 0); d.Lane != "claude" || d.SpendDownBoost != 0 {
+		t.Fatalf("interactive consult must never boost: %+v", d)
+	}
+	if d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, true, 0); d.Lane != "claude" || d.SpendDownBoost != 0 {
+		t.Fatalf("unknown duration must close the completion-fit gate: %+v", d)
+	}
+}
+
+// spendDownBoostByLane: an idle near-reset window ARMS (level 1) and persists
+// the latch; an active E1 downshift on the same lane blocks the boost (the
+// brake wins); the kill-switch disables everything.
+func TestSpendDownLatchArmsAndPersists(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	snap := []ledger.Bucket{
+		{Lane: "glm", Window: "5h", UsedPct: 10, Source: "provider", ResetsAt: rnow.Add(time.Hour)},
+	}
+	boost := spendDownBoostByLane(snap, nil, orchcfg.Defaults(), nil, 30*time.Minute, rnow)
+	if boost["glm"] != 1 {
+		t.Fatalf("idle near-reset glm must arm at 1: %v", boost)
+	}
+	st := spenddown.LoadState(spendDownPath())
+	if e := st["glm|5h"]; e.Level != 1 || !e.ChangedAt.Equal(rnow) {
+		t.Fatalf("latch transition must persist: %+v", st)
+	}
+	if b := spendDownBoostByLane(snap, nil, orchcfg.Defaults(), map[string]int{"glm": 2}, 30*time.Minute, rnow); b["glm"] != 0 {
+		t.Fatalf("an E1 downshift must block the boost (brake wins): %v", b)
+	}
+	if b := spendDownBoostByLane(snap, nil, orchcfg.Config{SpendDownOff: true}, nil, 30*time.Minute, rnow); len(b) != 0 {
+		t.Fatalf("kill-switch must disable spend-down: %v", b)
 	}
 }

@@ -56,6 +56,13 @@ type LaneState struct {
 	// below; 1 (slow) is advisory-only. Kept as int so this package stays free
 	// of a burnrate import (the router consumes a signal, not the mechanism).
 	Downshift int
+	// Boost is the E2 spend-down rank boost (0..bounded, spenddown.Entry.Level),
+	// subtracted from the lane's rank below. The caller sets it ONLY for
+	// explicitly batch-tagged consults whose task passes the completion-fit
+	// gate, on lanes whose window is measured under-utilized near reset — an
+	// untagged (interactive) consult always routes with Boost 0. Kept as int
+	// for the same signal-not-mechanism reason as Downshift.
+	Boost int
 }
 
 type Masked struct{ Lane, Model, Reason string }
@@ -67,6 +74,7 @@ type Decision struct {
 	Masked                                      []Masked
 	Alternatives                                []Entry   // Pareto-pruned runners-up (receipt/replay substrate)
 	ResumeAt                                    time.Time // earliest resume when EVERYTHING is masked (relegation, never rejection)
+	SpendDownBoost                              int       // E2 boost the WINNING lane carried (0 = none); transparency for receipts/JSON
 }
 
 const CtxCapCodex = 258_000 // CLI hard cap 272K-in incl. reserve, ~258K effective (baseline §1, independent)
@@ -179,6 +187,12 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 		if st.Downshift >= 2 {
 			eff++
 		}
+		// 3c. E2 spend-down boost (slice-4): a bounded rank RAISE for tagged
+		//     batch work toward a window measured on pace to strand budget at
+		//     reset (Q2: rank-delta, never scalar; the caller owns the batch
+		//     tag, forecast, hysteresis, and completion-fit gates). Stacks with
+		//     the demotions — all three are independent measured facts.
+		eff -= st.Boost
 		pool = append(pool, scored{e: e, effRank: eff,
 			usedPct: normPct(st.WorstPct), priority: lanePriority(e.Lane)})
 	}
@@ -213,6 +227,10 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 		d.Reason = "unknown class → quality-first default (HardRepo ordering, R14a/S2R-11); brain should pass --class for precision"
 	} else {
 		d.Reason = fmt.Sprintf("rank %d %s/%s admitted (state=%s)", win.e.Rank, win.e.Lane, win.e.Model, states[win.e.Lane].State)
+	}
+	if b := states[win.e.Lane].Boost; b > 0 {
+		d.SpendDownBoost = b
+		d.Reason += fmt.Sprintf(" (spend-down boost -%d: window under-utilized near reset, batch-tagged)", b)
 	}
 
 	// Alternatives = remaining candidates minus Pareto-dominated ones. Dominated

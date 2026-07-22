@@ -4,6 +4,12 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.7.0] — 2026-07-22
+
+### Added
+- **E2 — spend-down** (`internal/orch/spenddown`): a premium window measured under-utilized near its reset earns a bounded, ramped rank BOOST (rank-delta, never scalar) for explicitly batch-tagged, already-queued work — never interactive consults. Q2-locked refinements all present: completion-fit start gate (expected duration must end before reset + buffer; unknown never fits), forecast trigger on the PROJECTED end-of-window unused fraction (windowed/averaged quota reads, not instantaneous), lane-specific per-bucket ResetsAt, hysteresis (arm <25% / disarm >35% averaged used) with a cooldown-gated one-level-per-interval ramp bounded at 2, and immediate drops. Estimate-sourced buckets never arm; a lane under an active E1 burn-rate downshift never boosts (the brake wins); local never boosts. All thresholds are config priors (`spend_down_*` in `config.json`, `spend_down_off` kill-switch) awaiting live-trace calibration; the latch persists at `~/.meta-router/orchestrate/spend-down.json`.
+- Surfaces: `route`/`run` gain `-batch` + `-est-minutes` (CLI) and `batch` + `est_minutes` (MCP tools); route JSON adds additive `spend_down_boost`; the winner's `reason` names the applied boost; `status`/`quota_status` show the read-only armed latch per lane (`spend_down`).
+
 ## [0.6.0] — 2026-07-22
 
 ### Added

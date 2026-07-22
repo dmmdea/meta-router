@@ -170,7 +170,7 @@ func (sf strategyFields) stamp(r *dispatch.Record) {
 // any panic/error in the oracle path is swallowed to an empty Decision so a
 // broken table/ledger never blocks dispatch (the plan's fail-open law). The
 // class is the explicit --class or the fallback heuristic on --desc.
-func computeRunRec(classFlag, desc string, ctxTokens int64, latency bool, now time.Time) (dec router.Decision) {
+func computeRunRec(classFlag, desc string, ctxTokens int64, latency, batch bool, est time.Duration, now time.Time) (dec router.Decision) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintln(os.Stderr, "warn: route recommendation failed, proceeding without rec fields (fail-open):", r)
@@ -186,7 +186,7 @@ func computeRunRec(classFlag, desc string, ctxTokens int64, latency bool, now ti
 	cfg := orchcfg.Load(configPath())
 	fzs, _ := fuses.Load(fusesPath())
 	l, _ := ledger.OpenChecked(ledgerPath())
-	return buildRouteDecision(cfg, fzs, l.Snapshot(), class, ctxTokens, now)
+	return buildRouteDecision(cfg, fzs, l.Snapshot(), class, ctxTokens, now, batch, est)
 }
 
 // resolveLane reconciles the internal route recommendation with the operator's
@@ -267,6 +267,11 @@ type runOpts struct {
 	Latency     bool
 	Origin      string
 	Deviation   string
+	// E2 spend-down (Q2): Batch tags an already-queued batch task (never set
+	// on interactive dispatches); EstMinutes is its expected duration for the
+	// completion-fit gate (0 = unknown → no boost).
+	Batch      bool
+	EstMinutes int64
 
 	// Strategy seam (S3R-4): when the strategy executor drives a DAG node
 	// through doRun (Origin:"strategy"), these tie the ONE receipt doRun writes
@@ -312,7 +317,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	// rec-vs-action is COUNTABLE from receipts alone. FAIL-OPEN: a broken
 	// table/ledger read leaves rec empty + WARNs; a dead oracle must never
 	// block dispatch.
-	rec := computeRunRec(opts.Class, opts.Desc, opts.CtxTokens, opts.Latency, nowRec)
+	rec := computeRunRec(opts.Class, opts.Desc, opts.CtxTokens, opts.Latency, opts.Batch, time.Duration(opts.EstMinutes)*time.Minute, nowRec)
 
 	// Reconcile with the operator's explicit flags (R11). --lane auto adopts the
 	// rec; S2R-4(b) auto→local falls to the first dispatchable alternative.
@@ -499,6 +504,8 @@ func runRun(args []string) error {
 	latency := fs.Bool("latency-sensitive", false, "classifier hint: prefer the low-latency lane")
 	origin := fs.String("origin", "cli", "receipt origin tag (S2R-1: cli|mcp|route|nightshift)")
 	deviation := fs.String("deviation", "", "reason recorded when the chosen lane differs from the recommendation (R11)")
+	batch := fs.Bool("batch", false, "E2 spend-down tag: this is an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost")
+	estMinutes := fs.Int64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
 	strategyName := fs.String("strategy", "", "run a named strategy template as an async DAG dispatch (R11 seam): solo|plan-work-verify|cascade|fan-out-judge|single-critique. Expands from the prompt (goal) + --class, then spawns a detached supervisor and prints {dispatch_id}. Poll via the strategy_status MCP tool.")
 	_ = fs.Parse(args)
 
@@ -536,6 +543,7 @@ func runRun(args []string) error {
 		Live: *live, Force: *force, CWD: *cwd, TimeoutSec: *timeoutSec,
 		MaxNotional: *maxNotional, KeepHome: *keepHome, Class: *class, Desc: *desc,
 		CtxTokens: *ctxTokens, Latency: *latency, Origin: *origin, Deviation: *deviation,
+		Batch: *batch, EstMinutes: *estMinutes,
 	}, &buf)
 	if buf.Len() > 0 {
 		fmt.Print(buf.String())

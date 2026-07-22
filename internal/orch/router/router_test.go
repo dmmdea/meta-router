@@ -230,3 +230,41 @@ func TestRouteThrottleAndDownshiftStack(t *testing.T) {
 		t.Fatalf("throttle+downshift must stack (glm eff 3 ties claude 3 → claude on priority), got %q", d2.Lane)
 	}
 }
+
+// E2 spend-down: a caller-set Boost is a rank RAISE bounded by the caller; the
+// router just subtracts it (rank-delta, never scalar) and surfaces the winning
+// lane's boost for transparency.
+func TestRouteSpendDownBoost(t *testing.T) {
+	tbl := Seed()
+	now := time.Now().UTC()
+	base := Route(tbl, HardRepo, openStates(), 0, now)
+	if base.Lane != "claude" || base.SpendDownBoost != 0 {
+		t.Fatalf("baseline must be un-boosted claude: %+v", base)
+	}
+	glmRank := 0
+	for _, e := range tbl[HardRepo] {
+		if e.Lane == "glm" {
+			glmRank = e.Rank
+		}
+	}
+	if glmRank <= 1 {
+		t.Fatalf("test premise: glm must trail claude in hard-repo, got rank %d", glmRank)
+	}
+	s := openStates()
+	st := s["glm"]
+	st.Boost = glmRank - 1 // brings glm to eff rank 1 — ties claude, wins on lower depletion (20 < 40)
+	s["glm"] = st
+	d := Route(tbl, HardRepo, s, 0, now)
+	if d.Lane != "glm" {
+		t.Fatalf("boost %d must lift glm to parity and win the depletion tie: %+v", st.Boost, d)
+	}
+	if d.SpendDownBoost != st.Boost || !strings.Contains(d.Reason, "spend-down boost") {
+		t.Fatalf("winning boost must surface in the decision: %+v", d)
+	}
+	// One level short of parity must NOT flip the winner.
+	st.Boost--
+	s["glm"] = st
+	if d := Route(tbl, HardRepo, s, 0, now); d.Lane != "claude" || d.SpendDownBoost != 0 {
+		t.Fatalf("sub-parity boost must not flip nor mark the un-boosted winner: %+v", d)
+	}
+}

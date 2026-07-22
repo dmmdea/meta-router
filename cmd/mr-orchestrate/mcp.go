@@ -169,6 +169,8 @@ func toolSchemas() []map[string]any {
 					"class":             strProp("explicit task class (skips the heuristic classifier)"),
 					"ctx_tokens":        numProp("estimated input context tokens (ctx-cap masks)"),
 					"latency_sensitive": boolProp("prefer the low-latency lane"),
+					"batch":             boolProp("E2 spend-down tag: an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost"),
+					"est_minutes":       numProp("expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)"),
 				},
 				"required": []string{"task"},
 			},
@@ -187,6 +189,8 @@ func toolSchemas() []map[string]any {
 					"cwd":         strProp("working directory for the lane-binary call"),
 					"timeout_sec": numProp("hard timeout for the lane-binary call"),
 					"dry_run":     boolProp("print the admission decision + args without dispatching (default false)"),
+					"batch":       boolProp("E2 spend-down tag: an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost"),
+					"est_minutes": numProp("expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)"),
 				},
 				"required": []string{"prompt"},
 			},
@@ -266,10 +270,12 @@ func errText(s string) toolResult {
 // answer with resume_at.
 func toolRoute(args json.RawMessage) toolResult {
 	var a struct {
-		Task      string `json:"task"`
-		Class     string `json:"class"`
-		CtxTokens int64  `json:"ctx_tokens"`
-		Latency   bool   `json:"latency_sensitive"`
+		Task       string `json:"task"`
+		Class      string `json:"class"`
+		CtxTokens  int64  `json:"ctx_tokens"`
+		Latency    bool   `json:"latency_sensitive"`
+		Batch      bool   `json:"batch"`
+		EstMinutes int64  `json:"est_minutes"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return errText("bad route arguments: " + err.Error())
@@ -306,7 +312,7 @@ func toolRoute(args json.RawMessage) toolResult {
 	} else {
 		class, _ = router.Classify(a.Task, a.CtxTokens, a.Latency)
 	}
-	d := buildRouteDecision(cfg, fzs, snap, class, a.CtxTokens, now)
+	d := buildRouteDecision(cfg, fzs, snap, class, a.CtxTokens, now, a.Batch, time.Duration(a.EstMinutes)*time.Minute)
 
 	// Consult receipt (Origin "mcp"): the delegation-coverage numerator.
 	writeRouteReceipt(d, class, a.Task, "mcp", now)
@@ -337,6 +343,8 @@ func toolRun(args json.RawMessage) toolResult {
 		CWD        string `json:"cwd"`
 		TimeoutSec int    `json:"timeout_sec"`
 		DryRun     bool   `json:"dry_run"`
+		Batch      bool   `json:"batch"`
+		EstMinutes int64  `json:"est_minutes"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return errText("bad run arguments: " + err.Error())
@@ -352,7 +360,7 @@ func toolRun(args json.RawMessage) toolResult {
 	code, err := doRun(runOpts{
 		Prompt: a.Prompt, Lane: lane, Model: a.Model, Effort: a.Effort, Class: a.Class,
 		CWD: a.CWD, TimeoutSec: a.TimeoutSec, Live: !a.DryRun, Desc: descFromPrompt(a.Prompt),
-		Origin: "mcp",
+		Origin: "mcp", Batch: a.Batch, EstMinutes: a.EstMinutes,
 	}, &buf)
 	if err != nil {
 		return errText(err.Error()) // config_error (exit 1)
@@ -422,8 +430,9 @@ func toolQuotaStatus() toolResult {
 	fzs, _ := fuses.Load(fusesPath())
 	snap := l.Snapshot()
 	cfg := orchcfg.Load(configPath())
-	down := burnDownshiftByLane(snap, calib.Load(quotaTracePath()), cfg, now)
-	st := buildStatus(snap, fzs, cfg, now, down)
+	samples := calib.Load(quotaTracePath())
+	down := burnDownshiftByLane(snap, samples, cfg, now)
+	st := buildStatus(snap, fzs, cfg, now, down, spendDownArmedByLane(snap, samples, cfg, now))
 	// Parity with runStatus: the E6 quota_health signal-liveness block must be
 	// visible on the machine-facing MCP surface too, or a stalled quota signal is
 	// invisible to the machine that reads quota_status.
