@@ -168,13 +168,17 @@ func spendDownBoostByLane(snap []ledger.Bucket, samples []calib.Sample, cfg orch
 		}
 		k := spenddown.Key(b)
 		live[k] = true
-		prev := st[k]
+		// The freeze below must compare against the EPOCH-GUARDED prev — the
+		// raw persisted entry can carry a stale level from an earlier window,
+		// which would let an excluded lane "arm" to 1 right after an epoch
+		// flip (delta-review NEW-1).
+		prev := spenddown.EpochGuard(st[k], b)
 		e := spenddown.Assess(samples, b, prev, now, opt)
 		eligible := down[b.Lane] == 0 && states[b.Lane].State == "open"
 		if !eligible && e.Level > prev.Level {
 			e = prev // hold, never ramp, while the lane is boost-excluded
 		}
-		if e != prev {
+		if e != st[k] {
 			st[k] = e
 			changed = true
 		}
@@ -182,10 +186,15 @@ func spendDownBoostByLane(snap []ledger.Bucket, samples []calib.Sample, cfg orch
 			boost[b.Lane] = e.Level
 		}
 	}
-	for k := range st {
-		if !live[k] {
-			delete(st, k)
-			changed = true
+	// Prune orphan keys — but only when the snapshot actually carried buckets:
+	// a failed ledger read yields an EMPTY snapshot, and wiping the whole latch
+	// on a transient lock would be state loss, not hygiene.
+	if len(live) > 0 {
+		for k := range st {
+			if !live[k] {
+				delete(st, k)
+				changed = true
+			}
 		}
 	}
 	if persist && changed {

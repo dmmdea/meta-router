@@ -228,3 +228,49 @@ func TestNormalizeInvertedBand(t *testing.T) {
 		t.Fatalf("inverted band must reset to defaults, got %+v", n)
 	}
 }
+
+// NEW-2 (delta review): an ARMED entry persisted by a pre-epoch-stamp build
+// (zero ResetsAt) is stale — it must re-ramp from 1, never hold its old level.
+func TestLegacyEntryWithoutEpochStampIsStale(t *testing.T) {
+	b := bucket(10, time.Hour)
+	legacy := Entry{Level: 2, ChangedAt: t0.Add(-2 * time.Hour)} // no ResetsAt
+	if e := Assess(samples(9, 10, 15*time.Minute), b, legacy, t0, Defaults()); e.Level != 1 {
+		t.Fatalf("legacy armed entry must restart the ramp at 1, got %+v", e)
+	}
+}
+
+// NEW-3 (delta review): the epoch guard zeroes the LEVEL but preserves the
+// cooldown anchor, so a re-anchor coinciding with a recent transition cannot
+// bypass the anti-flap cooldown.
+func TestEpochGuardPreservesCooldownAnchor(t *testing.T) {
+	b := bucket(10, time.Hour)
+	recent := Entry{Level: 1, ChangedAt: t0.Add(-time.Minute), ResetsAt: t0.Add(-30 * time.Minute)}
+	if e := Assess(samples(9, 10, 15*time.Minute), b, recent, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("epoch flip with a fresh anchor must wait out the cooldown, got %+v", e)
+	}
+}
+
+// NEW-4 (delta review): the bucket's live pct folds into the hysteresis reads —
+// a stale-low trace must never out-vote a surged bucket (ledger shadow
+// accounting advances on paths that append no trace row).
+func TestSurgedBucketOutvotesStaleLowTrace(t *testing.T) {
+	lowTrace := samples(5, 5, 10*time.Minute)
+	surged := bucket(60, time.Hour)
+	if e := Assess(lowTrace, surged, Entry{}, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("a 60%% bucket must block arming regardless of a 5%% trace, got %+v", e)
+	}
+	armed := Entry{Level: 2, ChangedAt: t0.Add(-time.Hour), ResetsAt: surged.ResetsAt}
+	if e := Assess(lowTrace, surged, armed, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("a 60%% bucket must DROP an armed latch regardless of the trace, got %+v", e)
+	}
+}
+
+// NEW-5 (delta review): two samples seconds apart are one instantaneous
+// observation, not a windowed read — they must not satisfy the arming
+// precondition.
+func TestThinSpanNeverArms(t *testing.T) {
+	thin := samples(9, 10, 30*time.Second) // span 30s < AvgWindow/4 (3m45s)
+	if e := Assess(thin, bucket(10, time.Hour), Entry{}, t0, Defaults()); e.Level != 0 {
+		t.Fatalf("sub-span trace must not arm, got %+v", e)
+	}
+}

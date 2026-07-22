@@ -393,3 +393,25 @@ func TestSpendDownArmedByLaneReadOnly(t *testing.T) {
 		t.Fatalf("kill-switch must return nil: %v", a)
 	}
 }
+
+// NEW-1 (delta review): the exclusion freeze compares against the
+// EPOCH-GUARDED prev — a boost-excluded lane holding a stale-epoch latch must
+// end at level 0, not sneak an arm through the raw-prev comparison.
+func TestExcludedLaneCannotArmAcrossEpochFlip(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	snap := []ledger.Bucket{
+		{Lane: "glm", Window: "5h", UsedPct: 10, Source: "provider", ResetsAt: rnow.Add(time.Hour)},
+	}
+	// Stale latch from an earlier window at level 1.
+	seed := spenddown.State{"glm|5h": {Level: 1, ChangedAt: rnow.Add(-2 * time.Hour), ResetsAt: rnow.Add(-time.Hour)}}
+	if err := spenddown.SaveState(spendDownPath(), seed); err != nil {
+		t.Fatal(err)
+	}
+	throttled := map[string]router.LaneState{"glm": {State: "throttled"}}
+	if b := spendDownBoostByLane(snap, glmTrace(rnow), orchcfg.Defaults(), nil, throttled, 30*time.Minute, rnow, true); b["glm"] != 0 {
+		t.Fatalf("excluded lane must not boost: %v", b)
+	}
+	if e := spenddown.LoadState(spendDownPath())["glm|5h"]; e.Level != 0 {
+		t.Fatalf("excluded lane after an epoch flip must persist level 0, got %+v", e)
+	}
+}

@@ -184,15 +184,31 @@ func Fits(b ledger.Bucket, est time.Duration, now time.Time, opt Options) bool {
 // (ok below) — holding and dropping work off the bucket's own measured pct, so
 // a dead trace can end a boost but never start one (the asymmetry is the
 // safety direction both ways).
+// EpochGuard zeroes a persisted latch LEVEL from a different budget window —
+// the new window never armed, so the ramp must restart (a Level-2 latch
+// surviving a reset would fire full-strength into a fresh window, exactly the
+// un-paced blast Q2 refinement 5 forbids). An armed entry with a ZERO stamp is
+// pre-epoch-stamp legacy state and is equally stale. ChangedAt is PRESERVED as
+// the cooldown anchor: across a mid-window re-anchor (a provider observation
+// replacing a self-anchored estimate) this keeps the anti-flap cooldown alive,
+// and across a genuine reset it delays the first arm by at most one cooldown —
+// the paced direction either way. Callers comparing against prev (the
+// exclusion freeze) must compare against THIS view, not the raw entry.
+func EpochGuard(prev Entry, b ledger.Bucket) Entry {
+	if prev.Level == 0 && prev.ResetsAt.IsZero() {
+		return prev // empty entry — nothing to guard
+	}
+	if prev.ResetsAt.Equal(b.ResetsAt) {
+		return prev // same epoch — the latch is live
+	}
+	// Different epoch, or an ARMED legacy entry with no stamp: the level is
+	// stale; only the cooldown anchor survives.
+	return Entry{ChangedAt: prev.ChangedAt}
+}
+
 func Assess(samples []calib.Sample, b ledger.Bucket, prev Entry, now time.Time, opt Options) Entry {
 	opt = Normalize(opt)
-	// Epoch guard: a persisted latch from a different budget window is a
-	// stale artifact — the new window never armed, so the ramp must restart
-	// (a Level-2 latch surviving a reset would fire full-strength into a
-	// fresh window, exactly the un-paced blast Q2 refinement 5 forbids).
-	if !prev.ResetsAt.IsZero() && !prev.ResetsAt.Equal(b.ResetsAt) {
-		prev = Entry{}
-	}
+	prev = EpochGuard(prev, b)
 	drop := func() Entry {
 		if prev.Level == 0 {
 			return prev // no transition — keep the cooldown anchor as-is
@@ -215,6 +231,18 @@ func Assess(samples []calib.Sample, b ledger.Bucket, prev Entry, now time.Time, 
 	}
 
 	avg, last, rate, ok := windowedRead(samples, b, now, opt.AvgWindow)
+	// The bucket's live pct is folded into BOTH the projection anchor and the
+	// hysteresis reads: ledger shadow accounting advances on paths that append
+	// no trace row, so a fresh in-window trace can sit far below the real
+	// consumption — the trace alone must never out-vote a higher live bucket
+	// (that asymmetry always errs against boosting).
+	if b.UsedPct > last {
+		last = b.UsedPct
+	}
+	hi := avg
+	if b.UsedPct > hi {
+		hi = b.UsedPct
+	}
 
 	// Forecast (Q2 refinement 2): project the trajectory to ResetsAt from the
 	// NEWEST measured point (the backward-looking mean lags a rising trajectory
@@ -231,12 +259,13 @@ func Assess(samples []calib.Sample, b ledger.Bucket, prev Entry, now time.Time, 
 		return drop() // window on pace to be well-used — nothing to reclaim
 	}
 
-	// Hysteresis (Q2 refinement 4).
-	if avg > opt.DropPct {
+	// Hysteresis (Q2 refinement 4): drop on the HIGHER of trace-average and
+	// live bucket pct; arm only when BOTH sit below the raise line.
+	if hi > opt.DropPct {
 		return drop()
 	}
 	cooled := prev.ChangedAt.IsZero() || now.Sub(prev.ChangedAt) >= opt.Cooldown
-	if ok && avg < opt.RaisePct && cooled && prev.Level < opt.MaxBoost {
+	if ok && hi < opt.RaisePct && cooled && prev.Level < opt.MaxBoost {
 		return Entry{Level: prev.Level + 1, ChangedAt: now, ResetsAt: b.ResetsAt} // arm or ramp (refinement 5)
 	}
 	return prev // no windowed read, in-band, cooling, or at bound: hold
@@ -281,9 +310,13 @@ func windowedRead(samples []calib.Sample, b ledger.Bucket, now time.Time, look t
 	if len(pts) < 2 {
 		return avg, last, 0, false // one live point holds/drops but never arms
 	}
-	if span := pts[len(pts)-1].TS.Sub(pts[0].TS); span >= look/4 {
-		// Same min-span guard as burnrate: two points a minute apart must
-		// not extrapolate an hourly rate.
+	if span := pts[len(pts)-1].TS.Sub(pts[0].TS); span < look/4 {
+		// Same min-span guard as burnrate, applied to ok itself: two points
+		// seconds apart (a rapid double consult) are effectively ONE
+		// instantaneous observation — not the windowed read arming requires,
+		// and never a basis to extrapolate an hourly rate.
+		return avg, last, 0, false
+	} else {
 		rate = (pts[len(pts)-1].UsedPct - pts[0].UsedPct) / span.Hours()
 	}
 	return avg, last, rate, true
