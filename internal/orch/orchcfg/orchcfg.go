@@ -52,6 +52,20 @@ type Config struct {
 	BurnFastX        float64 `json:"burn_fast_x"`
 	BurnMedX         float64 `json:"burn_med_x"`
 	BurnSlowX        float64 `json:"burn_slow_x"`
+	// Slice-4 E2 spend-down (Q2): batch-only rank boost toward a window
+	// measured under-utilized near its reset. All numerics are CONFIG priors;
+	// zero/invalid values fall back to spenddown.Defaults() via Normalize (the
+	// no-blog-lore-constants rule — real-trace calibration retunes these
+	// without a code change). SpendDownOff is the kill-switch.
+	SpendDownOff            bool    `json:"spend_down_off"`
+	SpendDownFloorUnusedPct float64 `json:"spend_down_floor_unused_pct"` // default 30
+	SpendDownHorizonMin     int64   `json:"spend_down_horizon_min"`      // default 90
+	SpendDownRaisePct       float64 `json:"spend_down_raise_pct"`        // default 25
+	SpendDownDropPct        float64 `json:"spend_down_drop_pct"`         // default 35
+	SpendDownCooldownSec    int64   `json:"spend_down_cooldown_sec"`     // default 600
+	SpendDownBufferMin      int64   `json:"spend_down_buffer_min"`       // default 10
+	SpendDownMaxBoost       int     `json:"spend_down_max_boost"`        // default 2
+	SpendDownAvgWindowMin   int64   `json:"spend_down_avg_window_min"`   // default 15
 	// Slice-4 E6: provider-signal/trace staleness alarm horizon (hours).
 	QuotaStaleHours int `json:"quota_stale_hours"` // default 48
 }

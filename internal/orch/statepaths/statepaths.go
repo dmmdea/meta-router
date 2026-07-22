@@ -31,6 +31,7 @@ func GLMAlert() string    { return filepath.Join(StateDir(), "glm-alert.json") }
 func CodexAlert() string  { return filepath.Join(StateDir(), "codex-alert.json") }
 func GLMToken() string    { return filepath.Join(StateDir(), "glm-token") }
 func RankTable() string   { return filepath.Join(StateDir(), "rank-table.json") }
+func SpendDown() string   { return filepath.Join(StateDir(), "spend-down.json") }
 
 // Strategy state (slice 3): per-dispatch dirs under StateDir()/strategy/<id>/
 // hold state.json (durable state-as-bus + crash-resume), journal.jsonl (event

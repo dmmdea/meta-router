@@ -90,7 +90,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		rec := dispatch.Record{
 			TS: now, Lane: "codex", Model: model, OutcomeClass: "deferred",
 			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
+			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 			Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: desc,
 		}
 		sf.stamp(&rec)
@@ -150,7 +150,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		TokensIn: o.Usage.Input, TokensOut: o.Usage.Output + o.Usage.ReasoningOutput,
 		NumTurns: o.Turns,
 		Origin:   origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Desc: desc,
+		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")
@@ -238,7 +238,7 @@ func runLocalLane(out io.Writer, prompt, class, model, cwd string, timeoutSec in
 		TS: now, Lane: "local", Model: model, OutcomeClass: o.Class,
 		Admit: true, AdmitState: "open", NumTurns: o.NumTurns,
 		Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Desc: desc,
+		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (local)")
@@ -379,7 +379,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 		rec := dispatch.Record{
 			TS: now, Lane: "glm", Model: model, OutcomeClass: "deferred",
 			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
+			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 			Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: desc,
 		}
 		sf.stamp(&rec)
@@ -418,7 +418,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 			rec := dispatch.Record{
 				TS: now, Lane: "glm", Model: model, OutcomeClass: "deferred",
 				Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-				RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
+				RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 				Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: desc,
 			}
 			sf.stamp(&rec)
@@ -462,7 +462,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
 		TokensIn: in, TokensOut: outTok, NumTurns: o.NumTurns, NotionalUSD: o.NotionalUSD,
 		Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Desc: desc,
+		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")

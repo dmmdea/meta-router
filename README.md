@@ -235,7 +235,7 @@ meta-router runs entirely on your machine and sends prompt text only to the loca
 
 ## The v3 orchestrator + eval harness (v0.5.0)
 
-Beyond the surfacer, this repo now carries the **multi-lane orchestrator** (`mr-orchestrate`): it routes headless tasks across claude / codex / GLM / local-model lanes under a quota ledger with admission gates, burn-rate pacing, and per-lane error handling. State lives under `~/.meta-router/orchestrate/` (config, ledger, dispatch receipts) — nothing operator-specific is in the repo.
+Beyond the surfacer, this repo now carries the **multi-lane orchestrator** (`mr-orchestrate`): it routes headless tasks across claude / codex / GLM / local-model lanes under a quota ledger with admission gates, burn-rate pacing (E1 downshift when a window is on pace to blow, E2 spend-down boost steering batch-tagged work into a window about to strand unused budget), and per-lane error handling. State lives under `~/.meta-router/orchestrate/` (config, ledger, dispatch receipts) — nothing operator-specific is in the repo.
 
 The **eval substrate** ships too: a routing gold-set schema + verifier engine (`internal/goldtask`), an execution verifier harness (`mr-goldverify`: checkout parent → apply candidate diff → run held-out tests), and a local-verifier ceiling meter (`mr-verifier`, AURC/AUGRC). **Bring your own gold set**: point `-goldset` at your own task JSONL; the repo's gold-set-dependent tests skip when none is present.
 

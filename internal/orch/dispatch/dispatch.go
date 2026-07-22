@@ -39,6 +39,12 @@ type Record struct {
 	RecRule         string `json:"rec_rule,omitempty"`  // rank-table rule that fired
 	Deviated        bool   `json:"deviated,omitempty"`  // action != recommendation
 	DeviationReason string `json:"deviation_reason,omitempty"`
+	// E2 spend-down provenance (slice-4): the batch tag on the consult and the
+	// boost the winning recommendation carried — boost-influenced decisions
+	// must be countable from receipts (the spend_down_* calibration substrate).
+	// Both omitempty: old JSONL lines keep unmarshalling.
+	Batch          bool `json:"batch,omitempty"`
+	SpendDownBoost int  `json:"spend_down_boost,omitempty"`
 
 	// Replay substrate (S2R-9): without desc, slice-4 replay and gold-set
 	// harvesting from receipts are amputated at birth; quality is the operator
