@@ -31,21 +31,6 @@ type oracleRow struct {
 	VerifierPass bool   `json:"verifier_pass"`
 }
 
-// routerClass mirrors mr-goldreplay's gold→router class map.
-func routerClass(goldClass string) string {
-	switch goldClass {
-	case "agentic-coding", "quick-edit":
-		return "workhorse-coding"
-	case "research":
-		return "deep-reasoning"
-	case "extraction":
-		return "mechanical-text"
-	case "review":
-		return "verify-gate"
-	}
-	return ""
-}
-
 // PolicyReport is one row of the scorecard.
 type PolicyReport struct {
 	Policy         string  `json:"policy"`
@@ -79,9 +64,11 @@ func main() {
 	}
 	taskIDs := make([]string, 0, len(tasks))
 	classOf := map[string]string{}
+	promptOf := map[string]string{}
 	for _, t := range tasks {
 		taskIDs = append(taskIDs, t.ID)
 		classOf[t.ID] = t.Class
+		promptOf[t.ID] = t.Prompt
 	}
 
 	tb := policyeval.NewTable()
@@ -116,7 +103,13 @@ func main() {
 		policies["always-"+l] = policyeval.Fixed(l)
 	}
 	if *routeBin != "" {
-		if p, err := liveRouterPolicy(*routeBin, classOf); err == nil {
+		// router-live = the REAL deterministic router: run the shipped classifier
+		// (classify.go, via route --desc) on each raw prompt and take the lane it
+		// chooses. NOT the gold-label→class proxy — that proxy mislabels e.g.
+		// gold adversarial review as the cheap "verify-gate" class and fabricates
+		// a local-lane misroute the production router never makes (measured
+		// 2026-07-20: the label map disagrees with the live classifier on 48/56).
+		if p, err := liveRouterPolicy(*routeBin, promptOf); err == nil {
 			policies["router-live"] = p
 		} else {
 			fmt.Fprintf(os.Stderr, "WARNING: live router policy skipped: %v\n", err)
@@ -162,29 +155,24 @@ func main() {
 	_ = enc.Encode(out)
 }
 
-// liveRouterPolicy asks the deterministic route oracle once per router class
-// (rank-table routing is class-keyed) and maps tasks through it.
-func liveRouterPolicy(bin string, classOf map[string]string) (policyeval.Policy, error) {
-	classes := map[string]bool{}
-	for _, c := range classOf {
-		classes[routerClass(c)] = true
-	}
+// liveRouterPolicy runs the shipped deterministic router on each task's RAW
+// PROMPT — the real production code path: `route --desc <prompt>` with no
+// --class, so classify.go picks the class and the rank table picks the lane.
+// One probe per task (offline scorecard; the router itself is sub-ms).
+func liveRouterPolicy(bin string, promptOf map[string]string) (policyeval.Policy, error) {
 	laneFor := map[string]string{}
-	for rc := range classes {
-		if rc == "" {
-			continue
-		}
-		out, err := exec.Command(bin, "route", "-class", rc, "-desc", "scorecard policy probe").Output()
+	for task, prompt := range promptOf {
+		out, err := exec.Command(bin, "route", "-desc", prompt).Output()
 		if err != nil {
-			return nil, fmt.Errorf("route -class %s: %v", rc, err)
+			return nil, fmt.Errorf("route %s: %v", task, err)
 		}
 		var r struct {
 			Lane string `json:"lane"`
 		}
 		if err := json.Unmarshal(out, &r); err != nil || r.Lane == "" {
-			return nil, fmt.Errorf("route -class %s: unparseable", rc)
+			return nil, fmt.Errorf("route %s: unparseable", task)
 		}
-		laneFor[rc] = r.Lane
+		laneFor[task] = r.Lane
 	}
-	return func(task string) string { return laneFor[routerClass(classOf[task])] }, nil
+	return func(task string) string { return laneFor[task] }, nil
 }
