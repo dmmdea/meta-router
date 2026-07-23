@@ -13,7 +13,9 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
 var defaultThresholds = admission.Thresholds{ThrottlePct: 80, ExhaustPct: 95}
@@ -37,6 +39,8 @@ type Status struct {
 	GLMAlert         json.RawMessage       `json:"glm_alert,omitempty"`    // 1313 hard-stop latch (Task 6)
 	Receipts         *ReceiptsSummary      `json:"receipts,omitempty"`     // S2R-10 audit block (additive JSON)
 	QuotaHealth      *QuotaHealth          `json:"quota_health,omitempty"` // E6 signal-liveness block
+	QuotaAbsences    []quotapoll.Absence   `json:"quota_absences,omitempty"` // W1: typed poll absences — stated, never inferred
+	ScopedAlerts     json.RawMessage       `json:"scoped_alerts,omitempty"`  // W1: critical/warning scoped-limit latch (vendor-refreshed)
 }
 
 // QuotaHealth is the E6 surface: is the quota signal ALIVE? A stale trace means
@@ -126,6 +130,9 @@ func runStatus(args []string) error {
 	// RS1: every invocation ingests the statusline drop so interactive Claude
 	// usage is visible. The write goes through the cross-process Update
 	// transaction; corrupt drops are logged and ignored (fail-open).
+	cfg := orchcfg.Load(configPath())
+	ps := loadPollState()
+	var pollRes quotapoll.Result
 	var snap []ledger.Bucket
 	err := ledger.Update(ledgerPath(), func(l *ledger.Ledger) {
 		if _, note, ierr := quotasig.IngestTraced(l, dropPath(), quotaTracePath(), "claude", now); ierr != nil {
@@ -133,6 +140,9 @@ func runStatus(args []string) error {
 		} else if note != "" {
 			fmt.Fprintln(os.Stderr, "warn:", note)
 		}
+		// W1: vendor usage polls ride the same transaction, rate-limited by
+		// the poll-state stamps (never the route hot path — B2).
+		pollRes = runPolls(l, cfg, &ps, false, now)
 		// Task 8: fitting rides the same transaction — the trace is loaded
 		// AFTER the ingest above so the freshest observation participates.
 		// Status runs on every invocation + the nightly, so fitting follows
@@ -150,8 +160,8 @@ func runStatus(args []string) error {
 		}
 		snap = l.Snapshot()
 	}
+	savePollState(ps)
 	fzs, _ := fuses.Load(fusesPath())
-	cfg := orchcfg.Load(configPath())
 	samples := calib.Load(quotaTracePath())
 	down := burnDownshiftByLane(snap, samples, cfg, now)
 	st := buildStatus(snap, fzs, cfg, now, down, spendDownArmedByLane(snap, samples, cfg, now))
@@ -176,6 +186,12 @@ func runStatus(args []string) error {
 	// `probe --ack-glm`.
 	if raw, err := os.ReadFile(glmAlertPath()); err == nil && json.Valid(raw) {
 		st.GLMAlert = raw
+	}
+	// W1: typed poll absences from THIS run + the scoped-limit latch (which
+	// persists between polls; raw passthrough, glm-alert pattern).
+	st.QuotaAbsences = pollRes.Absences
+	if raw, err := os.ReadFile(statepaths.ScopedAlert()); err == nil && json.Valid(raw) {
+		st.ScopedAlerts = raw
 	}
 	// S2R-10 receipts audit block: coverage/obedience/deviation/per-lane counts
 	// from dispatch.jsonl. Additive JSON on the machine contract — stdout stays

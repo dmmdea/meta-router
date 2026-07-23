@@ -20,11 +20,11 @@ const (
 type Config struct {
 	ClaudeBillingMode     string  `json:"claude_billing_mode"`
 	UsageCreditBalanceUSD float64 `json:"usage_credit_balance_usd"` // manual entry; no API surface exists
-	OAuthUsagePoll        bool    `json:"oauth_usage_poll"`         // D3: ships OFF; flipping is the operator's explicit risk call
+	OAuthUsagePoll        bool    `json:"oauth_usage_poll"`         // W1: default ON (Daniel 2026-07-23, supersedes D3) — official-shape endpoint, own subscription token; explicit false still honored
 
 	// Lane tiers as config — §6b "upgrade is a number change". These are DATA
 	// about the operator's current plans, never constants of nature.
-	CodexUsagePoll         bool    `json:"codex_usage_poll"`         // wham/usage read; ships OFF (D3-class risk call)
+	CodexUsagePoll         bool    `json:"codex_usage_poll"`         // W1: default ON as BEST-EFFORT EVIDENCE (Daniel 2026-07-23; Q10 caveats encoded in quotapoll)
 	CodexPlus5hCredits     float64 `json:"codex_plus_5h_credits"`    // default 40 (Plus 5h band 15–80, fact refresh)
 	CodexDegradationFactor float64 `json:"codex_degradation_factor"` // default 15 (10–20× observed, #28879)
 	GLM5hPrompts           int64   `json:"glm_5h_prompts"`           // default 80; weekly = 5× (never 10×)
@@ -68,15 +68,18 @@ type Config struct {
 	SpendDownAvgWindowMin   int64   `json:"spend_down_avg_window_min"`   // default 15
 	// Slice-4 E6: provider-signal/trace staleness alarm horizon (hours).
 	QuotaStaleHours int `json:"quota_stale_hours"` // default 48
+
+	PollMinIntervalMin int  `json:"poll_min_interval_min"` // W1: min minutes between usage polls (status-triggered); default 5
+	PaceRankOn         bool `json:"pace_rank_on"`          // W1: slack tie-break in the router; default OFF (B8 — promotes only via a budget-state eval)
 }
 
 func Defaults() Config {
 	return Config{
-		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: false,
-		CodexUsagePoll: false, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
+		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: true,
+		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
-		QuotaStaleHours: 48,
+		QuotaStaleHours: 48, PollMinIntervalMin: 5,
 	}
 }
 
@@ -106,6 +109,9 @@ func Load(path string) Config {
 	}
 	if c.CodexDegradationFactor == 0 {
 		c.CodexDegradationFactor = 15
+	}
+	if c.PollMinIntervalMin == 0 {
+		c.PollMinIntervalMin = 5
 	}
 	if c.GLM5hPrompts == 0 {
 		c.GLM5hPrompts = 80

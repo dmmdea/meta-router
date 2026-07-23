@@ -23,6 +23,10 @@ func main() {
 		fmt.Println("mr-orchestrate", version)
 	case "status":
 		err = runStatus(os.Args[2:])
+	case "poll":
+		err = runPoll(os.Args[2:])
+	case "quota-parity":
+		err = runQuotaParity(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
 	case "run":

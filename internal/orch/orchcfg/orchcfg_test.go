@@ -8,7 +8,9 @@ import (
 
 func TestLoadMissingFailsOpenToDefaults(t *testing.T) {
 	c := Load(filepath.Join(t.TempDir(), "nope.json"))
-	if c.ClaudeBillingMode != BillingSubscription || c.OAuthUsagePoll {
+	// W1 (Daniel 2026-07-23): usage polls default ON — the old D3 off-gate is
+	// superseded; an explicit false in a hand-edited config is still honored.
+	if c.ClaudeBillingMode != BillingSubscription || !c.OAuthUsagePoll {
 		t.Fatalf("defaults wrong: %+v", c)
 	}
 }
@@ -36,8 +38,11 @@ func TestLoadUnknownModePreservedForFailSafeGate(t *testing.T) {
 // A hand-edited partial config must not zero a tier (zero-value backfill).
 func TestLaneTierDefaults(t *testing.T) {
 	d := Defaults()
-	if d.CodexPlus5hCredits != 40 || d.CodexDegradationFactor != 15 || d.GLM5hPrompts != 80 || d.CodexUsagePoll {
+	if d.CodexPlus5hCredits != 40 || d.CodexDegradationFactor != 15 || d.GLM5hPrompts != 80 || !d.CodexUsagePoll {
 		t.Fatalf("lane tier defaults wrong: %+v", d)
+	}
+	if d.PollMinIntervalMin != 5 || d.PaceRankOn {
+		t.Fatalf("W1 defaults wrong (poll interval 5, pace rank OFF per B8): %+v", d)
 	}
 	// E6: Defaults() must set QuotaStaleHours (Load already backfills it; Defaults
 	// was the only place the field was missing).
