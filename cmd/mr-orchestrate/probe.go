@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/codexlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 )
 
@@ -189,7 +190,7 @@ func runCodexUsageCapture() error {
 	if err != nil {
 		return fmt.Errorf("codex auth missing: run `codex login` (R12): %w", err)
 	}
-	tok := findStringField(raw, "access_token")
+	tok := quotapoll.FindStringField(raw, "access_token")
 	if tok == "" {
 		return fmt.Errorf("no access_token in ~/.codex/auth.json (schema drift?) — value intentionally not logged (R10)")
 	}
@@ -222,36 +223,6 @@ func runCodexUsageCapture() error {
 	return nil
 }
 
-// findStringField walks arbitrary JSON for the first string value under key.
-// Tolerant by design: the auth.json layout is vendor-owned and undocumented.
-func findStringField(raw []byte, key string) string {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return ""
-	}
-	var walk func(any) string
-	walk = func(n any) string {
-		switch t := n.(type) {
-		case map[string]any:
-			if s, ok := t[key].(string); ok && s != "" {
-				return s
-			}
-			for _, c := range t {
-				if s := walk(c); s != "" {
-					return s
-				}
-			}
-		case []any:
-			for _, c := range t {
-				if s := walk(c); s != "" {
-					return s
-				}
-			}
-		}
-		return ""
-	}
-	return walk(v)
-}
 
 var idFields = regexp.MustCompile(`"(session_id|uuid|leafUuid|thread_id)"\s*:\s*"[^"]*"`)
 
