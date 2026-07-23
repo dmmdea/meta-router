@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
+	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 )
 
 var now = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
@@ -141,5 +142,40 @@ func TestIngestSkipsStaleWindows(t *testing.T) {
 	}
 	if _, ok := l.Bucket("claude", ledger.Win5h); ok {
 		t.Fatal("stale window must not create a provider bucket")
+	}
+}
+
+func TestApplySnapshotsWritesProviderAndTaggedTrace(t *testing.T) {
+	dir := t.TempDir()
+	l := ledger.Open(filepath.Join(dir, "ledger.json"))
+	trace := filepath.Join(dir, "trace.jsonl")
+	now := time.Now().UTC()
+	snaps := []quotapoll.Snapshot{{Lane: "claude", Window: ledger.Win5h, UsedPct: 18, ResetsAt: now.Add(3 * time.Hour)}}
+	ApplySnapshots(l, snaps, trace, "oauth_poll", now)
+	ApplySnapshots(l, snaps, trace, "oauth_poll", now.Add(time.Minute)) // unchanged → no second row
+	b, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want exactly 1 trace row, got %d: %s", len(lines), b)
+	}
+	if !strings.Contains(lines[0], `"origin":"oauth_poll"`) {
+		t.Fatalf("trace row must carry origin, got %s", lines[0])
+	}
+	bk, ok := l.Bucket("claude", ledger.Win5h)
+	if !ok || bk.Source != "provider" || bk.UsedPct != 18 {
+		t.Fatalf("snapshot must land as provider observation, got %+v", bk)
+	}
+}
+
+func TestApplySnapshotsSkipsStale(t *testing.T) {
+	dir := t.TempDir()
+	l := ledger.Open(filepath.Join(dir, "ledger.json"))
+	now := time.Now().UTC()
+	n, _ := ApplySnapshots(l, []quotapoll.Snapshot{{Lane: "claude", Window: ledger.Win5h, UsedPct: 40, ResetsAt: now.Add(-time.Hour)}}, "", "oauth_poll", now)
+	if n != 0 {
+		t.Fatalf("stale reset must be skipped, applied %d", n)
 	}
 }

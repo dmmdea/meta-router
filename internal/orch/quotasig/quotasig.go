@@ -1,10 +1,10 @@
-// Package quotasig ingests the sanctioned Claude quota signal: the statusline
-// stdin JSON (rate_limits.five_hour/seven_day) teed by the operator's
-// statusline command to ~/.meta-router/orchestrate/statusline-drop.json (RS1).
-// This makes the ledger see ALL Claude usage — interactive included — and is
-// the binding-scarcity measurement (RS2). The unofficial oauth/usage poll
-// stays config-gated OFF (D3); statusline + per-run modelUsage are the only
-// Claude signals.
+// Package quotasig ingests the sanctioned quota signals into the ledger:
+// the statusline drop file (rate_limits teed by the operator's statusline
+// command, RS1) and — since W1 (Daniel-approved 2026-07-23, superseding the
+// old D3 off-gate) — vendor-polled snapshots from quotapoll via
+// ApplySnapshots. Every observation that changes a bucket is appended to the
+// scarcity trace with an ORIGIN tag, so drop-vs-poll parity is measurable
+// (the W1 soak gate) and the calibration fitter keeps its sample stream.
 package quotasig
 
 import (
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
+	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 )
 
 type Observation struct {
@@ -98,7 +99,7 @@ func IngestTraced(l *ledger.Ledger, path, tracePath, lane string, now time.Time)
 			// ShadowTokens at observation time makes each row a CALIBRATION
 			// SAMPLE (shadow, used_pct) — the regression input for learned
 			// capacities (fact-refresh gap #1); fitting lands in slice 2.
-			if err := appendTrace(tracePath, traceRow{TS: now, Lane: lane, Window: string(o.Window), UsedPct: o.UsedPct, ResetsAt: o.ResetsAt, ShadowTokens: prev.ShadowTokens}); err != nil {
+			if err := appendTrace(tracePath, traceRow{TS: now, Lane: lane, Window: string(o.Window), UsedPct: o.UsedPct, ResetsAt: o.ResetsAt, ShadowTokens: prev.ShadowTokens, Origin: "drop"}); err != nil {
 				note = "quota trace append failed: " + err.Error()
 			}
 		}
@@ -106,13 +107,40 @@ func IngestTraced(l *ledger.Ledger, path, tracePath, lane string, now time.Time)
 	return n, note, nil
 }
 
-type traceRow struct {
+// TraceRow is one scarcity-trace line (exported for the quota-parity report).
+type TraceRow struct {
 	TS           time.Time `json:"ts"`
 	Lane         string    `json:"lane"`
 	Window       string    `json:"window"`
 	UsedPct      float64   `json:"used_pct"`
 	ResetsAt     time.Time `json:"resets_at"`
 	ShadowTokens int64     `json:"shadow_tokens"` // this device's shadow count at obs time (calibration pair)
+	Origin       string    `json:"origin,omitempty"` // drop | oauth_poll | wham_poll ("" = pre-W1 row)
+}
+
+type traceRow = TraceRow
+
+// ApplySnapshots feeds vendor-polled window facts through the SAME provider
+// path the drop uses: ObserveProvider + origin-tagged trace-on-change. Stale
+// or unanchored snapshots are skipped with the same rules as the drop
+// (a dead percentage must not masquerade as fresh provider truth).
+func ApplySnapshots(l *ledger.Ledger, snaps []quotapoll.Snapshot, tracePath, origin string, now time.Time) (int, string) {
+	n, note := 0, ""
+	for _, s := range snaps {
+		if s.ResetsAt.IsZero() || s.ResetsAt.Before(now) {
+			continue
+		}
+		prev, had := l.Bucket(s.Lane, s.Window)
+		changed := !had || prev.UsedPct != s.UsedPct || !prev.ResetsAt.Equal(s.ResetsAt)
+		l.ObserveProvider(s.Lane, s.Window, s.UsedPct, s.ResetsAt, now)
+		n++
+		if tracePath != "" && changed {
+			if err := appendTrace(tracePath, TraceRow{TS: now, Lane: s.Lane, Window: string(s.Window), UsedPct: s.UsedPct, ResetsAt: s.ResetsAt, ShadowTokens: prev.ShadowTokens, Origin: origin}); err != nil {
+				note = "quota trace append failed: " + err.Error()
+			}
+		}
+	}
+	return n, note
 }
 
 func appendTrace(path string, r traceRow) error {
