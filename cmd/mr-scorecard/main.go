@@ -60,13 +60,18 @@ type PolicyReport struct {
 
 // ZooEntry records one family's tuning-split selection (W3): which config won
 // the sweep and its tuning-side numbers. The heldout verdict lives in the
-// corresponding zoo:* policy row.
+// corresponding zoo:* policy row. The diverged counts make a vacuous winner
+// VISIBLE: a config that never leaves the router baseline (diverged 0/0) and
+// one that fires but happens to match cannot otherwise be told apart in the
+// artifact.
 type ZooEntry struct {
-	Family         string  `json:"family"`
-	Chosen         string  `json:"chosen_config"`
-	GridSize       int     `json:"grid_size"`
-	TuningPassRate float64 `json:"tuning_pass_rate"`
-	TuningClaudeFr float64 `json:"tuning_claude_fraction"`
+	Family          string  `json:"family"`
+	Chosen          string  `json:"chosen_config"`
+	GridSize        int     `json:"grid_size"`
+	TuningPassRate  float64 `json:"tuning_pass_rate"`
+	TuningClaudeFr  float64 `json:"tuning_claude_fraction"`
+	TuningDiverged  int     `json:"tuning_diverged"`  // tuning tasks where chosen config != router baseline
+	HeldoutDiverged int     `json:"heldout_diverged"` // heldout tasks where chosen config != router baseline
 }
 
 func main() {
@@ -85,6 +90,13 @@ func main() {
 	}
 	if *zoo && (!*split || *routeBin == "") {
 		fmt.Fprintln(os.Stderr, "-zoo requires -split and -route (candidates are tuned on the tuning split over the live router's baseline picks)")
+		os.Exit(2)
+	}
+	if *zoo && *liveQuota {
+		// Under quota weather the router baseline degenerates (e.g. everything
+		// relegates to claude), floors become structural no-ops, and the zoo
+		// emits a guaranteed-trivial null indistinguishable from a real one.
+		fmt.Fprintln(os.Stderr, "-zoo requires the neutral-state baseline; it cannot be combined with -live-quota")
 		os.Exit(2)
 	}
 
@@ -196,13 +208,24 @@ func main() {
 			os.Exit(2)
 		}
 		byID := map[string]policyzoo.Task{}
-		var tuningTasks []policyzoo.Task
+		var tuningTasks, heldoutTasks []policyzoo.Task
 		for _, t := range tasks {
 			zt := policyzoo.Task{ID: t.ID, Class: t.Class, Prompt: t.Prompt, BaseLane: routerPick(t.ID)}
 			byID[t.ID] = zt
-			if t.Split != "heldout" {
+			if t.Split == "heldout" {
+				heldoutTasks = append(heldoutTasks, zt)
+			} else {
 				tuningTasks = append(tuningTasks, zt)
 			}
+		}
+		diverged := func(c policyzoo.Candidate, ts []policyzoo.Task) int {
+			n := 0
+			for _, t := range ts {
+				if c.Route(t) != t.BaseLane {
+					n++
+				}
+			}
+			return n
 		}
 		fams := policyzoo.AllFamilies()
 		famNames := make([]string, 0, len(fams))
@@ -214,7 +237,8 @@ func main() {
 			best, tuneEv := policyzoo.SelectBest(fams[name], tb, tuningTasks)
 			policies["zoo:"+name+"["+best.Desc+"]"] = policyzoo.PolicyOf(best, byID)
 			zooEntries = append(zooEntries, ZooEntry{Family: name, Chosen: best.Desc,
-				GridSize: len(fams[name]), TuningPassRate: tuneEv.PassRate, TuningClaudeFr: tuneEv.ClaudeFraction})
+				GridSize: len(fams[name]), TuningPassRate: tuneEv.PassRate, TuningClaudeFr: tuneEv.ClaudeFraction,
+				TuningDiverged: diverged(best, tuningTasks), HeldoutDiverged: diverged(best, heldoutTasks)})
 		}
 	}
 
@@ -266,7 +290,15 @@ func main() {
 			}
 		}
 	}
-	sort.Slice(reports, func(i, j int) bool { return reports[i].PassRate > reports[j].PassRate })
+	// Stable order with a name tiebreak: zoo rows and router-live tie EXACTLY
+	// on identical assignments, and a map-ordered slice would shuffle the
+	// artifact between runs.
+	sort.SliceStable(reports, func(i, j int) bool {
+		if reports[i].PassRate != reports[j].PassRate {
+			return reports[i].PassRate > reports[j].PassRate
+		}
+		return reports[i].Policy < reports[j].Policy
+	})
 
 	note := "Q6 quota gate: throttles/defers during replay are graceful degradation, not violations; 0 cap-blows recorded. Unknown cells are holes (e.g. a lane's unfilled window), never imputed."
 	var splitInfo *SplitInfo

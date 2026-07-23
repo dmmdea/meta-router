@@ -19,3 +19,7 @@ structural canary parses on pipes; paraphrase code instead.
 | 2026-07-23 | w8 | w8 scaffold | ledger canary evadable via leading space; pipe-in-cell breaks the 7-cell parse | MINOR | fixed | rows are TrimSpaced before validation; no-pipe rule documented above |
 | 2026-07-23 | w8 | w8 scaffold | extend B11 parity to the six sibling cmd binaries | MINOR | declined | sibling dev tools are versioned independently by design; see declined-findings.md |
 | 2026-07-23 | w8 | w8 scaffold | vendor dir unskipped; go list stderr swallowed; invariant bullets outside markers unhashed | NIT | fixed | vendor SkipDir; ExitError.Stderr surfaced; outside-marker B-bullets now fatal |
+| 2026-07-23 | w3 | w3 policy zoo | -zoo composed silently with -live-quota, producing a guaranteed-trivial null | MINOR | fixed | the combination is now exit 2 |
+| 2026-07-23 | w3 | w3 policy zoo | report ordering nondeterministic under the exact float ties -zoo creates | MINOR | fixed | SliceStable with policy-name tiebreak |
+| 2026-07-23 | w3 | w3 policy zoo | assignCost gave unknown/abstain lanes cost 0, inverting the policyeval never-win-by-accident convention | MINOR | fixed | unknown lane now costs MaxInt32 |
+| 2026-07-23 | w3 | w3 policy zoo | vacuous-vs-coincident null ambiguity in the artifact; dead Chars field; tie-break test message drift | NIT | fixed | diverged counts added to ZooEntry (settled the real run: 0/0); Chars dropped; message corrected |

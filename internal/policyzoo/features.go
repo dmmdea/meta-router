@@ -8,9 +8,11 @@ package policyzoo
 
 import "regexp"
 
-// Features are cheap, deterministic prompt observables.
+// Features are cheap, deterministic prompt observables. Known consistent-bias
+// noise (harmless because thresholds are tuned on this same extractor):
+// "x_test.go" counts as one FileRef and its "test" stem as a ToolVerb; URLs
+// with file-like endings count as FileRefs.
 type Features struct {
-	Chars         int
 	CodeFences    int
 	NumberedSteps int
 	ToolVerbs     int
@@ -27,10 +29,10 @@ var (
 	fileRe  = regexp.MustCompile(`\S+\.(go|py|ts|tsx|js|rs|md|json|yaml|yml|toml|sh|ps1|sql)\b`)
 )
 
-// Extract computes Features. Pure, no I/O.
+// Extract computes Features. Pure, no I/O. (Prompt LENGTH is not a Feature:
+// the ctx-floor family reads len(prompt) directly — bytes, by design.)
 func Extract(prompt string) Features {
 	return Features{
-		Chars:         len(prompt),
 		CodeFences:    len(fenceRe.FindAllString(prompt, -1)) / 2,
 		NumberedSteps: len(stepRe.FindAllString(prompt, -1)),
 		ToolVerbs:     len(verbRe.FindAllString(prompt, -1)),

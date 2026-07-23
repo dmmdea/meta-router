@@ -56,7 +56,7 @@ func TestSelectBestPicksByTuningPassRateThenCheaper(t *testing.T) {
 	}
 	best, ev := SelectBest(cands, tb, tasks)
 	if best.Desc != "stay" {
-		t.Fatalf("tie must break to lower claude-fraction then lexical Desc: got %s", best.Desc)
+		t.Fatalf("tie must break to lower summed lane cost (glm < codex) before lexical Desc: got %s", best.Desc)
 	}
 	if ev.PassRate != 1.0 {
 		t.Fatalf("PassRate=%v want 1.0", ev.PassRate)

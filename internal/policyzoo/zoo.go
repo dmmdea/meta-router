@@ -2,6 +2,7 @@ package policyzoo
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/dmmdea/meta-router/internal/policyeval"
@@ -99,11 +100,16 @@ func PolicyOf(c Candidate, byID map[string]Task) policyeval.Policy {
 
 // assignCost is the summed lane-tier cost of an assignment — the tie-break
 // axis after quality (claude costs most; claude-fraction alone can't order
-// glm vs codex).
+// glm vs codex). An unknown/abstain lane costs MaxInt32, mirroring
+// policyeval.laneCostOf: it must never win a tie by accident.
 func assignCost(assignment map[string]string) int {
 	cost := 0
 	for _, lane := range assignment {
-		cost += laneTier[lane]
+		if tier, ok := laneTier[lane]; ok {
+			cost += tier
+		} else {
+			cost += math.MaxInt32
+		}
 	}
 	return cost
 }
