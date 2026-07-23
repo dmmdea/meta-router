@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.9.0] — 2026-07-23
+
+### Added
+- **W8 — process port scaffold:** `ROUTER_BIBLE.md` (invariants B1–B12, each with a `verify:` pointer) enforced by the new `internal/canary` suite: B1 no-API-key-auth source scan, B2 router-package purity (`go list -deps` — no net/exec in the hot path), B3 margin-floor pin (0.15), B11 version parity (VERSION == orchestrator version var — this canary immediately caught the deployed binary reporting `0.4.0-slice4`), B12 complexity ratchet (`docs/complexity-budget.json`, 15500 over 14340 measured), Bible hash concept-gate (`docs/bible.sum` + CONCEPT-CHANGE protocol), verify-pointer resolution, and adjudication-ledger structure. Review protocol codified: adjudication ledger + declined-findings feed-forward + reviewer liveness floor (`docs/reviews/`).
+
+### Fixed
+- `cmd/mr-orchestrate` version var un-drifted (`0.4.0-slice4` → tracks VERSION; B11 pins it forever).
+- Review round 1 (2 MAJORs, 4 minors, 4 nits — all adjudicated in `docs/reviews/adjudication-ledger.md`): B1 pattern extended to `LookupEnv`/`APIKEY` and hoisted to a single shared definition; B11 gained its CHANGELOG leg; ledger canary hardened (TrimSpace, no-pipe rule); vendor/ skipped; `go list` stderr surfaced; outside-marker invariant bullets now fatal.
+- CONCEPT-CHANGE: B5 verify pointer repointed to `internal/orch/router/fault_test.go` (router_test.go has no override coverage); B11 scope documented (deployed orchestrator binary only — sibling dev tools versioned independently).
+
 ## [0.8.0] — 2026-07-23
 
 ### Added

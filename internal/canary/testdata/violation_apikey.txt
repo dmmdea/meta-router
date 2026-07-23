@@ -1,0 +1,4 @@
+package fake
+func creds() string {
+	return os.Getenv("SOME_API_KEY")
+}

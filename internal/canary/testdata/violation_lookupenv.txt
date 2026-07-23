@@ -1,0 +1,2 @@
+package fake
+var key, _ = os.LookupEnv("VENDOR_APIKEY")
