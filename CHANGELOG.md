@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.8.0] — 2026-07-23
+
+### Added
+- **B'2 — cross-validated scorecard** (`mr-scorecard -split` + `policyeval.ClassBest/ByClass/ClassCoverage`): derive a per-class best-lane policy on the goldset's TUNING split only (task-mean objective — the same unweighted mean `Evaluate` scores; per-class per-lane coverage emitted so hole-driven picks are visible), score every policy on the HELDOUT split. The per-task oracle row is marked `in_sample` with its non-inferiority verdict suppressed — a ceiling, never a deployable claim. Goldset `split` labels are hard-validated (exit 2 on a typo — silent tuning contamination is the failure mode).
+- Sign-flip permutation is EXACT up to n≤24 (was n≤20), covering the heldout n=23 so split verdicts never sit in the Monte-Carlo seed-luck regime.
+
+### Changed
+- **router-live probes now run in a NEUTRAL quota state by default** (isolated temp `MR_ORCH_STATE`; weather zeroed, POLICY INPUTS preserved — rank-table override, config, fuses — with loud failure if a policy file is unreadable): the scorecard answers the policy question, not today's window weather (observed degenerations: exhausted windows → router-live ≡ always-claude; bare temp dir → Seed table measured instead of the tuned one). `-live-quota` restores real-state probing. Probes always pass `-no-receipt` (they must not pollute the delegation-coverage numerator) and only the evaluated tasks are probed.
+- Total pick order in oracle/class derivations: unknown lanes cost MAX, equal-cost ties break lexically — map iteration can never decide a pick.
+
 ## [0.7.0] — 2026-07-22
 
 ### Added
