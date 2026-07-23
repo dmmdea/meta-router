@@ -3,7 +3,6 @@ package canary
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -41,15 +40,23 @@ func TestGoSourceFilesExcludesTestsAndTestdata(t *testing.T) {
 }
 
 func TestScanForbiddenFindsViolation(t *testing.T) {
-	re := regexp.MustCompile(`(?i)Getenv\("[^"]*API_KEY[^"]*"\)|x-api-key`)
-	hits, err := ScanForbidden([]string{filepath.Join("testdata", "violation_apikey.txt")}, re)
+	// Uses the PRODUCTION pattern (B1Forbidden), not a copy — a divergent
+	// test regex proves nothing about the canary (review finding, 2026-07-23).
+	hits, err := ScanForbidden([]string{filepath.Join("testdata", "violation_apikey.txt")}, B1Forbidden)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(hits) != 1 || !strings.Contains(hits[0], "violation_apikey.txt:3") {
 		t.Fatalf("want exactly 1 hit at line 3, got %v", hits)
 	}
-	clean, err := ScanForbidden([]string{filepath.Join("testdata", "clean.txt")}, re)
+	lk, err := ScanForbidden([]string{filepath.Join("testdata", "violation_lookupenv.txt")}, B1Forbidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lk) != 1 || !strings.Contains(lk[0], "violation_lookupenv.txt:2") {
+		t.Fatalf("want exactly 1 LookupEnv/APIKEY hit at line 2, got %v", lk)
+	}
+	clean, err := ScanForbidden([]string{filepath.Join("testdata", "clean.txt")}, B1Forbidden)
 	if err != nil {
 		t.Fatal(err)
 	}

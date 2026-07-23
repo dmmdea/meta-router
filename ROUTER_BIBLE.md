@@ -30,7 +30,7 @@ A concept change that arrives as a quiet test edit is a review-blocking defect.
   verify: `internal/orch/dispatch`
 - **B5 — Operator overrides outrank every autonomous signal.** The rank-table
   override file, config priors, and kill-switches win over learned/derived
-  state. verify: `internal/orch/router/router_test.go`
+  state. verify: `internal/orch/router/fault_test.go`
 - **B6 — Unknown cells are counted, never imputed.** A missing oracle cell is
   a hole in the report, never a guessed number. verify: `internal/policyeval/policyeval_test.go`
 - **B7 — oracle-best is a ceiling, never a deployable claim.** In split mode
@@ -43,7 +43,9 @@ A concept change that arrives as a quiet test edit is a review-blocking defect.
 - **B10 — Single binary, no resident server.** MCP is stdio; no daemon, no
   web server in the dispatch path. verify: `process`
 - **B11 — Version parity.** `VERSION`, the orchestrator's `version` var, and
-  the CHANGELOG's top entry move together. verify: `TestCanaryB11VersionParity`
+  the CHANGELOG's top entry move together. Scope: the deployed orchestrator
+  binary is the pinned surface; sibling dev tools under `cmd/` are versioned
+  independently by design. verify: `TestCanaryB11VersionParity`
 - **B12 — Complexity ratchet.** Non-test Go LOC stays under the committed
   budget; raising it is a conscious, reviewed act. verify: `TestCanaryB12ComplexityRatchet`
 <!-- invariants:end -->

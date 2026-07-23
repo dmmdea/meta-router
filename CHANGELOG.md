@@ -11,6 +11,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Fixed
 - `cmd/mr-orchestrate` version var un-drifted (`0.4.0-slice4` → tracks VERSION; B11 pins it forever).
+- Review round 1 (2 MAJORs, 4 minors, 4 nits — all adjudicated in `docs/reviews/adjudication-ledger.md`): B1 pattern extended to `LookupEnv`/`APIKEY` and hoisted to a single shared definition; B11 gained its CHANGELOG leg; ledger canary hardened (TrimSpace, no-pipe rule); vendor/ skipped; `go list` stderr surfaced; outside-marker invariant bullets now fatal.
+- CONCEPT-CHANGE: B5 verify pointer repointed to `internal/orch/router/fault_test.go` (router_test.go has no override coverage); B11 scope documented (deployed orchestrator binary only — sibling dev tools versioned independently).
 
 ## [0.8.0] — 2026-07-23
 

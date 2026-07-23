@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,11 @@ func readBibleInvariants(t *testing.T, root string) string {
 	i, j := strings.Index(s, begin), strings.Index(s, end)
 	if i < 0 || j < 0 || j < i {
 		t.Fatal("invariants markers missing/misordered in ROUTER_BIBLE.md")
+	}
+	// Invariant-styled text outside the markers would read as Bible law while
+	// escaping both the hash gate and pointer checks — refuse it.
+	if outside := s[:i] + s[j+len(end):]; strings.Contains(outside, "- **B") {
+		t.Fatal("invariant-styled bullet ('- **B') found outside the hash-gated markers block")
 	}
 	return s[i+len(begin) : j]
 }
@@ -100,8 +106,7 @@ func TestCanaryB1NoAPIKeyAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(`(?i)Getenv\("[^"]*API_KEY[^"]*"\)|"x-api-key"`)
-	hits, err := ScanForbidden(files, re)
+	hits, err := ScanForbidden(files, B1Forbidden)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,8 +126,15 @@ func TestCanaryB2RouterPurity(t *testing.T) {
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
+		var xe *exec.ExitError
+		if errors.As(err, &xe) {
+			t.Fatalf("go list: %v: %s", err, xe.Stderr)
+		}
 		t.Fatalf("go list: %v", err)
 	}
+	// Anti-drift granularity: catches an accidental net/http/exec import.
+	// Capability reachable via package os (StartProcess) or raw syscall is out
+	// of scope — those never arrive by accident.
 	forbidden := map[string]bool{"net": true, "net/http": true, "os/exec": true}
 	for _, dep := range strings.Fields(string(out)) {
 		if forbidden[dep] {
@@ -171,6 +183,19 @@ func TestCanaryB11VersionParity(t *testing.T) {
 	}
 	if got := string(m[1]); got != version {
 		t.Fatalf("B11 violated — VERSION=%s but mr-orchestrate version var=%s (bump both in the same commit)", version, got)
+	}
+	// Third leg of B11: the CHANGELOG's top entry must be this version — a
+	// bump with no changelog (or a stale top entry) is the same drift class.
+	cb, err := os.ReadFile(filepath.Join(root, "CHANGELOG.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := regexp.MustCompile(`(?m)^## \[([^\]]+)\]`).FindSubmatch(cb)
+	if cm == nil {
+		t.Fatal("B11: no '## [x.y.z]' heading found in CHANGELOG.md")
+	}
+	if got := string(cm[1]); got != version {
+		t.Fatalf("B11 violated — VERSION=%s but CHANGELOG top entry is [%s] (all three legs move together)", version, got)
 	}
 }
 
@@ -223,6 +248,7 @@ func TestCanaryAdjudicationLedger(t *testing.T) {
 	dateRe := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	rows := 0
 	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line) // an indented row must not evade validation
 		if !strings.HasPrefix(line, "|") || strings.HasPrefix(line, "|---") || strings.HasPrefix(line, "| date") {
 			continue
 		}

@@ -41,7 +41,7 @@ func GoSourceFiles(root string, includeTests bool) ([]string, error) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "testdata":
+			case ".git", "testdata", "vendor":
 				return filepath.SkipDir
 			}
 			return nil
@@ -57,6 +57,12 @@ func GoSourceFiles(root string, includeTests bool) ([]string, error) {
 	})
 	return out, err
 }
+
+// B1Forbidden is the single source of truth for the B1 API-key-auth pattern:
+// env reads (Getenv/LookupEnv) of *_API_KEY / *APIKEY names, or a quoted
+// x-api-key header literal. The header token is concatenated so this
+// definition never flags itself in the source scan.
+var B1Forbidden = regexp.MustCompile(`(?i)(Getenv|LookupEnv)\("[^"]*API_?KEY[^"]*"\)|` + `"x-api` + `-key"`)
 
 // ScanForbidden returns "path:line: text" for every line matching re.
 func ScanForbidden(files []string, re *regexp.Regexp) ([]string, error) {
