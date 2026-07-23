@@ -63,6 +63,22 @@ type LaneState struct {
 	// untagged (interactive) consult always routes with Boost 0. Kept as int
 	// for the same signal-not-mechanism reason as Downshift.
 	Boost int
+	// PaceSlack is the lane's binding pace slack (W1: elapsed-fraction −
+	// used-ratio, min across known windows), set by the caller from pace.
+	// nil = unknown. Consumed ONLY under Opts.PaceRank (default off, B8);
+	// always surfaced for receipts either way. Pointer, not float, so an
+	// unknown can never win a tie by accident.
+	PaceSlack *float64
+}
+
+// Opts are optional routing knobs (variadic on Route for source
+// compatibility; first value wins).
+type Opts struct {
+	// PaceRank enables the slack tie-break: among lanes tied on effective
+	// rank AND depletion, higher binding slack wins before the static lane
+	// priority. Ships OFF — a routing-visible change that promotes only
+	// through a budget-state eval (Bible B8).
+	PaceRank bool
 }
 
 type Masked struct{ Lane, Model, Reason string }
@@ -75,6 +91,7 @@ type Decision struct {
 	Alternatives                                []Entry   // Pareto-pruned runners-up (receipt/replay substrate)
 	ResumeAt                                    time.Time // earliest resume when EVERYTHING is masked (relegation, never rejection)
 	SpendDownBoost                              int       // E2 boost the WINNING lane carried (0 = none); transparency for receipts/JSON
+	PaceSlack                                   *float64  // W1: the WINNING lane's binding pace slack at decision time (nil = unknown); advisory surface
 }
 
 const CtxCapCodex = 258_000 // CLI hard cap 272K-in incl. reserve, ~258K effective (baseline §1, independent)
@@ -123,21 +140,38 @@ type scored struct {
 	effRank  int
 	usedPct  float64 // normalized (-1 → 0)
 	priority int
+	slack    *float64 // W1 binding pace slack; nil = unknown (never wins a tie)
 }
 
 // less is the TOTAL deterministic order (S2R-12): (1) effRank asc; (2)
 // normalized worst-window UsedPct asc; (3) stable lane priority (claude first).
-func lessScored(a, b scored) bool {
+func lessScored(a, b scored, paceRank bool) bool {
 	if a.effRank != b.effRank {
 		return a.effRank < b.effRank
 	}
 	if a.usedPct != b.usedPct {
 		return a.usedPct < b.usedPct
 	}
+	if paceRank {
+		// Higher binding slack wins; a known slack beats nil; nil-vs-nil
+		// falls through to the static priority (unknown never decides).
+		switch {
+		case a.slack != nil && b.slack != nil && *a.slack != *b.slack:
+			return *a.slack > *b.slack
+		case a.slack != nil && b.slack == nil:
+			return true
+		case a.slack == nil && b.slack != nil:
+			return false
+		}
+	}
 	return a.priority < b.priority
 }
 
-func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now time.Time) Decision {
+func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now time.Time, opts ...Opts) Decision {
+	var opt Opts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	d := Decision{Class: c, Strategy: "solo", QuotaState: map[string]string{}}
 	for lane, st := range states {
 		d.QuotaState[lane] = st.State
@@ -195,7 +229,7 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 		//     demotions above and this raise cannot fight over one lane).
 		eff -= st.Boost
 		pool = append(pool, scored{e: e, effRank: eff,
-			usedPct: normPct(st.WorstPct), priority: lanePriority(e.Lane)})
+			usedPct: normPct(st.WorstPct), priority: lanePriority(e.Lane), slack: st.PaceSlack})
 	}
 
 	// 5. All masked → relegation carrying the earliest masked resume (RS5); the
@@ -220,7 +254,7 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 	}
 
 	// 4. Winner = min under the TOTAL order (deterministic).
-	sort.SliceStable(pool, func(i, j int) bool { return lessScored(pool[i], pool[j]) })
+	sort.SliceStable(pool, func(i, j int) bool { return lessScored(pool[i], pool[j], opt.PaceRank) })
 	win := pool[0]
 	d.Lane, d.Model, d.Effort = win.e.Lane, win.e.Model, win.e.Effort
 	d.Rule = fmt.Sprintf("%s#%d:%s", c, win.e.Rank, win.e.Lane)
@@ -229,6 +263,7 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 	} else {
 		d.Reason = fmt.Sprintf("rank %d %s/%s admitted (state=%s)", win.e.Rank, win.e.Lane, win.e.Model, states[win.e.Lane].State)
 	}
+	d.PaceSlack = states[win.e.Lane].PaceSlack
 	if b := states[win.e.Lane].Boost; b > 0 {
 		d.SpendDownBoost = b
 		d.Reason += fmt.Sprintf(" (spend-down boost -%d: window under-utilized near reset, batch-tagged)", b)

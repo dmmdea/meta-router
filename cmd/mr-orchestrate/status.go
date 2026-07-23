@@ -13,6 +13,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/pace"
 	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
@@ -27,6 +28,7 @@ type LaneStatus struct {
 	Windows       []ledger.Bucket `json:"windows"`
 	BurnDownshift int             `json:"burn_downshift,omitempty"` // E1: 0-3, >=2 demotes in Route
 	SpendDown     int             `json:"spend_down,omitempty"`     // E2: armed latch level a batch consult would boost by (pre fit-gate)
+	PaceSlack     *float64        `json:"pace_slack,omitempty"`     // W1: binding pace slack (elapsed-fraction − used-ratio, min over known windows)
 }
 
 type Status struct {
@@ -84,6 +86,9 @@ func buildStatus(bs []ledger.Bucket, fs []fuses.Fuse, cfg orchcfg.Config, now ti
 		d := admission.Decide(bs, lane, now, defaultThresholds)
 		ls := LaneStatus{State: string(d.State), Reason: d.Reason, Windows: buckets,
 			BurnDownshift: down[lane], SpendDown: sd[lane]}
+		if s, ok := pace.Binding(buckets, now); ok {
+			ls.PaceSlack = &s
+		}
 		if !d.ResumeAt.IsZero() {
 			t := d.ResumeAt
 			ls.ResumeAt = &t
