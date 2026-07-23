@@ -58,25 +58,114 @@ func Fixed(lane string) Policy { return func(string) string { return lane } }
 func FromMap(m map[string]string) Policy { return func(task string) string { return m[task] } }
 
 // laneCost orders lanes by window cost for oracle tie-breaks: free first,
-// Claude last (the guarded resource on the WF@Q axis).
+// Claude last (the guarded resource on the WF@Q axis). Unknown lanes cost MAX
+// (never win a tie by accident), and ties at equal cost break on lane name so
+// the order is TOTAL — map iteration must never decide a pick.
 var laneCost = map[string]int{"local": 0, "glm": 1, "codex": 2, "claude": 3}
+
+func laneCostOf(lane string) int {
+	if c, ok := laneCost[lane]; ok {
+		return c
+	}
+	return math.MaxInt32
+}
+
+// betterPick reports whether (rate,lane) beats the incumbent under the total
+// order: higher rate; then cheaper lane; then lexical lane name.
+func betterPick(rate float64, lane string, bestRate float64, bestLane string) bool {
+	if rate != bestRate {
+		return rate > bestRate
+	}
+	c, bc := laneCostOf(lane), laneCostOf(bestLane)
+	if c != bc {
+		return c < bc
+	}
+	return lane < bestLane
+}
 
 // OracleBest picks, per task, the CHEAPEST lane whose pass rate is maximal.
 func OracleBest(t *Table) Policy {
 	return func(task string) string {
-		bestLane, bestRate, bestCost := "", -1.0, math.MaxInt
+		bestLane, bestRate := "", -1.0
 		for lane, c := range t.cells[task] {
 			if c.n == 0 {
 				continue
 			}
-			r := float64(c.pass) / float64(c.n)
-			cost := laneCost[lane]
-			if r > bestRate || (r == bestRate && cost < bestCost) {
-				bestLane, bestRate, bestCost = lane, r, cost
+			if r := float64(c.pass) / float64(c.n); bestLane == "" || betterPick(r, lane, bestRate, bestLane) {
+				bestLane, bestRate = lane, r
 			}
 		}
 		return bestLane
 	}
+}
+
+// ClassCoverage counts, per class and lane, the subset tasks with observed
+// cells — surfaced next to the assignment so a hole-driven pick is VISIBLE
+// (a lane that deferred a class's hard tasks wins only its survivors; the
+// coverage numbers expose that).
+type ClassCoverage map[string]map[string]int
+
+// ClassBest derives a per-CLASS best-lane assignment from a task SUBSET — the
+// B'2 cross-validation primitive: called with the TUNING tasks only, the
+// returned map is a policy expressible on unseen tasks (unlike the per-task
+// oracle, which cannot generalize). Per class it scores each lane by the MEAN
+// of its per-task pass rates over the subset (the same unweighted-task-mean
+// objective Evaluate reports) and picks the best under the total betterPick
+// order. A class with no observed cell in any lane is ABSENT from the map:
+// unknown, never imputed.
+func ClassBest(t *Table, tasks []string, classOf map[string]string) (map[string]string, ClassCoverage) {
+	type agg struct {
+		sum float64 // sum of per-task rates (the EVAL objective: unweighted task mean)
+		n   int     // tasks observed
+	}
+	acc := map[string]map[string]*agg{} // class → lane → agg
+	for _, task := range tasks {
+		cls := classOf[task]
+		if cls == "" {
+			continue
+		}
+		for lane, c := range t.cells[task] {
+			if c.n == 0 {
+				continue
+			}
+			m, ok := acc[cls]
+			if !ok {
+				m = map[string]*agg{}
+				acc[cls] = m
+			}
+			a, ok := m[lane]
+			if !ok {
+				a = &agg{}
+				m[lane] = a
+			}
+			// Mean of per-task rates, NOT pooled pass/n: Evaluate scores the
+			// unweighted mean over tasks, and pooling would weight tasks by
+			// trial count — optimizing a different objective than the one the
+			// policy is scored on.
+			a.sum += float64(c.pass) / float64(c.n)
+			a.n++
+		}
+	}
+	out := map[string]string{}
+	cov := ClassCoverage{}
+	for cls, m := range acc {
+		bestLane, bestRate := "", -1.0
+		cov[cls] = map[string]int{}
+		for lane, a := range m {
+			cov[cls][lane] = a.n
+			if r := a.sum / float64(a.n); bestLane == "" || betterPick(r, lane, bestRate, bestLane) {
+				bestLane, bestRate = lane, r
+			}
+		}
+		out[cls] = bestLane
+	}
+	return out, cov
+}
+
+// ByClass routes each task through a class→lane assignment ("" when the
+// task's class has no assignment — unknown, never imputed).
+func ByClass(assign map[string]string, classOf map[string]string) Policy {
+	return func(task string) string { return assign[classOf[task]] }
 }
 
 // Eval is a policy's value on the table.
@@ -208,7 +297,7 @@ func SignFlipP(deltas []float64, iters int, seed int64) float64 {
 		return 1
 	}
 	obs := math.Abs(mean(deltas))
-	if n <= 20 { // exact enumeration: ≤ 1,048,576 patterns
+	if n <= 24 { // exact enumeration: ≤ 16,777,216 patterns — covers the B'2 heldout n=23, keeping split verdicts out of the Monte-Carlo seed-luck regime the V7 fix exists for
 		total := 1 << uint(n)
 		hits := 0
 		for mask := 0; mask < total; mask++ {
