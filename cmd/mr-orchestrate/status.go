@@ -103,20 +103,26 @@ func buildStatus(bs []ledger.Bucket, fs []fuses.Fuse, cfg orchcfg.Config, now ti
 // in the group-D evidence).
 func maybeFit(l *ledger.Ledger, samples []calib.Sample, now time.Time) []string {
 	var notes []string
-	for _, w := range []ledger.WindowKind{ledger.Win5h, ledger.Win7d} {
-		capTok, n, ok := calib.Fit(samples, "claude", w, calib.Defaults())
-		if !ok {
-			continue
+	// W1/A3: codex joins the fitted lanes — wham-fed trace pairs give it
+	// measured caps, retiring the estimate-cap guess (SetCapacity clears the
+	// estimate mark, so admission's exhaust gate becomes available). GLM stays
+	// out: its cap is a documented plan quota, not a guess.
+	for _, lane := range []string{"claude", "codex"} {
+		for _, w := range []ledger.WindowKind{ledger.Win5h, ledger.Win7d} {
+			capTok, n, ok := calib.Fit(samples, lane, w, calib.Defaults())
+			if !ok {
+				continue
+			}
+			cur := int64(0)
+			if b, okb := l.Bucket(lane, w); okb && b.CapSource == "" {
+				cur = b.CapTokens // an estimate cap never suppresses a real fit
+			}
+			if cur > 0 && math.Abs(float64(capTok-cur)) <= 0.10*float64(cur) {
+				continue
+			}
+			l.SetCapacity(lane, w, capTok)
+			notes = append(notes, fmt.Sprintf("capacity fitted %s/%s = %d tokens (n=%d samples)", lane, w, capTok, n))
 		}
-		cur := int64(0)
-		if b, okb := l.Bucket("claude", w); okb {
-			cur = b.CapTokens
-		}
-		if cur > 0 && math.Abs(float64(capTok-cur)) <= 0.10*float64(cur) {
-			continue
-		}
-		l.SetCapacity("claude", w, capTok)
-		notes = append(notes, fmt.Sprintf("capacity fitted claude/%s = %d tokens (n=%d samples)", w, capTok, n))
 	}
 	return notes
 }
