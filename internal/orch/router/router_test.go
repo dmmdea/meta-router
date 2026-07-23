@@ -268,3 +268,33 @@ func TestRouteSpendDownBoost(t *testing.T) {
 		t.Fatalf("sub-parity boost must not flip nor mark the un-boosted winner: %+v", d)
 	}
 }
+
+// W1: the pace-slack tie-break is FLAG-GATED OFF (B8 — a routing-visible
+// change promotes only through a budget-state eval). OFF: byte-identical
+// behavior. ON: among lanes tied on effective rank AND depletion, higher
+// binding slack wins before the static lane priority.
+func TestPaceRankTieBreakOnlyWhenEnabled(t *testing.T) {
+	fp := func(v float64) *float64 { return &v }
+	tab := Table{Workhorse: []Entry{
+		{Lane: "codex", Model: "m1", Rank: 1},
+		{Lane: "glm", Model: "m2", Rank: 1},
+	}}
+	states := map[string]LaneState{
+		"codex": {State: "open", WorstPct: 40, PaceSlack: fp(-0.2)},
+		"glm":   {State: "open", WorstPct: 40, PaceSlack: fp(0.4)},
+	}
+	off := Route(tab, Workhorse, states, 0, time.Now())
+	if off.Lane != "codex" {
+		t.Fatalf("flag OFF must keep the existing priority order (codex), got %s", off.Lane)
+	}
+	on := Route(tab, Workhorse, states, 0, time.Now(), Opts{PaceRank: true})
+	if on.Lane != "glm" {
+		t.Fatalf("flag ON must prefer higher slack (glm), got %s", on.Lane)
+	}
+	// nil slack never wins a tie by accident: lane with known slack beats nil.
+	states["codex"] = LaneState{State: "open", WorstPct: 40}
+	on2 := Route(tab, Workhorse, states, 0, time.Now(), Opts{PaceRank: true})
+	if on2.Lane != "glm" {
+		t.Fatalf("known slack must beat nil slack, got %s", on2.Lane)
+	}
+}

@@ -28,6 +28,14 @@ type Record struct {
 	TokensOut        int64    `json:"tokens_out"`
 	NumTurns         int      `json:"num_turns"`
 	NotionalUSD      float64  `json:"notional_usd"`
+	// CashUSD is actual cash settled for this dispatch — structurally 0 for
+	// subscription lanes (R10). NotionalUSD remains the VALUATION column; the
+	// split is the W8 cash-vs-valuation carry-over (claudexor ledger lineage).
+	CashUSD float64 `json:"cash_usd"`
+	// PaceSlack is the recommended/dispatched lane's binding pace slack at
+	// decision time (W1; nil = unknown) — the calibration substrate for any
+	// future slack-conditioned policy.
+	PaceSlack *float64 `json:"pace_slack,omitempty"`
 
 	// Adherence fields (RS9 / §6c): origin, recommendation-vs-action, and
 	// deviation make delegation obedience COUNTABLE. All omitempty — old JSONL

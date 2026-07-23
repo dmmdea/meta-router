@@ -43,8 +43,12 @@ const (
 )
 
 type Bucket struct {
-	Lane         string     `json:"lane"`
-	Window       WindowKind `json:"window"`
+	Lane string `json:"lane"`
+	// Subject scopes the bucket to a credential subject (account); "" is the
+	// default subject. W1 keys for this so W2's multi-account profiles don't
+	// have to retrofit the key shape (cheap to key now, painful later).
+	Subject string     `json:"subject,omitempty"`
+	Window  WindowKind `json:"window"`
 	UsedPct      float64    `json:"used_pct"` // 0..100; -1 = unknown
 	ResetsAt     time.Time  `json:"resets_at"`
 	Source       string     `json:"source"` // "provider" | "shadow"
@@ -64,10 +68,19 @@ const CapSourceEstimate = "estimate"
 type Ledger struct {
 	mu      sync.Mutex
 	path    string
-	buckets map[string]*Bucket // key: lane + "|" + window
+	buckets map[string]*Bucket // key: lane + "|" + subject + "|" + window
 }
 
-func key(lane string, w WindowKind) string { return lane + "|" + string(w) }
+func subjectOrDefault(s string) string {
+	if s == "" {
+		return "default"
+	}
+	return s
+}
+
+func key(lane, subject string, w WindowKind) string {
+	return lane + "|" + subjectOrDefault(subject) + "|" + string(w)
+}
 
 // Open loads the ledger at path; a missing or corrupt file fails open to an
 // empty ledger (the shadow floor rebuilds from subsequent runs).
@@ -94,7 +107,7 @@ func OpenChecked(path string) (*Ledger, string) {
 	}
 	for i := range list {
 		cp := list[i]
-		l.buckets[key(cp.Lane, cp.Window)] = &cp
+		l.buckets[key(cp.Lane, cp.Subject, cp.Window)] = &cp
 	}
 	return l, ""
 }
@@ -139,7 +152,7 @@ func acquireLock(lockPath string, wait, stale time.Duration) (func(), error) {
 }
 
 func (l *Ledger) get(lane string, w WindowKind) *Bucket {
-	k := key(lane, w)
+	k := key(lane, "", w) // exported methods operate on the default subject until W2
 	b, ok := l.buckets[k]
 	if !ok {
 		b = &Bucket{Lane: lane, Window: w, UsedPct: -1}
@@ -272,7 +285,7 @@ func (l *Ledger) SetCapacityEstimate(lane string, w WindowKind, capTokens int64)
 func (l *Ledger) Bucket(lane string, w WindowKind) (Bucket, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b, ok := l.buckets[key(lane, w)]
+	b, ok := l.buckets[key(lane, "", w)]
 	if !ok {
 		return Bucket{}, false
 	}

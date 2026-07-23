@@ -274,3 +274,15 @@ func TestThinSpanNeverArms(t *testing.T) {
 		t.Fatalf("sub-span trace must not arm, got %+v", e)
 	}
 }
+
+func TestKeyMirrorsLedgerSubject(t *testing.T) {
+	a := Key(ledger.Bucket{Lane: "claude", Window: ledger.Win5h})
+	b := Key(ledger.Bucket{Lane: "claude", Subject: "default", Window: ledger.Win5h})
+	if a != b {
+		t.Fatal("empty and default subject must key identically")
+	}
+	c := Key(ledger.Bucket{Lane: "claude", Subject: "acct2", Window: ledger.Win5h})
+	if c == a {
+		t.Fatal("distinct subject must key distinctly")
+	}
+}

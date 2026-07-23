@@ -16,6 +16,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
+	"github.com/dmmdea/meta-router/internal/orch/pace"
 	"github.com/dmmdea/meta-router/internal/orch/router"
 	"github.com/dmmdea/meta-router/internal/orch/spenddown"
 )
@@ -60,7 +61,18 @@ func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now 
 				st = "hard_stop"
 			}
 		}
-		out[lane] = router.LaneState{State: st, WorstPct: worstPct(snap, lane), ResumeAt: d.ResumeAt}
+		ls := router.LaneState{State: st, WorstPct: worstPct(snap, lane), ResumeAt: d.ResumeAt}
+		// W1: binding pace slack per lane — advisory unless pace_rank_on.
+		var laneBuckets []ledger.Bucket
+		for _, b := range snap {
+			if b.Lane == lane {
+				laneBuckets = append(laneBuckets, b)
+			}
+		}
+		if s, ok := pace.Binding(laneBuckets, now); ok {
+			ls.PaceSlack = &s
+		}
+		out[lane] = ls
 	}
 	// local: always open. The free lane fails open — its capacity is not ledger
 	// -tracked (it goes through the local-offload MCP, S2R-4); the router's ctx
@@ -257,7 +269,7 @@ func buildRouteDecision(cfg orchcfg.Config, fzs []fuses.Fuse, snap []ledger.Buck
 		}
 	}
 	tbl := router.Load(rankTablePath())
-	return router.Route(tbl, class, states, ctxTokens, now)
+	return router.Route(tbl, class, states, ctxTokens, now, router.Opts{PaceRank: cfg.PaceRankOn})
 }
 
 // dispatchVia is the S2R-4(a) execution-front-door field: the local lane's
@@ -288,6 +300,9 @@ type routeOut struct {
 	// SpendDownBoost is the E2 boost the winning lane carried (batch-tagged
 	// consults only; omitted when 0). Additive to the §6c six-key contract.
 	SpendDownBoost int `json:"spend_down_boost,omitempty"`
+	// PaceSlack is the winning lane's binding pace slack (W1, advisory —
+	// consumed by ranking only under pace_rank_on).
+	PaceSlack *float64 `json:"pace_slack,omitempty"`
 }
 
 // writeRouteReceipt appends the consult receipt for a route recommendation —
@@ -310,7 +325,7 @@ func writeRouteReceipt(d router.Decision, class router.Class, desc, origin strin
 		TS: now, OutcomeClass: "route_recommendation", Origin: origin,
 		TaskClass: string(class), RecLane: d.Lane, RecModel: d.Model, RecRule: d.Rule,
 		Admit: true, AdmitState: d.QuotaState[d.Lane], Desc: desc,
-		Batch: batch, SpendDownBoost: d.SpendDownBoost,
+		Batch: batch, SpendDownBoost: d.SpendDownBoost, PaceSlack: d.PaceSlack,
 	}), "dispatch append (route receipt)")
 }
 
@@ -320,7 +335,7 @@ func routeJSON(d router.Decision) []byte {
 		QuotaState: d.QuotaState, Reason: d.Reason, Class: string(d.Class),
 		Rule: d.Rule, DispatchVia: dispatchVia(d.Lane),
 		Masked: d.Masked, Alternatives: d.Alternatives,
-		SpendDownBoost: d.SpendDownBoost,
+		SpendDownBoost: d.SpendDownBoost, PaceSlack: d.PaceSlack,
 	}
 	b, _ := json.MarshalIndent(o, "", "  ")
 	return b

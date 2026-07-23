@@ -13,7 +13,10 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/pace"
+	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
 var defaultThresholds = admission.Thresholds{ThrottlePct: 80, ExhaustPct: 95}
@@ -25,6 +28,7 @@ type LaneStatus struct {
 	Windows       []ledger.Bucket `json:"windows"`
 	BurnDownshift int             `json:"burn_downshift,omitempty"` // E1: 0-3, >=2 demotes in Route
 	SpendDown     int             `json:"spend_down,omitempty"`     // E2: armed latch level a batch consult would boost by (pre fit-gate)
+	PaceSlack     *float64        `json:"pace_slack,omitempty"`     // W1: binding pace slack (elapsed-fraction − used-ratio, min over known windows)
 }
 
 type Status struct {
@@ -37,6 +41,8 @@ type Status struct {
 	GLMAlert         json.RawMessage       `json:"glm_alert,omitempty"`    // 1313 hard-stop latch (Task 6)
 	Receipts         *ReceiptsSummary      `json:"receipts,omitempty"`     // S2R-10 audit block (additive JSON)
 	QuotaHealth      *QuotaHealth          `json:"quota_health,omitempty"` // E6 signal-liveness block
+	QuotaAbsences    []quotapoll.Absence   `json:"quota_absences,omitempty"` // W1: typed poll absences — stated, never inferred
+	ScopedAlerts     json.RawMessage       `json:"scoped_alerts,omitempty"`  // W1: critical/warning scoped-limit latch (vendor-refreshed)
 }
 
 // QuotaHealth is the E6 surface: is the quota signal ALIVE? A stale trace means
@@ -80,6 +86,9 @@ func buildStatus(bs []ledger.Bucket, fs []fuses.Fuse, cfg orchcfg.Config, now ti
 		d := admission.Decide(bs, lane, now, defaultThresholds)
 		ls := LaneStatus{State: string(d.State), Reason: d.Reason, Windows: buckets,
 			BurnDownshift: down[lane], SpendDown: sd[lane]}
+		if s, ok := pace.Binding(buckets, now); ok {
+			ls.PaceSlack = &s
+		}
 		if !d.ResumeAt.IsZero() {
 			t := d.ResumeAt
 			ls.ResumeAt = &t
@@ -99,20 +108,26 @@ func buildStatus(bs []ledger.Bucket, fs []fuses.Fuse, cfg orchcfg.Config, now ti
 // in the group-D evidence).
 func maybeFit(l *ledger.Ledger, samples []calib.Sample, now time.Time) []string {
 	var notes []string
-	for _, w := range []ledger.WindowKind{ledger.Win5h, ledger.Win7d} {
-		capTok, n, ok := calib.Fit(samples, "claude", w, calib.Defaults())
-		if !ok {
-			continue
+	// W1/A3: codex joins the fitted lanes — wham-fed trace pairs give it
+	// measured caps, retiring the estimate-cap guess (SetCapacity clears the
+	// estimate mark, so admission's exhaust gate becomes available). GLM stays
+	// out: its cap is a documented plan quota, not a guess.
+	for _, lane := range []string{"claude", "codex"} {
+		for _, w := range []ledger.WindowKind{ledger.Win5h, ledger.Win7d} {
+			capTok, n, ok := calib.Fit(samples, lane, w, calib.Defaults())
+			if !ok {
+				continue
+			}
+			cur := int64(0)
+			if b, okb := l.Bucket(lane, w); okb && b.CapSource == "" {
+				cur = b.CapTokens // an estimate cap never suppresses a real fit
+			}
+			if cur > 0 && math.Abs(float64(capTok-cur)) <= 0.10*float64(cur) {
+				continue
+			}
+			l.SetCapacity(lane, w, capTok)
+			notes = append(notes, fmt.Sprintf("capacity fitted %s/%s = %d tokens (n=%d samples)", lane, w, capTok, n))
 		}
-		cur := int64(0)
-		if b, okb := l.Bucket("claude", w); okb {
-			cur = b.CapTokens
-		}
-		if cur > 0 && math.Abs(float64(capTok-cur)) <= 0.10*float64(cur) {
-			continue
-		}
-		l.SetCapacity("claude", w, capTok)
-		notes = append(notes, fmt.Sprintf("capacity fitted claude/%s = %d tokens (n=%d samples)", w, capTok, n))
 	}
 	return notes
 }
@@ -126,6 +141,13 @@ func runStatus(args []string) error {
 	// RS1: every invocation ingests the statusline drop so interactive Claude
 	// usage is visible. The write goes through the cross-process Update
 	// transaction; corrupt drops are logged and ignored (fail-open).
+	cfg := orchcfg.Load(configPath())
+	ps := loadPollState()
+	// W1: the NETWORK half of polling runs BEFORE the ledger transaction —
+	// HTTP under the write lock could exceed the 30s lock-steal threshold and
+	// drop concurrent shadow writes (review finding). Rate-limited by the
+	// poll-state stamps; never the route hot path (B2).
+	pf := fetchPolls(cfg, ps, false, now)
 	var snap []ledger.Bucket
 	err := ledger.Update(ledgerPath(), func(l *ledger.Ledger) {
 		if _, note, ierr := quotasig.IngestTraced(l, dropPath(), quotaTracePath(), "claude", now); ierr != nil {
@@ -133,6 +155,7 @@ func runStatus(args []string) error {
 		} else if note != "" {
 			fmt.Fprintln(os.Stderr, "warn:", note)
 		}
+		applyPolls(l, pf, now)
 		// Task 8: fitting rides the same transaction — the trace is loaded
 		// AFTER the ingest above so the freshest observation participates.
 		// Status runs on every invocation + the nightly, so fitting follows
@@ -150,8 +173,13 @@ func runStatus(args []string) error {
 		}
 		snap = l.Snapshot()
 	}
+	if err == nil {
+		// Stamps advance only on a committed transaction — writing stale
+		// stamps after a failed txn would clobber a concurrent run's fresh
+		// ones and defeat the rate limit (review finding).
+		finishPolls(pf, &ps, now)
+	}
 	fzs, _ := fuses.Load(fusesPath())
-	cfg := orchcfg.Load(configPath())
 	samples := calib.Load(quotaTracePath())
 	down := burnDownshiftByLane(snap, samples, cfg, now)
 	st := buildStatus(snap, fzs, cfg, now, down, spendDownArmedByLane(snap, samples, cfg, now))
@@ -176,6 +204,14 @@ func runStatus(args []string) error {
 	// `probe --ack-glm`.
 	if raw, err := os.ReadFile(glmAlertPath()); err == nil && json.Valid(raw) {
 		st.GLMAlert = raw
+	}
+	// W1: typed poll absences from THIS run (only polling runs carry them —
+	// the persistent signal is the scoped-alert latch + provider bucket
+	// staleness in quota_health) + the scoped-limit latch (raw passthrough,
+	// glm-alert pattern).
+	st.QuotaAbsences = pf.combined().Absences
+	if raw, err := os.ReadFile(statepaths.ScopedAlert()); err == nil && json.Valid(raw) {
+		st.ScopedAlerts = raw
 	}
 	// S2R-10 receipts audit block: coverage/obedience/deviation/per-lane counts
 	// from dispatch.jsonl. Additive JSON on the machine contract — stdout stays

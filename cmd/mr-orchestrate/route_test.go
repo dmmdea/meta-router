@@ -18,6 +18,10 @@ import (
 
 var rnow = time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
+// glmKey uses the exported key derivation, never a literal — the subject-scoped
+// key shape (W1) made hard-coded "lane|window" literals silently stale.
+var glmKey = spenddown.Key(ledger.Bucket{Lane: "glm", Window: ledger.Win5h})
+
 // laneStates: S2R-3 consumption. An estimate-sourced codex bucket over the
 // exhaust threshold THROTTLES (never exhausted); local is always open (free
 // lane, fail-open).
@@ -287,7 +291,7 @@ func TestBuildRouteDecisionSpendDownBoost(t *testing.T) {
 	// Pre-seeded latch: glm armed at 2 in the CURRENT epoch with a fresh
 	// cooldown anchor → the consult HOLDS it at 2 (hard-repo glm is seed rank
 	// 3 → eff 1). Holding needs no trace; only arming/ramping does.
-	seed := spenddown.State{"glm|5h": {Level: 2, ChangedAt: rnow.Add(-time.Minute), ResetsAt: rnow.Add(time.Hour)}}
+	seed := spenddown.State{glmKey: {Level: 2, ChangedAt: rnow.Add(-time.Minute), ResetsAt: rnow.Add(time.Hour)}}
 	if err := spenddown.SaveState(spendDownPath(), seed); err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +344,7 @@ func TestSpendDownLatchArmsAndPersists(t *testing.T) {
 		t.Fatalf("idle near-reset glm must arm at 1: %v", boost)
 	}
 	st := spenddown.LoadState(spendDownPath())
-	if e := st["glm|5h"]; e.Level != 1 || !e.ChangedAt.Equal(rnow) {
+	if e := st[glmKey]; e.Level != 1 || !e.ChangedAt.Equal(rnow) {
 		t.Fatalf("latch transition must persist: %+v", st)
 	}
 
@@ -354,7 +358,7 @@ func TestSpendDownLatchArmsAndPersists(t *testing.T) {
 	if b := spendDownBoostByLane(snapLater, glmTrace(later), orchcfg.Defaults(), map[string]int{"glm": 2}, open, 30*time.Minute, later, true); b["glm"] != 0 {
 		t.Fatalf("an E1 downshift must block the boost (brake wins): %v", b)
 	}
-	if e := spenddown.LoadState(spendDownPath())["glm|5h"]; e.Level != 1 {
+	if e := spenddown.LoadState(spendDownPath())[glmKey]; e.Level != 1 {
 		t.Fatalf("a boost-excluded lane must hold its latch, never ramp in the background: %+v", e)
 	}
 
@@ -403,7 +407,7 @@ func TestExcludedLaneCannotArmAcrossEpochFlip(t *testing.T) {
 		{Lane: "glm", Window: "5h", UsedPct: 10, Source: "provider", ResetsAt: rnow.Add(time.Hour)},
 	}
 	// Stale latch from an earlier window at level 1.
-	seed := spenddown.State{"glm|5h": {Level: 1, ChangedAt: rnow.Add(-2 * time.Hour), ResetsAt: rnow.Add(-time.Hour)}}
+	seed := spenddown.State{glmKey: {Level: 1, ChangedAt: rnow.Add(-2 * time.Hour), ResetsAt: rnow.Add(-time.Hour)}}
 	if err := spenddown.SaveState(spendDownPath(), seed); err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +415,7 @@ func TestExcludedLaneCannotArmAcrossEpochFlip(t *testing.T) {
 	if b := spendDownBoostByLane(snap, glmTrace(rnow), orchcfg.Defaults(), nil, throttled, 30*time.Minute, rnow, true); b["glm"] != 0 {
 		t.Fatalf("excluded lane must not boost: %v", b)
 	}
-	if e := spenddown.LoadState(spendDownPath())["glm|5h"]; e.Level != 0 {
+	if e := spenddown.LoadState(spendDownPath())[glmKey]; e.Level != 0 {
 		t.Fatalf("excluded lane after an epoch flip must persist level 0, got %+v", e)
 	}
 }

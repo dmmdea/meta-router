@@ -123,3 +123,24 @@ func TestStatusQuotaHealthBlock(t *testing.T) {
 		t.Fatalf("the 60h-old provider bucket must be named, got %v", qh.StaleBuckets)
 	}
 }
+
+// W1/A3: with wham evidence in the trace, codex caps get FITTED — clearing
+// the estimate mark and retiring the estimate-cap artifact (the shadow-derived
+// 272% display class).
+func TestMaybeFitFitsCodexFromWhamTrace(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	mk := func(pct float64, shadow int64) calib.Sample {
+		return calib.Sample{Lane: "codex", Window: "5h", UsedPct: pct, ShadowTokens: shadow}
+	}
+	samples := []calib.Sample{mk(25, 10_000), mk(30, 12_400), mk(40, 15_600), mk(50, 20_200), mk(60, 23_600)} // ≈40k millicredits
+	l := ledger.Open(filepath.Join(t.TempDir(), "ledger.json"))
+	l.SetCapacityEstimate("codex", ledger.Win5h, 90_000) // a wrong guess to retire
+	notes := maybeFit(l, samples, now)
+	if len(notes) != 1 || !strings.Contains(notes[0], "capacity fitted codex/5h") {
+		t.Fatalf("codex samples must fit the 5h cap: %v", notes)
+	}
+	b, _ := l.Bucket("codex", ledger.Win5h)
+	if b.CapSource != "" || b.CapTokens == 90_000 {
+		t.Fatalf("fit must replace the estimate (cap_source cleared): %+v", b)
+	}
+}

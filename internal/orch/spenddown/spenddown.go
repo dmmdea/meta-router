@@ -116,7 +116,18 @@ type Entry struct {
 type State map[string]Entry
 
 // Key returns the State key for a bucket.
-func Key(b ledger.Bucket) string { return b.Lane + "|" + string(b.Window) }
+// Key mirrors the ledger's subject-scoped key — a divergence here silently
+// splits a lane's latch from its bucket (subject "" = default). NOTE: pre-W1
+// spend-down.json entries keyed lane|window simply never match again, which
+// is equivalent to a cleared latch: safe, E2 re-arms from live data and the
+// epoch guard already tolerates exactly this.
+func Key(b ledger.Bucket) string {
+	s := b.Subject
+	if s == "" {
+		s = "default"
+	}
+	return b.Lane + "|" + s + "|" + string(b.Window)
+}
 
 // LoadState reads the latch file fail-open: missing or corrupt → empty (the
 // latch rebuilds from subsequent assessments; losing it costs one cooldown,

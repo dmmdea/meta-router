@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/codexlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 )
 
@@ -189,7 +190,7 @@ func runCodexUsageCapture() error {
 	if err != nil {
 		return fmt.Errorf("codex auth missing: run `codex login` (R12): %w", err)
 	}
-	tok := findStringField(raw, "access_token")
+	tok := quotapoll.FindStringField(raw, "access_token")
 	if tok == "" {
 		return fmt.Errorf("no access_token in ~/.codex/auth.json (schema drift?) — value intentionally not logged (R10)")
 	}
@@ -215,45 +216,15 @@ func runCodexUsageCapture() error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(dst, body, 0o644); err != nil {
+	if err := os.WriteFile(dst, sanitize(body), 0o644); err != nil { // account identifiers never land in fixtures
 		return err
 	}
 	fmt.Printf("probe: wrote %s (%d bytes) — inspect the schema BEFORE writing any parser (fixtures-first)\n", dst, len(body))
 	return nil
 }
 
-// findStringField walks arbitrary JSON for the first string value under key.
-// Tolerant by design: the auth.json layout is vendor-owned and undocumented.
-func findStringField(raw []byte, key string) string {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return ""
-	}
-	var walk func(any) string
-	walk = func(n any) string {
-		switch t := n.(type) {
-		case map[string]any:
-			if s, ok := t[key].(string); ok && s != "" {
-				return s
-			}
-			for _, c := range t {
-				if s := walk(c); s != "" {
-					return s
-				}
-			}
-		case []any:
-			for _, c := range t {
-				if s := walk(c); s != "" {
-					return s
-				}
-			}
-		}
-		return ""
-	}
-	return walk(v)
-}
 
-var idFields = regexp.MustCompile(`"(session_id|uuid|leafUuid|thread_id)"\s*:\s*"[^"]*"`)
+var idFields = regexp.MustCompile(`"(session_id|uuid|leafUuid|thread_id|user_id|account_id|email)"\s*:\s*"[^"]*"`)
 
 // sanitize zeroes identifiers so fixtures carry no session linkage.
 func sanitize(b []byte) []byte {

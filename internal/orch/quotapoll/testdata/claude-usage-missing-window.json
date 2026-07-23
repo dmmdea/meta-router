@@ -1,0 +1,6 @@
+{
+  "seven_day": {"utilization": 65.0, "resets_at": "2026-07-29T08:00:00.000000+00:00"},
+  "limits": [
+    {"kind": "weekly_all", "group": "weekly", "percent": 65, "severity": "normal", "resets_at": "2026-07-29T08:00:00.000000+00:00", "scope": null, "is_active": false}
+  ]
+}
