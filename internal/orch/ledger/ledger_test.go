@@ -257,3 +257,31 @@ func TestClearShadowResetsUnitScale(t *testing.T) {
 		t.Fatalf("provider signal must survive a shadow clear: %+v", b)
 	}
 }
+
+func TestSubjectKeyDefaultCompatible(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ledger.json")
+	// Rows written WITHOUT a subject (the entire pre-W1 fleet) must load and
+	// keep resolving to the same buckets the pre-subject code addressed.
+	legacy := `[{"lane":"claude","window":"5h","used_pct":40,"resets_at":"2027-01-01T00:00:00Z","source":"provider","observed_at":"2026-07-23T00:00:00Z"}]`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, note := OpenChecked(path)
+	if note != "" {
+		t.Fatalf("legacy ledger must load clean, note=%q", note)
+	}
+	b, ok := l.Bucket("claude", Win5h)
+	if !ok || b.UsedPct != 40 {
+		t.Fatalf("legacy row must resolve on the default subject, got %+v ok=%v", b, ok)
+	}
+}
+
+func TestSubjectKeyDistinct(t *testing.T) {
+	if key("claude", "", Win5h) != key("claude", "default", Win5h) {
+		t.Fatal("empty subject must normalize to default")
+	}
+	if key("claude", "acct2", Win5h) == key("claude", "default", Win5h) {
+		t.Fatal("distinct subjects must produce distinct keys")
+	}
+}
