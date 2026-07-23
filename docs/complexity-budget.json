@@ -1,0 +1,4 @@
+{
+  "_note": "B12 ratchet: total non-test Go LOC ceiling. Raising this is a conscious act reviewed in the PR that needs it. Measured 14340 at 2026-07-23 (v0.9.0 scaffold).",
+  "max_go_loc": 15500
+}

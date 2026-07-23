@@ -1,6 +1,7 @@
 package canary
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,5 +93,39 @@ func TestCanaryB11VersionParity(t *testing.T) {
 	}
 	if got := string(m[1]); got != version {
 		t.Fatalf("B11 violated — VERSION=%s but mr-orchestrate version var=%s (bump both in the same commit)", version, got)
+	}
+}
+
+// B12 — complexity ratchet: total non-test Go LOC must stay under the
+// committed budget. Raising the budget is a conscious, diff-visible act.
+func TestCanaryB12ComplexityRatchet(t *testing.T) {
+	root, err := RepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := GoSourceFiles(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += strings.Count(string(b), "\n")
+	}
+	bb, err := os.ReadFile(filepath.Join(root, "docs", "complexity-budget.json"))
+	if err != nil {
+		t.Fatalf("B12: docs/complexity-budget.json unreadable (measured LOC right now: %d): %v", total, err)
+	}
+	var budget struct {
+		MaxGoLOC int `json:"max_go_loc"`
+	}
+	if err := json.Unmarshal(bb, &budget); err != nil || budget.MaxGoLOC <= 0 {
+		t.Fatalf("B12: bad budget file: %v", err)
+	}
+	if total > budget.MaxGoLOC {
+		t.Fatalf("B12 violated — %d non-test Go LOC exceeds budget %d; raise docs/complexity-budget.json consciously in this PR if the growth is justified", total, budget.MaxGoLOC)
 	}
 }
