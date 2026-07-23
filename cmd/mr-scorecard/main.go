@@ -23,6 +23,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/goldtask"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 	"github.com/dmmdea/meta-router/internal/policyeval"
+	"github.com/dmmdea/meta-router/internal/policyzoo"
 )
 
 const version = "0.1.0"
@@ -51,6 +52,26 @@ type PolicyReport struct {
 	// (the per-task oracle in split mode): a CEILING, never a deployable
 	// candidate - its non-inferiority verdict is suppressed.
 	InSample bool `json:"in_sample,omitempty"`
+	// ParetoVsRouter (zoo rows only): pass_rate >= router-live's AND
+	// claude_fraction <= router-live's, with at least one strict — the W3
+	// promotion precondition on top of non-inferiority.
+	ParetoVsRouter *bool `json:"pareto_vs_router,omitempty"`
+}
+
+// ZooEntry records one family's tuning-split selection (W3): which config won
+// the sweep and its tuning-side numbers. The heldout verdict lives in the
+// corresponding zoo:* policy row. The diverged counts make a vacuous winner
+// VISIBLE: a config that never leaves the router baseline (diverged 0/0) and
+// one that fires but happens to match cannot otherwise be told apart in the
+// artifact.
+type ZooEntry struct {
+	Family          string  `json:"family"`
+	Chosen          string  `json:"chosen_config"`
+	GridSize        int     `json:"grid_size"`
+	TuningPassRate  float64 `json:"tuning_pass_rate"`
+	TuningClaudeFr  float64 `json:"tuning_claude_fraction"`
+	TuningDiverged  int     `json:"tuning_diverged"`  // tuning tasks where chosen config != router baseline
+	HeldoutDiverged int     `json:"heldout_diverged"` // heldout tasks where chosen config != router baseline
 }
 
 func main() {
@@ -61,9 +82,21 @@ func main() {
 	iters := flag.Int("iters", 4000, "bootstrap/permutation iterations")
 	split := flag.Bool("split", false, "B'2 cross-validation: derive the class-level oracle on the goldset's tuning split only, score every policy on the heldout split (winner's-curse test)")
 	liveQuota := flag.Bool("live-quota", false, "router-live probes run against the REAL orchestrator state (today's quota weather + latches) instead of the default neutral all-open state (policy inputs preserved: rank table, config, fuses); the default answers the POLICY question. Consult receipts are suppressed in BOTH modes (probes must not pollute the delegation-coverage numerator)")
+	zoo := flag.Bool("zoo", false, "W3 policy zoo: tune each candidate family's config on the TUNING split (task-mean objective), score the chosen config on HELDOUT alongside the standard policies. Requires -split and -route (candidates wrap the live router's neutral-state pick).")
 	flag.Parse()
 	if *oraclePath == "" {
 		fmt.Fprintln(os.Stderr, "usage: mr-scorecard -oracle eval/oracle.jsonl [-goldset ...] [-route ~/.meta-router/bin/mr-orchestrate.exe]")
+		os.Exit(2)
+	}
+	if *zoo && (!*split || *routeBin == "") {
+		fmt.Fprintln(os.Stderr, "-zoo requires -split and -route (candidates are tuned on the tuning split over the live router's baseline picks)")
+		os.Exit(2)
+	}
+	if *zoo && *liveQuota {
+		// Under quota weather the router baseline degenerates (e.g. everything
+		// relegates to claude), floors become structural no-ops, and the zoo
+		// emits a guaranteed-trivial null indistinguishable from a real one.
+		fmt.Fprintln(os.Stderr, "-zoo requires the neutral-state baseline; it cannot be combined with -live-quota")
 		os.Exit(2)
 	}
 
@@ -145,6 +178,7 @@ func main() {
 	for _, l := range laneList {
 		policies["always-"+l] = policyeval.Fixed(l)
 	}
+	var routerPick policyeval.Policy
 	if *routeBin != "" {
 		// router-live = the REAL deterministic router: run the shipped classifier
 		// (classify.go, via route --desc) on each raw prompt and take the lane it
@@ -152,14 +186,59 @@ func main() {
 		// gold adversarial review as the cheap "verify-gate" class and fabricates
 		// a local-lane misroute the production router never makes (measured
 		// 2026-07-20: the label map disagrees with the live classifier on 48/56).
+		probeIDs := evalIDs
+		if *zoo {
+			probeIDs = taskIDs // zoo tuning needs baseline picks on the tuning split too
+		}
 		probePrompts := map[string]string{}
-		for _, id := range evalIDs {
+		for _, id := range probeIDs {
 			probePrompts[id] = promptOf[id]
 		}
 		if p, err := liveRouterPolicy(*routeBin, probePrompts, *liveQuota); err == nil {
 			policies["router-live"] = p
+			routerPick = p
 		} else {
 			fmt.Fprintf(os.Stderr, "WARNING: live router policy skipped: %v\n", err)
+		}
+	}
+	var zooEntries []ZooEntry
+	if *zoo {
+		if routerPick == nil {
+			fmt.Fprintln(os.Stderr, "zoo: live router probe failed - candidates have no baseline")
+			os.Exit(2)
+		}
+		byID := map[string]policyzoo.Task{}
+		var tuningTasks, heldoutTasks []policyzoo.Task
+		for _, t := range tasks {
+			zt := policyzoo.Task{ID: t.ID, Class: t.Class, Prompt: t.Prompt, BaseLane: routerPick(t.ID)}
+			byID[t.ID] = zt
+			if t.Split == "heldout" {
+				heldoutTasks = append(heldoutTasks, zt)
+			} else {
+				tuningTasks = append(tuningTasks, zt)
+			}
+		}
+		diverged := func(c policyzoo.Candidate, ts []policyzoo.Task) int {
+			n := 0
+			for _, t := range ts {
+				if c.Route(t) != t.BaseLane {
+					n++
+				}
+			}
+			return n
+		}
+		fams := policyzoo.AllFamilies()
+		famNames := make([]string, 0, len(fams))
+		for n := range fams {
+			famNames = append(famNames, n)
+		}
+		sort.Strings(famNames)
+		for _, name := range famNames {
+			best, tuneEv := policyzoo.SelectBest(fams[name], tb, tuningTasks)
+			policies["zoo:"+name+"["+best.Desc+"]"] = policyzoo.PolicyOf(best, byID)
+			zooEntries = append(zooEntries, ZooEntry{Family: name, Chosen: best.Desc,
+				GridSize: len(fams[name]), TuningPassRate: tuneEv.PassRate, TuningClaudeFr: tuneEv.ClaudeFraction,
+				TuningDiverged: diverged(best, tuningTasks), HeldoutDiverged: diverged(best, heldoutTasks)})
 		}
 	}
 
@@ -194,7 +273,32 @@ func main() {
 		}
 		reports = append(reports, rep)
 	}
-	sort.Slice(reports, func(i, j int) bool { return reports[i].PassRate > reports[j].PassRate })
+	if *zoo {
+		var router *PolicyReport
+		for i := range reports {
+			if reports[i].Policy == "router-live" {
+				router = &reports[i]
+			}
+		}
+		if router != nil {
+			for i := range reports {
+				if strings.HasPrefix(reports[i].Policy, "zoo:") {
+					p := reports[i].PassRate >= router.PassRate && reports[i].ClaudeFraction <= router.ClaudeFraction &&
+						(reports[i].PassRate > router.PassRate || reports[i].ClaudeFraction < router.ClaudeFraction)
+					reports[i].ParetoVsRouter = &p
+				}
+			}
+		}
+	}
+	// Stable order with a name tiebreak: zoo rows and router-live tie EXACTLY
+	// on identical assignments, and a map-ordered slice would shuffle the
+	// artifact between runs.
+	sort.SliceStable(reports, func(i, j int) bool {
+		if reports[i].PassRate != reports[j].PassRate {
+			return reports[i].PassRate > reports[j].PassRate
+		}
+		return reports[i].Policy < reports[j].Policy
+	})
 
 	note := "Q6 quota gate: throttles/defers during replay are graceful degradation, not violations; 0 cap-blows recorded. Unknown cells are holes (e.g. a lane's unfilled window), never imputed."
 	var splitInfo *SplitInfo
@@ -202,15 +306,19 @@ func main() {
 		splitInfo = &SplitInfo{Mode: "tuning->heldout", TuningN: len(tuningIDs), HeldoutN: len(heldoutIDs),
 			ClassAssignment: classAssign, ClassCoverage: classCov}
 		note += " SPLIT MODE: policies are scored on the heldout tasks only; oracle-best and the frontier are IN-SAMPLE ceilings (they see the heldout cells); class-oracle-tuned is the generalization test - derived on tuning only, over GOLD class labels (an idealized upper bound on class routing: production classifies via classify.go, which disagrees with gold labels on 48/56)."
+		if *zoo {
+			note += " ZOO: zoo:* rows are tuned on the tuning split only (config in zoo[].chosen_config); their heldout verdict needs non_inferior_at_margin AND pareto_vs_router for promotion."
+		}
 	}
 	out := struct {
 		Margin   float64                    `json:"margin"`
 		Ref      string                     `json:"reference"`
 		Split    *SplitInfo                 `json:"split,omitempty"`
+		Zoo      []ZooEntry                 `json:"zoo,omitempty"`
 		Reports  []PolicyReport             `json:"policies"`
 		Frontier []policyeval.FrontierPoint `json:"frontier"`
 		Note     string                     `json:"note"`
-	}{*margin, "always-claude", splitInfo, reports, policyeval.Frontier(tb, evalIDs), note}
+	}{*margin, "always-claude", splitInfo, zooEntries, reports, policyeval.Frontier(tb, evalIDs), note}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
