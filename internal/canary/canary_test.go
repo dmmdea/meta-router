@@ -207,3 +207,39 @@ func TestCanaryB12ComplexityRatchet(t *testing.T) {
 		t.Fatalf("B12 violated — %d non-test Go LOC exceeds budget %d; raise docs/complexity-budget.json consciously in this PR if the growth is justified", total, budget.MaxGoLOC)
 	}
 }
+
+// The adjudication ledger stays machine-checkable: 7 columns, valid verdicts,
+// ISO dates. A malformed append is caught at commit time, not discovery time.
+func TestCanaryAdjudicationLedger(t *testing.T) {
+	root, err := RepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "docs", "reviews", "adjudication-ledger.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdicts := map[string]bool{"fixed": true, "declined": true, "deferred": true}
+	dateRe := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	rows := 0
+	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
+		if !strings.HasPrefix(line, "|") || strings.HasPrefix(line, "|---") || strings.HasPrefix(line, "| date") {
+			continue
+		}
+		cells := strings.Split(strings.Trim(line, "|"), "|")
+		if len(cells) != 7 {
+			t.Errorf("ledger row needs 7 cells, got %d: %s", len(cells), line)
+			continue
+		}
+		rows++
+		if d := strings.TrimSpace(cells[0]); !dateRe.MatchString(d) {
+			t.Errorf("bad date %q in: %s", d, line)
+		}
+		if v := strings.TrimSpace(cells[5]); !verdicts[v] {
+			t.Errorf("bad verdict %q in: %s (want fixed|declined|deferred)", v, line)
+		}
+	}
+	if rows == 0 {
+		t.Fatal("ledger has no data rows")
+	}
+}
