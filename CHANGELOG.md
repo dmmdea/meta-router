@@ -4,6 +4,15 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.11.0] — 2026-07-23
+
+### Added
+- **W1 — Quota Truth v2:** `internal/orch/quotapoll` — SSRF-guarded OAuth usage pollers (https-only, redirects refused, 2MiB cap, tokens never logged): Claude `api/oauth/usage` incl. `scoped_alerts` (the limits[] payload the statusline tee cannot see — observed live: weekly_scoped 96% critical while plain 7d read 69%) and Codex `wham/usage` as BEST-EFFORT evidence per Q10 (window mapping keys off `limit_window_seconds` — the live capture proved the 7-DAY window arrives as `primary_window` on Plus; omitted windows are TYPED absences, banked-credits endpoint not wired). Polls trigger inside `status` (rate-limited by `poll-state.json` stamps, default 5m; both gates default ON per operator approval 2026-07-23) and the new `poll` subcommand — never the route hot path (B2). Typed `quota_absences` + persistent `scoped_alerts` latch in status; origin-tagged quota trace (`drop` / `oauth_poll` / `wham_poll`) + `quota-parity` subcommand (the soak-gate reading).
+- `internal/orch/pace`: the bindingPaceSlack scalar (per window slack = elapsed-fraction − used-ratio; binding = min across known windows). Surfaced per-lane in status, on route JSON/receipts for the winning lane; router tie-break behind `pace_rank_on` (default OFF — B8: a routing-visible change promotes only through a budget-state eval; flag-off behavior is byte-identical and pinned by the untouched determinism suite). E1/E2 internals deliberately NOT re-based: neither engine contains window-span math (E1 = remaining-budget rate, E2 = trace projection) — slack is the third, complementary lens, per Q3's no-constant-transplant rule.
+- Subject-scoped ledger keys (`lane|subject|window`, `""`→`default`): pre-W1 ledgers load unchanged on the default subject; `spenddown.Key` moves in lockstep (pre-W1 latch entries reset once — safe, E2 re-arms from live data). The W2 multi-account prerequisite.
+- **A3 delivered:** `maybeFit` now fits codex caps from wham-fed trace pairs (an estimate cap never suppresses a real fit; `SetCapacity` clears the estimate mark) — the estimate-cap artifact class (codex 5h shadow reading 272%) is retired.
+- Receipts gain `cash_usd` (structurally 0 on subscription lanes — the cash-vs-valuation split, W8 carry-over) and `pace_slack`.
+
 ## [0.10.0] — 2026-07-23
 
 ### Added
