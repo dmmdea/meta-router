@@ -1,6 +1,8 @@
 package canary
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -9,6 +11,82 @@ import (
 	"strings"
 	"testing"
 )
+
+// readBibleInvariants returns the normalized invariants block (CRLF→LF).
+func readBibleInvariants(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "ROUTER_BIBLE.md"))
+	if err != nil {
+		t.Fatalf("ROUTER_BIBLE.md unreadable: %v", err)
+	}
+	s := strings.ReplaceAll(string(b), "\r\n", "\n")
+	const begin, end = "<!-- invariants:begin -->", "<!-- invariants:end -->"
+	i, j := strings.Index(s, begin), strings.Index(s, end)
+	if i < 0 || j < 0 || j < i {
+		t.Fatal("invariants markers missing/misordered in ROUTER_BIBLE.md")
+	}
+	return s[i+len(begin) : j]
+}
+
+// Concept gate: the invariants block hash must match docs/bible.sum.
+func TestCanaryBibleHash(t *testing.T) {
+	root, err := RepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(readBibleInvariants(t, root)))
+	got := hex.EncodeToString(sum[:])
+	wb, err := os.ReadFile(filepath.Join(root, "docs", "bible.sum"))
+	if err != nil {
+		t.Fatalf("docs/bible.sum unreadable (current invariants hash: %s): %v", got, err)
+	}
+	if want := strings.TrimSpace(string(wb)); got != want {
+		t.Fatalf("CONCEPT GATE — ROUTER_BIBLE invariants changed.\nnew hash: %s\nIf intended: update docs/bible.sum to the new hash AND add a CONCEPT-CHANGE line to this version's CHANGELOG entry (see ROUTER_BIBLE.md protocol).", got)
+	}
+}
+
+// Every invariant's verify: pointer must resolve — a Test func that exists,
+// a path that exists, or the literal `process`.
+func TestCanaryBibleVerifyPointers(t *testing.T) {
+	root, err := RepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := readBibleInvariants(t, root)
+	re := regexp.MustCompile("verify: `([^`]+)`")
+	ms := re.FindAllStringSubmatch(inv, -1)
+	if len(ms) < 12 {
+		t.Fatalf("expected >=12 verify pointers, found %d", len(ms))
+	}
+	tests, err := GoSourceFiles(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var testSrc strings.Builder
+	for _, f := range tests {
+		if strings.HasSuffix(f, "_test.go") {
+			b, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testSrc.Write(b)
+		}
+	}
+	for _, m := range ms {
+		ptr := m[1]
+		switch {
+		case ptr == "process":
+		case strings.HasPrefix(ptr, "Test"):
+			if !strings.Contains(testSrc.String(), "func "+ptr+"(") {
+				t.Errorf("verify pointer %q: no such test func", ptr)
+			}
+		default:
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(ptr))); err != nil {
+				t.Errorf("verify pointer %q: path does not exist", ptr)
+			}
+		}
+	}
+}
 
 // B1 — subscription-auth only: no source reads an *_API_KEY env var or sets an
 // x-api-key header. (DG-2's free lane class, when it lands, amends this canary
