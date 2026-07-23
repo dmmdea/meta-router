@@ -143,7 +143,11 @@ func runStatus(args []string) error {
 	// transaction; corrupt drops are logged and ignored (fail-open).
 	cfg := orchcfg.Load(configPath())
 	ps := loadPollState()
-	var pollRes quotapoll.Result
+	// W1: the NETWORK half of polling runs BEFORE the ledger transaction —
+	// HTTP under the write lock could exceed the 30s lock-steal threshold and
+	// drop concurrent shadow writes (review finding). Rate-limited by the
+	// poll-state stamps; never the route hot path (B2).
+	pf := fetchPolls(cfg, ps, false, now)
 	var snap []ledger.Bucket
 	err := ledger.Update(ledgerPath(), func(l *ledger.Ledger) {
 		if _, note, ierr := quotasig.IngestTraced(l, dropPath(), quotaTracePath(), "claude", now); ierr != nil {
@@ -151,9 +155,7 @@ func runStatus(args []string) error {
 		} else if note != "" {
 			fmt.Fprintln(os.Stderr, "warn:", note)
 		}
-		// W1: vendor usage polls ride the same transaction, rate-limited by
-		// the poll-state stamps (never the route hot path — B2).
-		pollRes = runPolls(l, cfg, &ps, false, now)
+		applyPolls(l, pf, now)
 		// Task 8: fitting rides the same transaction — the trace is loaded
 		// AFTER the ingest above so the freshest observation participates.
 		// Status runs on every invocation + the nightly, so fitting follows
@@ -171,7 +173,12 @@ func runStatus(args []string) error {
 		}
 		snap = l.Snapshot()
 	}
-	savePollState(ps)
+	if err == nil {
+		// Stamps advance only on a committed transaction — writing stale
+		// stamps after a failed txn would clobber a concurrent run's fresh
+		// ones and defeat the rate limit (review finding).
+		finishPolls(pf, &ps, now)
+	}
 	fzs, _ := fuses.Load(fusesPath())
 	samples := calib.Load(quotaTracePath())
 	down := burnDownshiftByLane(snap, samples, cfg, now)
@@ -198,9 +205,11 @@ func runStatus(args []string) error {
 	if raw, err := os.ReadFile(glmAlertPath()); err == nil && json.Valid(raw) {
 		st.GLMAlert = raw
 	}
-	// W1: typed poll absences from THIS run + the scoped-limit latch (which
-	// persists between polls; raw passthrough, glm-alert pattern).
-	st.QuotaAbsences = pollRes.Absences
+	// W1: typed poll absences from THIS run (only polling runs carry them —
+	// the persistent signal is the scoped-alert latch + provider bucket
+	// staleness in quota_health) + the scoped-limit latch (raw passthrough,
+	// glm-alert pattern).
+	st.QuotaAbsences = pf.combined().Absences
 	if raw, err := os.ReadFile(statepaths.ScopedAlert()); err == nil && json.Valid(raw) {
 		st.ScopedAlerts = raw
 	}

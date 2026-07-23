@@ -55,7 +55,10 @@ func Slack(b ledger.Bucket, now time.Time) (float64, bool) {
 }
 
 // Binding is the minimum slack across the known windows — the window that
-// binds first is the one that governs pacing.
+// binds first is the one that governs pacing. NOTE: callers currently pass a
+// single lane's buckets on the default subject; when W2 introduces real
+// subjects, per-subject slack needs the caller to filter by Subject too
+// (recorded 2026-07-23 review liveness note — not a current defect).
 func Binding(bs []ledger.Bucket, now time.Time) (float64, bool) {
 	best, have := 0.0, false
 	for _, b := range bs {

@@ -80,6 +80,7 @@ type claudeUsage struct {
 		Severity string          `json:"severity"`
 		ResetsAt time.Time       `json:"resets_at"`
 		Scope    json.RawMessage `json:"scope"`
+		IsActive bool            `json:"is_active"`
 	} `json:"limits"`
 }
 
@@ -123,7 +124,7 @@ func pollClaude(c *http.Client, baseURL, credPath string, now time.Time) Result 
 		if l.Kind == "session" || l.Kind == "weekly_all" || l.Percent == nil {
 			continue // the two plain windows are already snapshots; scoped extras only
 		}
-		r.Scoped = append(r.Scoped, ScopedAlert{Kind: l.Kind, Percent: *l.Percent, Severity: l.Severity, ResetsAt: l.ResetsAt, Scope: string(l.Scope)})
+		r.Scoped = append(r.Scoped, ScopedAlert{Kind: l.Kind, Percent: *l.Percent, Severity: l.Severity, ResetsAt: l.ResetsAt, Scope: string(l.Scope), IsActive: l.IsActive})
 	}
 	return r
 }

@@ -12,6 +12,7 @@ Versioning: [SemVer](https://semver.org/).
 - Subject-scoped ledger keys (`lane|subject|window`, `""`→`default`): pre-W1 ledgers load unchanged on the default subject; `spenddown.Key` moves in lockstep (pre-W1 latch entries reset once — safe, E2 re-arms from live data). The W2 multi-account prerequisite.
 - **A3 delivered:** `maybeFit` now fits codex caps from wham-fed trace pairs (an estimate cap never suppresses a real fit; `SetCapacity` clears the estimate mark) — the estimate-cap artifact class (codex 5h shadow reading 272%) is retired.
 - Receipts gain `cash_usd` (structurally 0 on subscription lanes — the cash-vs-valuation split, W8 carry-over) and `pace_slack`.
+- Review round 1 (Opus, fresh-context; 2 MAJORs + 2 minors + 3 nits, adjudicated in `docs/reviews/adjudication-ledger.md`): polls hoisted OUT of the ledger write lock (40s worst-case HTTP vs the 30s lock-steal — the cross-process-race regression); scoped-alert latch persistence fixed (only a successful claude fetch may touch it); stamps advance only on committed txns; redactErr wired; wham capture sanitized; parity report deterministic; `is_active` passed through.
 
 ## [0.10.0] — 2026-07-23
 

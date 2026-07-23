@@ -48,7 +48,9 @@ func getJSON(c *http.Client, rawURL, bearer string, extra map[string]string) ([]
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, 0, err
+		// Transport errors are the one path that could echo request detail —
+		// scrub any header material before the error can reach a log (R10).
+		return nil, 0, errors.New(redactErr(err))
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))

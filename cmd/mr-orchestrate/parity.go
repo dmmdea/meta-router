@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
@@ -61,7 +62,13 @@ func buildParity(rows []quotasig.TraceRow, since time.Time) parityReport {
 		}
 	}
 	rep := parityReport{Note: "drop-vs-poll divergence per (lane,window); the W1 soak gate reads max_abs_delta (target <=2pp typical). A report, not a gate: exit 0 always."}
-	for k, l := range byKey {
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic, diffable report — map order never decides
+	for _, k := range keys {
+		l := byKey[k]
 		switch {
 		case l.drop != nil && l.poll != nil:
 			p := parityPair{Lane: l.drop.Lane, Window: l.drop.Window,

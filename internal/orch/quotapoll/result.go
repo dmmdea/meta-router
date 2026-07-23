@@ -38,6 +38,7 @@ type ScopedAlert struct {
 	Severity string    `json:"severity"` // vendor's word, passed through verbatim
 	ResetsAt time.Time `json:"resets_at"`
 	Scope    string    `json:"scope,omitempty"`
+	IsActive bool      `json:"is_active"` // vendor's flag, passed through — surfaced, never filtered on (semantics unverified)
 }
 
 // Result is one poll outcome: facts, typed absences, scoped extras.

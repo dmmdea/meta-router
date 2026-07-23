@@ -216,7 +216,7 @@ func runCodexUsageCapture() error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(dst, body, 0o644); err != nil {
+	if err := os.WriteFile(dst, sanitize(body), 0o644); err != nil { // account identifiers never land in fixtures
 		return err
 	}
 	fmt.Printf("probe: wrote %s (%d bytes) — inspect the schema BEFORE writing any parser (fixtures-first)\n", dst, len(body))
@@ -224,7 +224,7 @@ func runCodexUsageCapture() error {
 }
 
 
-var idFields = regexp.MustCompile(`"(session_id|uuid|leafUuid|thread_id)"\s*:\s*"[^"]*"`)
+var idFields = regexp.MustCompile(`"(session_id|uuid|leafUuid|thread_id|user_id|account_id|email)"\s*:\s*"[^"]*"`)
 
 // sanitize zeroes identifiers so fixtures carry no session linkage.
 func sanitize(b []byte) []byte {
