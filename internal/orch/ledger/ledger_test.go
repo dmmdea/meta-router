@@ -285,3 +285,29 @@ func TestSubjectKeyDistinct(t *testing.T) {
 		t.Fatal("distinct subjects must produce distinct keys")
 	}
 }
+
+// W2: distinct subjects never cross-contaminate; default paths unchanged.
+func TestSubjectIsolation(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "ledger.json"))
+	now := time.Now().UTC()
+	reset := now.Add(3 * time.Hour)
+	l.ObserveProvider("claude", Win5h, 80, reset, now)                     // default subject
+	l.ObserveProviderSubject("claude", "acct2", Win5h, 10, reset, now)     // second account
+	if b, _ := l.Bucket("claude", Win5h); b.UsedPct != 80 {
+		t.Fatalf("default subject contaminated: %+v", b)
+	}
+	if b, ok := l.BucketSubject("claude", "acct2", Win5h); !ok || b.UsedPct != 10 || b.Subject != "acct2" {
+		t.Fatalf("acct2 bucket wrong: %+v ok=%v", b, ok)
+	}
+	l.AddShadowSubject("claude", "acct2", Win5h, 500, now)
+	if b, _ := l.Bucket("claude", Win5h); b.ShadowTokens != 0 {
+		t.Fatalf("default shadow contaminated by subject write: %+v", b)
+	}
+	s := l.SnapshotSubject("claude", "acct2")
+	if len(s) != 1 || s[0].Subject != "acct2" {
+		t.Fatalf("SnapshotSubject must return only acct2 buckets: %+v", s)
+	}
+	if sd := l.SnapshotSubject("claude", ""); len(sd) != 1 || sd[0].UsedPct != 80 {
+		t.Fatalf("default snapshot wrong: %+v", sd)
+	}
+}

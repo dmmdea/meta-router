@@ -126,3 +126,20 @@ func TestExpiredWindowNeverGates(t *testing.T) {
 		t.Fatalf("expired window gated admission: %+v", d)
 	}
 }
+
+// W2: one subject's exhaustion must never mask another's headroom.
+func TestDecideSubjectIsolation(t *testing.T) {
+	now := time.Now().UTC()
+	reset := now.Add(2 * time.Hour)
+	bs := []ledger.Bucket{
+		{Lane: "claude", Window: ledger.Win5h, UsedPct: 97, ResetsAt: reset, Source: "provider", ObservedAt: now},                     // default: exhausted
+		{Lane: "claude", Subject: "acct2", Window: ledger.Win5h, UsedPct: 5, ResetsAt: reset, Source: "provider", ObservedAt: now}, // acct2: wide open
+	}
+	th := Thresholds{ThrottlePct: 80, ExhaustPct: 95}
+	if d := Decide(bs, "claude", now, th); d.State != Exhausted {
+		t.Fatalf("default subject must read exhausted, got %+v", d)
+	}
+	if d := DecideSubject(bs, "claude", "acct2", now, th); d.State != Open {
+		t.Fatalf("acct2 must read open (never masked by default's exhaustion), got %+v", d)
+	}
+}

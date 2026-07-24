@@ -48,11 +48,27 @@ func estimatedResume(w ledger.WindowKind, now time.Time) time.Time {
 	return now.Add(5 * time.Hour)
 }
 
+// Decide grades the lane's DEFAULT credential subject (pre-W2 behavior,
+// unchanged). Multi-account callers use DecideSubject — mixing subjects in
+// one decision would let account A's exhaustion mask account B's headroom.
 func Decide(bs []ledger.Bucket, lane string, now time.Time, th Thresholds) Decision {
+	return DecideSubject(bs, lane, "", now, th)
+}
+
+func subjectOrDefault(s string) string {
+	if s == "" {
+		return "default"
+	}
+	return s
+}
+
+// DecideSubject is Decide scoped to one credential subject (W2).
+func DecideSubject(bs []ledger.Bucket, lane, subject string, now time.Time, th Thresholds) Decision {
+	want := subjectOrDefault(subject)
 	d := Decision{Admit: true, State: Open}
 	estimated := false
 	for _, b := range bs {
-		if b.Lane != lane {
+		if b.Lane != lane || subjectOrDefault(b.Subject) != want {
 			continue
 		}
 		if !b.ResetsAt.IsZero() && now.After(b.ResetsAt) {
