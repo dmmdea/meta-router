@@ -1,4 +1,4 @@
 {
-  "_note": "B12 ratchet: total non-test Go LOC ceiling. Raising this is a conscious act reviewed in the PR that needs it. Measured 14340 at 2026-07-23 (v0.9.0 scaffold).",
-  "max_go_loc": 15500
+  "_note": "B12 ratchet: total non-test Go LOC ceiling. Raising this is a conscious act reviewed in the PR that needs it. Measured 14340 at v0.9.0; raised to 16500 in the W2 PR (measured 15740 mid-W2: W1 pollers/pace + W2 profiles/subject surfaces are real capability, not sprawl).",
+  "max_go_loc": 16500
 }
