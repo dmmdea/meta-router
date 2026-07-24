@@ -20,8 +20,9 @@ func stateRank(s string) int {
 }
 
 // Select returns the credential subject that should carry this lane's
-// dispatch, and a non-empty provenance reason WHEN it rotated off the
-// registry-first subject (typed-limit-only rotation). Order:
+// dispatch, the FIRST-ELIGIBLE (registry-first provisioned) subject it is
+// measured against, and a non-empty provenance reason WHEN it rotated off that
+// first-eligible subject (typed-limit-only rotation). Order:
 //  1. only PROVISIONED subjects are eligible (an un-provisioned home has no
 //     credentials — never selectable; relegation upstream handles the case
 //     where every subject is exhausted);
@@ -30,9 +31,8 @@ func stateRank(s string) int {
 //     are known (a one-sided measurement never overrides operator preference);
 //  4. registry order (R15: account-1 first unless configured otherwise).
 // Pure: no I/O, no network (Bible B2).
-func Select(reg Registry, lane string, states map[string]SubjectState) (subject string, why string) {
+func Select(reg Registry, lane string, states map[string]SubjectState) (subject, firstEligible, why string) {
 	ps := reg.Lane(lane)
-	var firstEligible string
 	best := ""
 	var bestSt SubjectState
 	for _, p := range ps {
@@ -55,12 +55,12 @@ func Select(reg Registry, lane string, states map[string]SubjectState) (subject 
 		// No provisioned subject — caller falls back to the registry-first
 		// subject's default home (single-account machines never hit this: the
 		// default subject is provisioned by definition when logged in).
-		return firstEligibleOr(ps), ""
+		return firstEligibleOr(ps), firstEligibleOr(ps), ""
 	}
 	if best != firstEligible {
 		why = "rotated to " + best + ": " + rotationReason(bestSt, states[firstEligible])
 	}
-	return best, why
+	return best, firstEligible, why
 }
 
 // better reports whether candidate c should beat the incumbent b.

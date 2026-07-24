@@ -12,7 +12,7 @@ func TestSelectPrefersOpenThenSlackThenOrder(t *testing.T) {
 
 	// Both open: registry order wins (operator preference — account-1 first)
 	// when slack is equal/unknown.
-	sub, why := Select(reg, "claude", map[string]SubjectState{
+	sub, _, why := Select(reg, "claude", map[string]SubjectState{
 		"default": {State: "open"},
 		"acct2":   {State: "open"},
 	})
@@ -21,7 +21,7 @@ func TestSelectPrefersOpenThenSlackThenOrder(t *testing.T) {
 	}
 
 	// Default exhausted, acct2 open → rotate to acct2, provenance set.
-	sub, why = Select(reg, "claude", map[string]SubjectState{
+	sub, _, why = Select(reg, "claude", map[string]SubjectState{
 		"default": {State: "exhausted"},
 		"acct2":   {State: "open"},
 	})
@@ -33,7 +33,7 @@ func TestSelectPrefersOpenThenSlackThenOrder(t *testing.T) {
 	}
 
 	// Both open, acct2 has more slack → slack breaks the tie before order.
-	sub, _ = Select(reg, "claude", map[string]SubjectState{
+	sub, _, _ = Select(reg, "claude", map[string]SubjectState{
 		"default": {State: "open", Slack: fp(-0.3)},
 		"acct2":   {State: "open", Slack: fp(0.4)},
 	})
@@ -44,7 +44,7 @@ func TestSelectPrefersOpenThenSlackThenOrder(t *testing.T) {
 	// Slack decides ONLY when both are known; a nil on either side falls
 	// through to registry order (operator preference, R15) rather than letting
 	// a partial measurement override the preferred account.
-	sub, _ = Select(reg, "claude", map[string]SubjectState{
+	sub, _, _ = Select(reg, "claude", map[string]SubjectState{
 		"default": {State: "open"},                 // slack unknown
 		"acct2":   {State: "open", Slack: fp(-0.9)}, // known but worse
 	})
@@ -58,7 +58,7 @@ func TestSelectSkipsUnprovisioned(t *testing.T) {
 		{Subject: "default", Provisioned: true},
 		{Subject: "acct2", Provisioned: false}, // never selectable
 	}}
-	sub, _ := Select(reg, "claude", map[string]SubjectState{
+	sub, _, _ := Select(reg, "claude", map[string]SubjectState{
 		"default": {State: "exhausted"},
 		"acct2":   {State: "open"},
 	})
@@ -69,7 +69,7 @@ func TestSelectSkipsUnprovisioned(t *testing.T) {
 
 func TestSelectSingleProfileIsDefault(t *testing.T) {
 	reg := Registry{"claude": {{Subject: "default", Provisioned: true}}}
-	sub, why := Select(reg, "claude", map[string]SubjectState{"default": {State: "throttled"}})
+	sub, _, why := Select(reg, "claude", map[string]SubjectState{"default": {State: "throttled"}})
 	if sub != "default" || why != "" {
 		t.Fatalf("single profile: always default, no rotation reason, got %s (%s)", sub, why)
 	}

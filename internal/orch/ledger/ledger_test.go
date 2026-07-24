@@ -3,6 +3,8 @@ package ledger
 import (
 	"os"
 	"path/filepath"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -309,5 +311,23 @@ func TestSubjectIsolation(t *testing.T) {
 	}
 	if sd := l.SnapshotSubject("claude", ""); len(sd) != 1 || sd[0].UsedPct != 80 {
 		t.Fatalf("default snapshot wrong: %+v", sd)
+	}
+}
+
+// W2 byte-identical guard: the DEFAULT subject — however spelled at the write
+// site ("" or the literal "default" from the implicit registry) — stores an
+// EMPTY subject, so its omitempty field never appears in status/ledger JSON on
+// a single-account machine (the regression the Opus review caught).
+func TestDefaultSubjectStoredEmpty(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "l.json"))
+	now := time.Now().UTC()
+	l.ObserveProviderSubject("codex", "default", Win7d, 46, now.Add(48*time.Hour), now)
+	b, ok := l.Bucket("codex", Win7d) // default-subject reader
+	if !ok || b.Subject != "" {
+		t.Fatalf("literal \"default\" must be stored as empty subject, got %q", b.Subject)
+	}
+	js, _ := json.Marshal(b)
+	if strings.Contains(string(js), `"subject"`) {
+		t.Fatalf("single-account bucket must not serialize a subject field: %s", js)
 	}
 }

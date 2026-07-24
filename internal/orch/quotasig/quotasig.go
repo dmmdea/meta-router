@@ -132,6 +132,9 @@ func ApplySnapshots(l *ledger.Ledger, snaps []quotapoll.Snapshot, tracePath, ori
 // ApplySnapshotsSubject is ApplySnapshots onto an explicit credential subject
 // (W2 per-profile polling; "" = default). Trace rows carry the subject.
 func ApplySnapshotsSubject(l *ledger.Ledger, subject string, snaps []quotapoll.Snapshot, tracePath, origin string, now time.Time) (int, string) {
+	if subject == "default" {
+		subject = "" // canonical: the default subject's trace rows stay subject-less (byte-identical to pre-W2)
+	}
 	n, note := 0, ""
 	for _, s := range snaps {
 		if s.ResetsAt.IsZero() || s.ResetsAt.Before(now) {

@@ -155,6 +155,14 @@ func (l *Ledger) get(lane, subject string, w WindowKind) *Bucket {
 	k := key(lane, subject, w)
 	b, ok := l.buckets[k]
 	if !ok {
+		// The default subject is STORED as "" so its omitempty field stays
+		// absent — byte-identical to pre-W2 (the poll loop threads the literal
+		// "default" label from the implicit registry; key() already merges the
+		// two spellings, so canonicalizing here is safe and every reader
+		// normalizes via subjectOrDefault).
+		if subject == "default" {
+			subject = ""
+		}
 		b = &Bucket{Lane: lane, Subject: subject, Window: w, UsedPct: -1}
 		l.buckets[k] = b
 	}

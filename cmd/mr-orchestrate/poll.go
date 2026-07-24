@@ -20,9 +20,12 @@ import (
 // keyed by "lane|subject"; pre-W2 single-account files carried LastClaude /
 // LastCodex, migrated on load so a deployed machine's stamps survive.
 type pollState struct {
-	Last       map[string]time.Time `json:"last"`
-	LastClaude time.Time            `json:"last_claude,omitempty"` // legacy (migrated → Last["claude|default"])
-	LastCodex  time.Time            `json:"last_codex,omitempty"`  // legacy
+	Last map[string]time.Time `json:"last"`
+	// Legacy single-account stamps, migrated into Last on load. Pointers so a
+	// nil (post-migration) is actually omitted — a zero time.Time struct is not
+	// dropped by omitempty (review finding).
+	LastClaude *time.Time `json:"last_claude,omitempty"`
+	LastCodex  *time.Time `json:"last_codex,omitempty"`
 }
 
 func stampKey(lane, subject string) string {
@@ -40,17 +43,17 @@ func loadPollState() pollState {
 	if ps.Last == nil {
 		ps.Last = map[string]time.Time{}
 	}
-	if !ps.LastClaude.IsZero() { // migrate legacy stamps once
+	if ps.LastClaude != nil && !ps.LastClaude.IsZero() { // migrate legacy stamps once
 		if _, ok := ps.Last[stampKey("claude", "default")]; !ok {
-			ps.Last[stampKey("claude", "default")] = ps.LastClaude
+			ps.Last[stampKey("claude", "default")] = *ps.LastClaude
 		}
-		ps.LastClaude = time.Time{}
+		ps.LastClaude = nil
 	}
-	if !ps.LastCodex.IsZero() {
+	if ps.LastCodex != nil && !ps.LastCodex.IsZero() {
 		if _, ok := ps.Last[stampKey("codex", "default")]; !ok {
-			ps.Last[stampKey("codex", "default")] = ps.LastCodex
+			ps.Last[stampKey("codex", "default")] = *ps.LastCodex
 		}
-		ps.LastCodex = time.Time{}
+		ps.LastCodex = nil
 	}
 	return ps
 }
@@ -197,7 +200,10 @@ func runPoll(args []string) error {
 	cfg := orchcfg.Load(configPath())
 	reg, rerr := profiles.Load(profilesPath())
 	if rerr != nil {
-		return rerr
+		// Fail-open like status/run: an operator typo must not silently stop a
+		// scheduled poll — degrade to the default subject (review finding).
+		fmt.Fprintln(os.Stderr, "warn: profiles registry invalid, default subject only:", rerr)
+		reg = nil
 	}
 	ps := loadPollState()
 	f := fetchPolls(cfg, reg, ps, true, now) // network OUTSIDE the ledger lock

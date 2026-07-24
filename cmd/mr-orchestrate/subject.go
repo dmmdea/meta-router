@@ -38,7 +38,7 @@ func pickSubject(reg profiles.Registry, l *ledger.Ledger, lane string, now time.
 		}
 		states[p.Subject] = st
 	}
-	subject, why := profiles.Select(reg, lane, states)
+	subject, firstEligible, why := profiles.Select(reg, lane, states)
 	sel := selectedSubject{Subject: subject}
 	for _, p := range ps {
 		if p.Subject == subject {
@@ -46,7 +46,7 @@ func pickSubject(reg profiles.Registry, l *ledger.Ledger, lane string, now time.
 		}
 	}
 	if why != "" {
-		sel.RotationFrom = ps[0].Subject
+		sel.RotationFrom = firstEligible // the incumbent it rotated OFF, not blindly ps[0]
 		sel.RotationReason = why
 	}
 	return sel
