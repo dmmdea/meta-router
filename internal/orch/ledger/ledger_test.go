@@ -3,6 +3,8 @@ package ledger
 import (
 	"os"
 	"path/filepath"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -283,5 +285,49 @@ func TestSubjectKeyDistinct(t *testing.T) {
 	}
 	if key("claude", "acct2", Win5h) == key("claude", "default", Win5h) {
 		t.Fatal("distinct subjects must produce distinct keys")
+	}
+}
+
+// W2: distinct subjects never cross-contaminate; default paths unchanged.
+func TestSubjectIsolation(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "ledger.json"))
+	now := time.Now().UTC()
+	reset := now.Add(3 * time.Hour)
+	l.ObserveProvider("claude", Win5h, 80, reset, now)                     // default subject
+	l.ObserveProviderSubject("claude", "acct2", Win5h, 10, reset, now)     // second account
+	if b, _ := l.Bucket("claude", Win5h); b.UsedPct != 80 {
+		t.Fatalf("default subject contaminated: %+v", b)
+	}
+	if b, ok := l.BucketSubject("claude", "acct2", Win5h); !ok || b.UsedPct != 10 || b.Subject != "acct2" {
+		t.Fatalf("acct2 bucket wrong: %+v ok=%v", b, ok)
+	}
+	l.AddShadowSubject("claude", "acct2", Win5h, 500, now)
+	if b, _ := l.Bucket("claude", Win5h); b.ShadowTokens != 0 {
+		t.Fatalf("default shadow contaminated by subject write: %+v", b)
+	}
+	s := l.SnapshotSubject("claude", "acct2")
+	if len(s) != 1 || s[0].Subject != "acct2" {
+		t.Fatalf("SnapshotSubject must return only acct2 buckets: %+v", s)
+	}
+	if sd := l.SnapshotSubject("claude", ""); len(sd) != 1 || sd[0].UsedPct != 80 {
+		t.Fatalf("default snapshot wrong: %+v", sd)
+	}
+}
+
+// W2 byte-identical guard: the DEFAULT subject — however spelled at the write
+// site ("" or the literal "default" from the implicit registry) — stores an
+// EMPTY subject, so its omitempty field never appears in status/ledger JSON on
+// a single-account machine (the regression the Opus review caught).
+func TestDefaultSubjectStoredEmpty(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "l.json"))
+	now := time.Now().UTC()
+	l.ObserveProviderSubject("codex", "default", Win7d, 46, now.Add(48*time.Hour), now)
+	b, ok := l.Bucket("codex", Win7d) // default-subject reader
+	if !ok || b.Subject != "" {
+		t.Fatalf("literal \"default\" must be stored as empty subject, got %q", b.Subject)
+	}
+	js, _ := json.Marshal(b)
+	if strings.Contains(string(js), `"subject"`) {
+		t.Fatalf("single-account bucket must not serialize a subject field: %s", js)
 	}
 }

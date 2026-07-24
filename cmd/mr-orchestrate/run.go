@@ -19,6 +19,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/jitter"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/profiles"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/router"
 )
@@ -50,6 +51,13 @@ type gateResult struct {
 // intent must not silently become the permissive mode). --force outranks
 // everything (R11) but is always marked Forced so it warns and audits.
 func gate(bs []ledger.Bucket, lane, model string, fzs []fuses.Fuse, now time.Time, cfg orchcfg.Config, force bool, th admission.Thresholds) gateResult {
+	return gateSubject(bs, lane, "", model, fzs, now, cfg, force, th)
+}
+
+// gateSubject is gate scoped to a credential subject (W2; ""=default). Only
+// the admission read is subject-aware — the billing/fable/force rules are
+// account-independent.
+func gateSubject(bs []ledger.Bucket, lane, subject, model string, fzs []fuses.Fuse, now time.Time, cfg orchcfg.Config, force bool, th admission.Thresholds) gateResult {
 	deny := func(state, reason string) gateResult {
 		if force {
 			return gateResult{Admit: true, State: state, Forced: true,
@@ -71,7 +79,7 @@ func gate(bs []ledger.Bucket, lane, model string, fzs []fuses.Fuse, now time.Tim
 	if strings.Contains(strings.ToLower(model), "fable") && !fuseActive(fzs, "fable-carveout", now) {
 		return deny("model_retired", "fable-carveout fuse expired 2026-07-07: fable is usage-credits-only, NOT a runtime lane (R10)")
 	}
-	d := admission.Decide(bs, lane, now, th)
+	d := admission.DecideSubject(bs, lane, subject, now, th)
 	if !d.Admit {
 		g := deny(string(d.State), d.Reason)
 		g.ResumeAt = d.ResumeAt
@@ -123,12 +131,20 @@ func warnIf(err error, what string) {
 // the 5h window is marked exhausted with the RS5 conservative resume so the
 // very next invocation defers instead of hammering the closed window.
 func applyRunOutcome(l *ledger.Ledger, o claudelane.Outcome, now time.Time) {
-	_, _, _ = quotasig.IngestTraced(l, dropPath(), "", "claude", now)
+	applyRunOutcomeSubject(l, "", o, now)
+}
+
+// applyRunOutcomeSubject accounts a run's usage to the credential subject that
+// carried it (W2; ""=default). The subscription's usage belongs to the account
+// that spent it, so a rotated dispatch's shadow + any 429 exhaustion land on
+// that subject's windows, never the default's.
+func applyRunOutcomeSubject(l *ledger.Ledger, subject string, o claudelane.Outcome, now time.Time) {
+	_, _, _ = quotasig.IngestTraced(l, dropPath(), "", "claude", now) // default-subject tee (the primary session)
 	tok := o.TotalTokens()
-	l.AddShadow("claude", ledger.Win5h, tok, now)
-	l.AddShadow("claude", ledger.Win7d, tok, now)
+	l.AddShadowSubject("claude", subject, ledger.Win5h, tok, now)
+	l.AddShadowSubject("claude", subject, ledger.Win7d, tok, now)
 	if o.Class == "rate_limit" {
-		l.ObserveProvider("claude", ledger.Win5h, 100, now.Add(5*time.Hour), now)
+		l.ObserveProviderSubject("claude", subject, ledger.Win5h, 100, now.Add(5*time.Hour), now)
 	}
 }
 
@@ -394,8 +410,19 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		fmt.Fprintln(os.Stderr, "warn:", note)
 	}
 
-	g := gate(l.Snapshot(), "claude", resolvedModel, fzs, now, cfg, opts.Force, defaultThresholds)
+	// W2: pick the credential subject (dual-account rotation). Single-profile
+	// machines get the default subject + empty home — the gate/env/receipt
+	// below are then byte-identical to pre-W2.
+	reg, rerr0 := profiles.Load(profilesPath())
+	if rerr0 != nil {
+		fmt.Fprintln(os.Stderr, "warn: profiles registry invalid, default subject only:", rerr0)
+	}
+	sel := pickSubject(reg, l, "claude", now)
+	g := gateSubject(l.Snapshot(), "claude", sel.Subject, resolvedModel, fzs, now, cfg, opts.Force, defaultThresholds)
 	req := claudelane.RunReq{Prompt: opts.Prompt, Model: resolvedModel, Effort: resolvedEffort, CWD: opts.CWD, TimeoutSec: opts.TimeoutSec}
+	if sel.Home != "" { // non-default subject: relocate the credential read (probe-verified 2026-07-23)
+		req.Env = append(req.Env, "CLAUDE_CONFIG_DIR="+sel.Home)
+	}
 	if opts.Extra != "" {
 		req.Extra = extraArgs
 	}
@@ -408,6 +435,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 			Origin: opts.Origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 			Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: opts.Desc,
+			Subject: sel.Subject, RotationFrom: sel.RotationFrom, RotationReason: sel.RotationReason,
 		}
 		sf.stamp(&rec)
 		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (deferral)")
@@ -448,7 +476,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	// Post-run accounting is a cross-process transaction: fresh state under
 	// the lock, so concurrent run/status/probe invocations never lose writes.
 	warnIf(ledger.Update(ledgerPath(), func(fresh *ledger.Ledger) {
-		applyRunOutcome(fresh, o, now)
+		applyRunOutcomeSubject(fresh, sel.Subject, o, now)
 	}), "ledger update (post-run)")
 	drec := dispatch.Record{
 		TS: now, Lane: "claude", Model: resolvedModel, AttributedModels: attributed, OutcomeClass: o.Class,
@@ -456,6 +484,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		TokensIn: in, TokensOut: outTok, NumTurns: o.NumTurns, NotionalUSD: o.NotionalUSD,
 		Origin: opts.Origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: opts.Desc,
+		Subject: sel.Subject, RotationFrom: sel.RotationFrom, RotationReason: sel.RotationReason,
 	}
 	sf.stamp(&drec)
 	warnIf(dispatch.Append(dispatchPath(), drec), "dispatch append")

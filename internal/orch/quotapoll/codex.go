@@ -46,6 +46,15 @@ func PollCodex(now time.Time) Result {
 	return pollCodex(guardedClient(), "https://chatgpt.com", CodexAuthPath(), now)
 }
 
+// PollCodexAt polls using an explicit auth.json path (W2 per-profile: a
+// profile's isolated CODEX_HOME). Empty path = the default home.
+func PollCodexAt(authPath string, now time.Time) Result {
+	if authPath == "" {
+		authPath = CodexAuthPath()
+	}
+	return pollCodex(guardedClient(), "https://chatgpt.com", authPath, now)
+}
+
 func windowKindOf(seconds int64) (ledger.WindowKind, bool) {
 	switch {
 	case seconds >= 4*3600 && seconds <= 6*3600:

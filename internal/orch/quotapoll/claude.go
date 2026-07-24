@@ -90,6 +90,15 @@ func PollClaude(now time.Time) Result {
 	return pollClaude(guardedClient(), "https://api.anthropic.com", ClaudeCredPath(), now)
 }
 
+// PollClaudeAt polls using an explicit credential path (W2 per-profile: a
+// profile's isolated CLAUDE_CONFIG_DIR home). Empty path = the default home.
+func PollClaudeAt(credPath string, now time.Time) Result {
+	if credPath == "" {
+		credPath = ClaudeCredPath()
+	}
+	return pollClaude(guardedClient(), "https://api.anthropic.com", credPath, now)
+}
+
 func pollClaude(c *http.Client, baseURL, credPath string, now time.Time) Result {
 	var r Result
 	tok, err := claudeToken(credPath)

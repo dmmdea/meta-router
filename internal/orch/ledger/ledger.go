@@ -151,11 +151,19 @@ func acquireLock(lockPath string, wait, stale time.Duration) (func(), error) {
 	}
 }
 
-func (l *Ledger) get(lane string, w WindowKind) *Bucket {
-	k := key(lane, "", w) // exported methods operate on the default subject until W2
+func (l *Ledger) get(lane, subject string, w WindowKind) *Bucket {
+	k := key(lane, subject, w)
 	b, ok := l.buckets[k]
 	if !ok {
-		b = &Bucket{Lane: lane, Window: w, UsedPct: -1}
+		// The default subject is STORED as "" so its omitempty field stays
+		// absent — byte-identical to pre-W2 (the poll loop threads the literal
+		// "default" label from the implicit registry; key() already merges the
+		// two spellings, so canonicalizing here is safe and every reader
+		// normalizes via subjectOrDefault).
+		if subject == "default" {
+			subject = ""
+		}
+		b = &Bucket{Lane: lane, Subject: subject, Window: w, UsedPct: -1}
 		l.buckets[k] = b
 	}
 	return b
@@ -174,14 +182,54 @@ func (b *Bucket) roll(now time.Time) {
 }
 
 func (l *Ledger) ObserveProvider(lane string, w WindowKind, usedPct float64, resetsAt, now time.Time) {
+	l.ObserveProviderSubject(lane, "", w, usedPct, resetsAt, now)
+}
+
+// ObserveProviderSubject is ObserveProvider on an explicit credential subject
+// (W2; "" = default). Distinct subjects never share a bucket.
+func (l *Ledger) ObserveProviderSubject(lane, subject string, w WindowKind, usedPct float64, resetsAt, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.get(lane, w)
+	b := l.get(lane, subject, w)
 	b.roll(now)
 	b.UsedPct = usedPct
 	b.ResetsAt = resetsAt
 	b.Source = "provider"
 	b.ObservedAt = now
+}
+
+// BucketSubject is Bucket on an explicit subject (W2; "" = default).
+func (l *Ledger) BucketSubject(lane, subject string, w WindowKind) (Bucket, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, ok := l.buckets[key(lane, subject, w)]
+	if !ok {
+		return Bucket{}, false
+	}
+	return *b, true
+}
+
+// AddShadowSubject is AddShadow on an explicit subject (W2; "" = default) —
+// dispatch outcomes accrue to the subject that carried them.
+func (l *Ledger) AddShadowSubject(lane, subject string, w WindowKind, tokens int64, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.addShadowLocked(l.get(lane, subject, w), w, tokens, now)
+}
+
+// SnapshotSubject returns copies of one lane+subject's buckets (W2 selection
+// input: per-subject admission + slack read exactly one subject's windows).
+func (l *Ledger) SnapshotSubject(lane, subject string) []Bucket {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	want := subjectOrDefault(subject)
+	var out []Bucket
+	for _, b := range l.buckets {
+		if b.Lane == lane && subjectOrDefault(b.Subject) == want {
+			out = append(out, *b)
+		}
+	}
+	return out
 }
 
 // AnchorIfUnset sets a window's reset moment when none is known, WITHOUT
@@ -191,7 +239,7 @@ func (l *Ledger) ObserveProvider(lane string, w WindowKind, usedPct float64, res
 func (l *Ledger) AnchorIfUnset(lane string, w WindowKind, resetsAt, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.get(lane, w)
+	b := l.get(lane, "", w)
 	b.roll(now)
 	if b.Source != "provider" && b.ResetsAt.IsZero() {
 		b.ResetsAt = resetsAt
@@ -208,7 +256,7 @@ func (l *Ledger) AnchorIfUnset(lane string, w WindowKind, resetsAt, now time.Tim
 func (l *Ledger) AnchorAuthoritative(lane string, w WindowKind, resetsAt, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.get(lane, w)
+	b := l.get(lane, "", w)
 	b.roll(now)
 	if b.Source != "provider" {
 		b.ResetsAt = resetsAt
@@ -218,7 +266,12 @@ func (l *Ledger) AnchorAuthoritative(lane string, w WindowKind, resetsAt, now ti
 func (l *Ledger) AddShadow(lane string, w WindowKind, tokens int64, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.get(lane, w)
+	l.addShadowLocked(l.get(lane, "", w), w, tokens, now)
+}
+
+// addShadowLocked is AddShadow's body, shared with the subject variant.
+// Caller holds l.mu.
+func (l *Ledger) addShadowLocked(b *Bucket, w WindowKind, tokens int64, now time.Time) {
 	b.roll(now)
 	if w == Win5h && b.ResetsAt.IsZero() {
 		b.ResetsAt = now.Add(5 * time.Hour) // RS4 self-anchor
@@ -246,7 +299,7 @@ func (l *Ledger) AddShadow(lane string, w WindowKind, tokens int64, now time.Tim
 func (l *Ledger) ClearShadow(lane string, w WindowKind, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.get(lane, w)
+	b := l.get(lane, "", w)
 	b.ShadowTokens = 0
 	if b.Source != "provider" {
 		if b.CapTokens > 0 && !b.ResetsAt.IsZero() {
@@ -263,7 +316,7 @@ func (l *Ledger) ClearShadow(lane string, w WindowKind, now time.Time) {
 func (l *Ledger) SetCapacity(lane string, w WindowKind, capTokens int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.get(lane, w)
+	b := l.get(lane, "", w)
 	b.CapTokens = capTokens
 	b.CapVersion++
 	b.CapSource = ""
@@ -276,7 +329,7 @@ func (l *Ledger) SetCapacity(lane string, w WindowKind, capTokens int64) {
 func (l *Ledger) SetCapacityEstimate(lane string, w WindowKind, capTokens int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.get(lane, w)
+	b := l.get(lane, "", w)
 	b.CapTokens = capTokens
 	b.CapVersion++
 	b.CapSource = CapSourceEstimate

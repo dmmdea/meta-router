@@ -22,7 +22,7 @@ func TestBuildStatus(t *testing.T) {
 		{Name: "fable-carveout", ExpiresAt: time.Date(2026, 7, 7, 7, 0, 0, 0, time.UTC)}, // expired at now
 		{Name: "weekly-boost-50pct", ExpiresAt: time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)},
 	}
-	st := buildStatus(bs, fzs, orchcfg.Defaults(), now, nil, nil)
+	st := buildStatus(bs, fzs, orchcfg.Defaults(), now, nil, nil, nil)
 
 	lane, ok := st.Lanes["claude"]
 	if !ok {
@@ -100,7 +100,7 @@ func TestBuildStatusSurfacesBurnDownshift(t *testing.T) {
 	now := time.Now().UTC()
 	bs := []ledger.Bucket{{Lane: "glm", Window: ledger.Win5h, UsedPct: 40,
 		ResetsAt: now.Add(6 * time.Hour), Source: "provider", ObservedAt: now}}
-	st := buildStatus(bs, nil, orchcfg.Config{}, now, map[string]int{"glm": 3}, nil)
+	st := buildStatus(bs, nil, orchcfg.Config{}, now, map[string]int{"glm": 3}, nil, nil)
 	if st.Lanes["glm"].BurnDownshift != 3 {
 		t.Fatalf("burn_downshift must surface, got %d", st.Lanes["glm"].BurnDownshift)
 	}

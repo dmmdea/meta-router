@@ -36,6 +36,13 @@ type Record struct {
 	// decision time (W1; nil = unknown) — the calibration substrate for any
 	// future slack-conditioned policy.
 	PaceSlack *float64 `json:"pace_slack,omitempty"`
+	// Subject is the credential subject that carried the dispatch (W2; ""=
+	// default). RotationFrom + RotationReason are populated only when the
+	// selected subject was NOT the registry-first one — the typed-limit
+	// rotation provenance (claudexor discipline: never a network error).
+	Subject        string `json:"subject,omitempty"`
+	RotationFrom   string `json:"rotation_from,omitempty"`
+	RotationReason string `json:"rotation_reason,omitempty"`
 
 	// Adherence fields (RS9 / §6c): origin, recommendation-vs-action, and
 	// deviation make delegation obedience COUNTABLE. All omitempty — old JSONL

@@ -111,6 +111,7 @@ func IngestTraced(l *ledger.Ledger, path, tracePath, lane string, now time.Time)
 type TraceRow struct {
 	TS           time.Time `json:"ts"`
 	Lane         string    `json:"lane"`
+	Subject      string    `json:"subject,omitempty"` // W2: credential subject ("" = default; pre-W2 rows valid)
 	Window       string    `json:"window"`
 	UsedPct      float64   `json:"used_pct"`
 	ResetsAt     time.Time `json:"resets_at"`
@@ -125,17 +126,26 @@ type traceRow = TraceRow
 // or unanchored snapshots are skipped with the same rules as the drop
 // (a dead percentage must not masquerade as fresh provider truth).
 func ApplySnapshots(l *ledger.Ledger, snaps []quotapoll.Snapshot, tracePath, origin string, now time.Time) (int, string) {
+	return ApplySnapshotsSubject(l, "", snaps, tracePath, origin, now)
+}
+
+// ApplySnapshotsSubject is ApplySnapshots onto an explicit credential subject
+// (W2 per-profile polling; "" = default). Trace rows carry the subject.
+func ApplySnapshotsSubject(l *ledger.Ledger, subject string, snaps []quotapoll.Snapshot, tracePath, origin string, now time.Time) (int, string) {
+	if subject == "default" {
+		subject = "" // canonical: the default subject's trace rows stay subject-less (byte-identical to pre-W2)
+	}
 	n, note := 0, ""
 	for _, s := range snaps {
 		if s.ResetsAt.IsZero() || s.ResetsAt.Before(now) {
 			continue
 		}
-		prev, had := l.Bucket(s.Lane, s.Window)
+		prev, had := l.BucketSubject(s.Lane, subject, s.Window)
 		changed := !had || prev.UsedPct != s.UsedPct || !prev.ResetsAt.Equal(s.ResetsAt)
-		l.ObserveProvider(s.Lane, s.Window, s.UsedPct, s.ResetsAt, now)
+		l.ObserveProviderSubject(s.Lane, subject, s.Window, s.UsedPct, s.ResetsAt, now)
 		n++
 		if tracePath != "" && changed {
-			if err := appendTrace(tracePath, TraceRow{TS: now, Lane: s.Lane, Window: string(s.Window), UsedPct: s.UsedPct, ResetsAt: s.ResetsAt, ShadowTokens: prev.ShadowTokens, Origin: origin}); err != nil {
+			if err := appendTrace(tracePath, TraceRow{TS: now, Lane: s.Lane, Subject: subject, Window: string(s.Window), UsedPct: s.UsedPct, ResetsAt: s.ResetsAt, ShadowTokens: prev.ShadowTokens, Origin: origin}); err != nil {
 				note = "quota trace append failed: " + err.Error()
 			}
 		}
