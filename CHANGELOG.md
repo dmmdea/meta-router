@@ -4,6 +4,11 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.12.0] — 2026-07-23
+
+### Added
+- **W2 — Credential profiles / multi-account:** `internal/orch/profiles` — a registry (`profiles.json`) mapping each lane to ordered credential SUBJECTS with isolated auth homes (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`; probe-verified 2026-07-23 that `CLAUDE_CONFIG_DIR` relocates the credential read on Windows). meta-router never creates/copies/refreshes credentials — it USES operator-provisioned homes (R10); an un-provisioned home is listed with its login command, never silently skipped. Subject-scoped everything on W1's keys: ledger `ObserveProviderSubject`/`BucketSubject`/`AddShadowSubject`/`SnapshotSubject`, `admission.DecideSubject` (one account's exhaustion never masks another's headroom), per-(lane,subject) polling with legacy stamp migration, and per-subject `subjects` sub-blocks in `status` (present only when a lane has >1 profile — single-account output byte-identical). **Dual-account rotation (DG-1):** the claude dispatch picks the healthiest provisioned subject (`profiles.Select`: state → binding pace slack → registry order), sets its `CLAUDE_CONFIG_DIR`, accounts shadow/429 to that subject's windows, and records rotation provenance on the receipt (`subject`/`rotation_from`/`rotation_reason` — typed-limit-only, never a network error). New `profiles` subcommand lists the registry with per-subject state + login commands. Single-profile machines (every deploy until a second account is provisioned) behave identically to v0.11.0 — pinned by tests.
+
 ## [0.11.0] — 2026-07-23
 
 ### Added

@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-var version = "0.11.0"
+var version = "0.12.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -27,6 +27,8 @@ func main() {
 		err = runPoll(os.Args[2:])
 	case "quota-parity":
 		err = runQuotaParity(os.Args[2:])
+	case "profiles":
+		err = runProfiles(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
 	case "run":
