@@ -14,6 +14,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/profiles"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/router"
 )
@@ -434,7 +435,8 @@ func toolQuotaStatus() toolResult {
 	cfg := orchcfg.Load(configPath())
 	samples := calib.Load(quotaTracePath())
 	down := burnDownshiftByLane(snap, samples, cfg, now)
-	st := buildStatus(snap, fzs, cfg, now, down, spendDownArmedByLane(snap, samples, cfg, now))
+	reg, _ := profiles.Load(profilesPath()) // read-only; invalid registry → default subject only
+	st := buildStatus(snap, fzs, cfg, now, down, spendDownArmedByLane(snap, samples, cfg, now), reg)
 	// Parity with runStatus: the E6 quota_health signal-liveness block must be
 	// visible on the machine-facing MCP surface too, or a stalled quota signal is
 	// invisible to the machine that reads quota_status.

@@ -24,6 +24,7 @@ func glmTokenPath() string    { return statepaths.GLMToken() }
 func glmAlertPath() string    { return statepaths.GLMAlert() }
 func rankTablePath() string   { return statepaths.RankTable() }
 func spendDownPath() string   { return statepaths.SpendDown() }
+func profilesPath() string    { return statepaths.Profiles() }
 
 // fixturesDir locates the committed fixtures for probe/verify. CWD-relative
 // by default (repo workflows); MR_ORCH_FIXTURES pins it for scheduled tasks

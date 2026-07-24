@@ -33,6 +33,7 @@ func GLMToken() string    { return filepath.Join(StateDir(), "glm-token") }
 func RankTable() string   { return filepath.Join(StateDir(), "rank-table.json") }
 func SpendDown() string   { return filepath.Join(StateDir(), "spend-down.json") }
 func PollState() string   { return filepath.Join(StateDir(), "poll-state.json") }  // W1: last-poll stamps
+func Profiles() string    { return filepath.Join(StateDir(), "profiles.json") }    // W2: credential-profile registry
 func ScopedAlert() string { return filepath.Join(StateDir(), "scoped-alert.json") } // W1: critical scoped-limit latch
 
 // Strategy state (slice 3): per-dispatch dirs under StateDir()/strategy/<id>/

@@ -52,12 +52,16 @@ func defaultRegistry() Registry {
 }
 
 // Lane returns the lane's ordered profiles (implicit default for lanes the
-// registry file omits — a partial file must not delete a lane's identity).
+// registry file omits, or a nil registry — a partial/absent file must not
+// delete a lane's identity). The implicit default is marked provisioned iff
+// the CLI's live home actually holds credentials.
 func (r Registry) Lane(lane string) []Profile {
 	if ps, ok := r[lane]; ok && len(ps) > 0 {
 		return ps
 	}
-	return defaultRegistry()[lane]
+	p := Profile{Subject: "default", Home: ""}
+	p.Provisioned = provisioned(lane, "", credFile(lane))
+	return []Profile{p}
 }
 
 // MultiSubject reports whether any lane has more than one profile — the
