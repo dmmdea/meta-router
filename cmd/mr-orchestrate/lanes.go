@@ -134,7 +134,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		return 1, err // config_error: bad args / version gate — never reached the binary
 	}
 	predicted := -1.0
-	warnIf(ledger.Update(ledgerPath(), func(fresh *ledger.Ledger) {
+	warnIf(updateLedger(func(fresh *ledger.Ledger) {
 		predicted = applyCodexOutcome(fresh, o, cfg, now)
 	}), "ledger update (post-run)")
 	// Burn-anomaly latch (fact-refresh gap #6): a real veto at predicted
@@ -443,7 +443,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	// Fair-Usage strike and re-admit into a banned-risk account.
 	latchGLMHardStop(raw, glmAlertPath(), now)
 	classified := false
-	warnIf(ledger.Update(ledgerPath(), func(fresh *ledger.Ledger) {
+	warnIf(updateLedger(func(fresh *ledger.Ledger) {
 		_, classified = applyGLMOutcome(fresh, o, raw, model, cfg, fzs, now)
 	}), "ledger update (post-run)")
 	if !classified && o.Class == "rate_limit" {

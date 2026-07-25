@@ -291,7 +291,7 @@ func toolRoute(args json.RawMessage) toolResult {
 	// RS1: ingest the statusline drop so interactive Claude usage participates
 	// in the mask. Fail-open — a bad drop never breaks the oracle.
 	var snap []ledger.Bucket
-	if err := ledger.Update(ledgerPath(), func(l *ledger.Ledger) {
+	if err := updateLedger(func(l *ledger.Ledger) {
 		if _, note, ierr := quotasig.IngestTraced(l, dropPath(), quotaTracePath(), "claude", now); ierr != nil {
 			fmt.Fprintln(os.Stderr, "mcp route warn: statusline drop unreadable:", ierr)
 		} else if note != "" {

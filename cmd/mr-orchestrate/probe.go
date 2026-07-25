@@ -28,7 +28,7 @@ import (
 // authoritative-overwrite anchor) live in quotasig.IngestStreamEvents.
 func ingestStreamSignal(raw []byte, now time.Time) (int, error) {
 	n := 0
-	err := ledger.Update(ledgerPath(), func(l *ledger.Ledger) {
+	err := updateLedger(func(l *ledger.Ledger) {
 		n = quotasig.IngestStreamEvents(l, raw, "claude", now)
 	})
 	return n, err

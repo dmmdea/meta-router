@@ -207,7 +207,7 @@ func runPoll(args []string) error {
 	}
 	ps := loadPollState()
 	f := fetchPolls(cfg, reg, ps, true, now) // network OUTSIDE the ledger lock
-	err := ledger.Update(ledgerPath(), func(l *ledger.Ledger) {
+	err := updateLedger(func(l *ledger.Ledger) {
 		applyPolls(l, f, now)
 	})
 	if err != nil {

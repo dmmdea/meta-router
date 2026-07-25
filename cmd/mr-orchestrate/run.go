@@ -439,7 +439,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		}
 		sf.stamp(&rec)
 		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (deferral)")
-		warnIf(ledger.Update(ledgerPath(), func(fresh *ledger.Ledger) {
+		warnIf(updateLedger(func(fresh *ledger.Ledger) {
 			_, _, _ = quotasig.IngestTraced(fresh, dropPath(), "", "claude", now)
 		}), "ledger save (deferral)")
 		fmt.Fprintln(out, string(deferralJSON(g)))
@@ -475,7 +475,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	sort.Strings(attributed)
 	// Post-run accounting is a cross-process transaction: fresh state under
 	// the lock, so concurrent run/status/probe invocations never lose writes.
-	warnIf(ledger.Update(ledgerPath(), func(fresh *ledger.Ledger) {
+	warnIf(updateLedger(func(fresh *ledger.Ledger) {
 		applyRunOutcomeSubject(fresh, sel.Subject, o, now)
 	}), "ledger update (post-run)")
 	drec := dispatch.Record{

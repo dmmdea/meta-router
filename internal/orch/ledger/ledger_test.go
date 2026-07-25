@@ -352,3 +352,52 @@ func TestBucketExpired(t *testing.T) {
 		}
 	}
 }
+
+// REGRESSION (audit 2026-07-25): Update called Open(), which DISCARDS
+// OpenChecked's warning, so a corrupt ledger was silently replaced by an empty
+// one on the next write — exit 0, zero stderr, six buckets gone. GLM has no
+// poller, so its weekly consumption became re-spendable unmetered.
+func TestUpdateCheckedQuarantinesCorruptLedger(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ledger.json")
+	if err := os.WriteFile(path, []byte(`{"not":"an array"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	warn, err := UpdateChecked(path, func(l *Ledger) {
+		l.AddShadow("claude", Win5h, 100, time.Now().UTC())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warn == "" {
+		t.Fatal("a corrupt ledger must WARN, never vanish silently")
+	}
+	// The corrupt bytes must be preserved for forensics, not overwritten.
+	quarantined, _ := filepath.Glob(filepath.Join(dir, "ledger.json.corrupt-*"))
+	if len(quarantined) != 1 {
+		t.Fatalf("corrupt ledger must be quarantined, found %v", quarantined)
+	}
+	if b, _ := os.ReadFile(quarantined[0]); string(b) != `{"not":"an array"` {
+		t.Fatalf("quarantine must hold the original bytes, got %q", b)
+	}
+	// And the write still lands (B4: never dispatch with no accounting).
+	if b, ok := Open(path).Bucket("claude", Win5h); !ok || b.ShadowTokens != 100 {
+		t.Fatalf("the update must still apply after quarantine, got %+v ok=%v", b, ok)
+	}
+}
+
+// A TRANSIENT read error (sharing violation from Defender/backup) must NOT
+// quarantine — renaming on that path would cause the very loss it prevents.
+func TestUpdateCheckedDoesNotQuarantineHealthyOrMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ledger.json")
+	warn, err := UpdateChecked(path, func(l *Ledger) {
+		l.AddShadow("codex", Win5h, 5, time.Now().UTC())
+	})
+	if err != nil || warn != "" {
+		t.Fatalf("a missing ledger is the normal first-run case: warn=%q err=%v", warn, err)
+	}
+	if q, _ := filepath.Glob(filepath.Join(dir, "ledger.json.corrupt-*")); len(q) != 0 {
+		t.Fatalf("nothing to quarantine on a clean run, found %v", q)
+	}
+}

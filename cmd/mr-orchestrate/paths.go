@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
@@ -42,4 +44,16 @@ func codexFixturesDir() string {
 		return d
 	}
 	return filepath.Join("testdata", "fixtures", "codex")
+}
+
+// updateLedger is the ONE ledger-write path for this command: it surfaces
+// UpdateChecked's warning to stderr. Update() discards that warning, which is
+// how a corrupt ledger was silently replaced by an empty one (audit
+// 2026-07-25). Never call ledger.Update directly from cmd.
+func updateLedger(fn func(*ledger.Ledger)) error {
+	warn, err := ledger.UpdateChecked(ledgerPath(), fn)
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "WARN: ledger:", warn)
+	}
+	return err
 }

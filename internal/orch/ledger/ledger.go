@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -160,23 +161,30 @@ func Open(path string) *Ledger {
 // unreadable/corrupt — the fail-open contract requires the caller to WARN,
 // not to silently zero accumulated state.
 func OpenChecked(path string) (*Ledger, string) {
+	l, warn, _ := openWithKind(path)
+	return l, warn
+}
+
+// openWithKind is OpenChecked plus the distinction the quarantine needs:
+// corrupt (unmarshal failed — the bytes are garbage) vs a transient I/O error.
+func openWithKind(path string) (*Ledger, string, bool) {
 	l := &Ledger{path: path, buckets: map[string]*Bucket{}}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return l, ""
+			return l, "", false
 		}
-		return l, "ledger unreadable, failing open to empty: " + err.Error()
+		return l, "ledger unreadable, failing open to empty: " + err.Error(), false
 	}
 	var list []Bucket
 	if err := json.Unmarshal(b, &list); err != nil {
-		return l, "ledger corrupt, failing open to empty: " + err.Error()
+		return l, "ledger corrupt, failing open to empty: " + err.Error(), true
 	}
 	for i := range list {
 		cp := list[i]
 		l.buckets[key(cp.Lane, cp.Subject, cp.Window)] = &cp
 	}
-	return l, ""
+	return l, "", false
 }
 
 // Update performs a cross-process-safe read-modify-write: acquire the sidecar
@@ -186,14 +194,39 @@ func OpenChecked(path string) (*Ledger, string) {
 // last-writer-wins race silently drops shadow tokens. Reads for admission
 // decisions may still use Open — a stale read fails open by design.
 func Update(path string, fn func(*Ledger)) error {
+	_, err := UpdateChecked(path, fn)
+	return err
+}
+
+// UpdateChecked is Update plus OpenChecked's warning — the caller MUST surface
+// it. Update discarded it, so a corrupt ledger was silently replaced by an
+// empty one on the next write (audit 2026-07-25: exit 0, zero stderr, six
+// buckets gone; GLM has no poller, so its consumed weekly window became
+// re-spendable unmetered).
+//
+// On a CORRUPT file (unmarshal failure) the original bytes are quarantined to
+// ledger.json.corrupt-<RFC3339> before the fresh state is written: the damage
+// stays inspectable. A transient read error is NOT quarantined — renaming on a
+// sharing violation (Defender, backup) would cause the very loss this prevents.
+// Either way the update still applies and Save still runs: refusing to write
+// would dispatch with no shadow accounting (Bible B4).
+func UpdateChecked(path string, fn func(*Ledger)) (string, error) {
 	unlock, err := acquireLock(path+".lock", 3*time.Second, 30*time.Second)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer unlock()
-	l := Open(path)
+	l, warn, corrupt := openWithKind(path)
+	if corrupt {
+		dst := path + ".corrupt-" + time.Now().UTC().Format("20060102T150405Z")
+		if rerr := os.Rename(path, dst); rerr != nil {
+			warn += " (quarantine failed: " + rerr.Error() + ")"
+		} else {
+			warn += " — original bytes quarantined to " + filepath.Base(dst)
+		}
+	}
 	fn(l)
-	return l.Save()
+	return warn, l.Save()
 }
 
 // acquireLock takes an exclusive create-only lock file, waiting up to wait and
