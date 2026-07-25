@@ -59,6 +59,62 @@ type Bucket struct {
 	// CapSource marks the capacity's provenance: "" = fitted/measured,
 	// CapSourceEstimate = config guess (S2R-3: throttle-only, never exhaust).
 	CapSource string `json:"cap_source,omitempty"`
+	// ProviderSource records WHICH provider signal wrote UsedPct:
+	// ProviderSourcePoll (vendor usage endpoint) or ProviderSourceDrop (the
+	// statusline tee). "" = unspecified (a lane 429 or a pre-2026-07-25 row).
+	// Precedence needs this: the two surfaces disagreed by 22pp and 14h of
+	// anchor in the same instant, and last-writer-wins let the weaker one win.
+	ProviderSource string `json:"provider_source,omitempty"`
+}
+
+// Provider signal kinds for Bucket.ProviderSource.
+const (
+	ProviderSourcePoll = "poll"
+	ProviderSourceDrop = "drop"
+)
+
+// Observation is one provider-reported window fact. ObservedAt is when the
+// VENDOR reported it — never the ingest instant: stamping ingest time is what
+// let a 50h-old statusline fixture keep looking fresh to the E6 staleness
+// alarm (audit 2026-07-25).
+type Observation struct {
+	Lane, Subject string
+	Window        WindowKind
+	UsedPct       float64
+	ResetsAt      time.Time
+	ObservedAt    time.Time
+	Source        string // ProviderSourcePoll | ProviderSourceDrop
+}
+
+// Observe applies a provider observation under SOURCE PRECEDENCE and returns
+// whether it landed. Two refusals, both learned from live damage:
+//   - a statusline DROP never overwrites a LIVE vendor POLL observation;
+//   - no source rewinds its own timeline (an older observation never replaces
+//     a newer one for the same live window).
+// An expired bucket is rolled first, so a refusal only ever protects live data.
+func (l *Ledger) Observe(o Observation, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.get(o.Lane, o.Subject, o.Window)
+	b.roll(now)
+	if b.Source == "provider" {
+		if o.Source == ProviderSourceDrop && b.ProviderSource == ProviderSourcePoll {
+			return false
+		}
+		if !b.ObservedAt.IsZero() && !o.ObservedAt.IsZero() && o.ObservedAt.Before(b.ObservedAt) {
+			return false
+		}
+	}
+	observedAt := o.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = now
+	}
+	b.UsedPct = o.UsedPct
+	b.ResetsAt = o.ResetsAt
+	b.Source = "provider"
+	b.ObservedAt = observedAt
+	b.ProviderSource = o.Source
+	return true
 }
 
 // CapSourceEstimate marks a CapTokens that is a config guess (e.g. the codex

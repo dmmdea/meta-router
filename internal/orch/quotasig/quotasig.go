@@ -17,6 +17,11 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 )
 
+// DropMaxAge bounds how old a statusline drop may be and still count as a LIVE
+// observation. The tee rewrites the file on every render, so a drop older than
+// this is a dead file (or a seeded fixture), never current pressure.
+const DropMaxAge = 30 * time.Minute
+
 type Observation struct {
 	Window   ledger.WindowKind
 	UsedPct  float64
@@ -82,6 +87,20 @@ func IngestTraced(l *ledger.Ledger, path, tracePath, lane string, now time.Time)
 	if err != nil {
 		return 0, "", nil
 	}
+	// The drop's OBSERVATION time is its mtime — the tee rewrites the file on
+	// every statusline render, so mtime is when the vendor numbers were seen.
+	// A drop older than DropMaxAge is history, not a live observation: a
+	// 2.5-day-old seeded fixture was being re-ingested as fresh provider truth
+	// on every route/run/mcp call (audit 2026-07-25). A NEGATIVE age (test
+	// clocks, or a future mtime) is never a reason to reject.
+	obsAt := now
+	if fi, serr := os.Stat(path); serr == nil {
+		obsAt = fi.ModTime().UTC()
+	}
+	if age := now.Sub(obsAt); age > DropMaxAge {
+		return 0, fmt.Sprintf("statusline drop is %s old (> %s): skipped, not a live observation",
+			age.Truncate(time.Second), DropMaxAge), nil
+	}
 	obs, err := ParseDrop(raw)
 	if err != nil {
 		return 0, "", err
@@ -93,13 +112,17 @@ func IngestTraced(l *ledger.Ledger, path, tracePath, lane string, now time.Time)
 		}
 		prev, had := l.Bucket(lane, o.Window)
 		changed := !had || prev.UsedPct != o.UsedPct || !prev.ResetsAt.Equal(o.ResetsAt)
-		l.ObserveProvider(lane, o.Window, o.UsedPct, o.ResetsAt, now)
+		if !l.Observe(ledger.Observation{Lane: lane, Window: o.Window, UsedPct: o.UsedPct,
+			ResetsAt: o.ResetsAt, ObservedAt: obsAt, Source: ledger.ProviderSourceDrop}, now) {
+			note = "statusline drop refused for " + string(o.Window) + ": a live vendor poll outranks it"
+			continue
+		}
 		n++
 		if tracePath != "" && changed {
 			// ShadowTokens at observation time makes each row a CALIBRATION
 			// SAMPLE (shadow, used_pct) — the regression input for learned
 			// capacities (fact-refresh gap #1); fitting lands in slice 2.
-			if err := appendTrace(tracePath, traceRow{TS: now, Lane: lane, Window: string(o.Window), UsedPct: o.UsedPct, ResetsAt: o.ResetsAt, ShadowTokens: prev.ShadowTokens, Origin: "drop"}); err != nil {
+			if err := appendTrace(tracePath, traceRow{TS: obsAt, Lane: lane, Window: string(o.Window), UsedPct: o.UsedPct, ResetsAt: o.ResetsAt, ShadowTokens: prev.ShadowTokens, Origin: "drop"}); err != nil {
 				note = "quota trace append failed: " + err.Error()
 			}
 		}
@@ -142,7 +165,11 @@ func ApplySnapshotsSubject(l *ledger.Ledger, subject string, snaps []quotapoll.S
 		}
 		prev, had := l.BucketSubject(s.Lane, subject, s.Window)
 		changed := !had || prev.UsedPct != s.UsedPct || !prev.ResetsAt.Equal(s.ResetsAt)
-		l.ObserveProviderSubject(s.Lane, subject, s.Window, s.UsedPct, s.ResetsAt, now)
+		if !l.Observe(ledger.Observation{Lane: s.Lane, Subject: subject, Window: s.Window,
+			UsedPct: s.UsedPct, ResetsAt: s.ResetsAt, ObservedAt: now,
+			Source: ledger.ProviderSourcePoll}, now) {
+			continue // an even fresher observation already holds this window
+		}
 		n++
 		if tracePath != "" && changed {
 			if err := appendTrace(tracePath, TraceRow{TS: now, Lane: s.Lane, Subject: subject, Window: string(s.Window), UsedPct: s.UsedPct, ResetsAt: s.ResetsAt, ShadowTokens: prev.ShadowTokens, Origin: origin}); err != nil {
