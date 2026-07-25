@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.14.0] — 2026-07-25
+
+### Changed
+- **The compiled seed rank table is now the GATE-CLEARED policy.** Two classes still carried their PRE-probe guesses — `mechanical-text` ranked `local` #1 on "operator-measured 0.920" and `verify-gate` ranked `local` #1 on "operator smoke n=2 — WEAK, gold-set probe owed" — while the tables the V2 gold probes actually produced (B'1's gold-stakes floor: local 1/10 on gold extraction; and the owed verify-gate probe: local qwythos **0/12** on gold-level adversarial review) lived only in an untracked override file on one machine. Consequence, measured: `git clone && go build` on any host routed on the policy this project's own gate had REJECTED — 18 of 56 gold prompts routed differently, every divergence sending work to `local`, which scores **0.054** pass-rate on the same oracle. The laptop, which has no override file, was scoring **0.816× with NON-INFERIORITY FALSE** against the desktop's 1.224×.
+
+  Promoted with the citation each row earned (Bible B8 — eval before promotion; router-live 1.224× always-claude full-set, p=0.032 NON-INFERIOR at 57% claude-window, 1.25× on the 23-task heldout split). **Verified: with no override file present the seed now scores `router-live 1.224×, CI [1.064, 1.432], non_inferior TRUE` — identical to the override-based measurement.** No file copy to the second machine is needed; deploying the binary is sufficient.
+
+### Added
+- `router.LoadChecked` returns the table's **provenance** (`seed` | `override`) plus a warning, and `status` reports `rank_table` (+ `rank_table_warn`). A silent fail-open to the seed is how two machines ran different routing policies for weeks with nothing on any surface to show it. Missing override ⇒ silent (the seed IS the policy now); an override that exists but is **unreadable or empty** ⇒ loud, on `route` and in `status`, because the operator meant to apply it.
+
 ## [0.13.0] — 2026-07-25
 
 ### Fixed

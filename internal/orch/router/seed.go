@@ -8,6 +8,19 @@ import (
 // Seed returns the compiled default rank table. Every rank cites its baseline
 // evidence (docs/specs/2026-07-06-v3-model-capability-baseline.md) — this IS
 // the deliverable data; the evidence-citation test is the contract.
+//
+// Since 2026-07-25 it carries the
+// GATE-CLEARED policy: the B'1 mechanical-text gold-stakes floor and the
+// verify-gate demotion, both measured on the V2 gold probes and cross-validated
+// (router-live 1.224x always-claude full-set, p=0.032 NON-INFERIOR at 57%
+// claude-window; 1.25x on the 23-task heldout split — docs/specs/
+// 2026-07-23-b2-crossval-results.md in the private repo). Before that these two
+// rows still held their PRE-probe guesses ("gold-set probe owed", "operator
+// smoke n=2 — WEAK") while the measured tables lived only in an untracked
+// override file, so any fresh clone routed on the policy the project's own gate
+// had rejected: local at rank 1 for both classes, measured 0.054 pass-rate,
+// scoring 0.816x with NON-INFERIORITY FALSE (audit 2026-07-25). Promotion of a
+// routing-visible change requires that gate (Bible B8).
 func Seed() Table {
 	return Table{
 		HardRepo: {
@@ -59,16 +72,19 @@ func Seed() Table {
 			{Lane: "glm", Model: "glm-5.2", Effort: "high", Rank: 2, Evidence: "stronger sibling when the 4.7 case is marginal (R14a default-up)"},
 		},
 		MechanicalText: {
-			{Lane: "local", Model: "gemma4-cascade", Effort: "", Rank: 1, Evidence: "operator-measured (outranks vendor numbers): 0.920/1.000 vs gold, 0.86s/call, 320/320 — cheapest tier WINS this class"},
-			{Lane: "glm", Model: "glm-4.7", Effort: "low", Rank: 2, Evidence: "haiku-pin at always-1x quota (fact refresh §3)"},
+			{Lane: "glm", Model: "glm-5.2", Effort: "low", Rank: 1, Evidence: "V2 gold probe (all trials, 2026-07-22): gold-stakes extraction — glm 5/10 = codex = claude (3-way tie at 0.500), local 1/10. Cheapest cloud takes the tie (B'1 gold-stakes floor)"},
+			{Lane: "codex", Model: "gpt-5.6-terra", Effort: "low", Rank: 2, Evidence: "V2 gold probe: 5/10 tie tier"},
+			{Lane: "claude", Model: "claude-sonnet-5", Effort: "low", Rank: 3, Evidence: "V2 gold probe: 5/10 tie tier; last of the tie to protect the binding window"},
+			{Lane: "local", Model: "gemma4-cascade", Effort: "", Rank: 4, Evidence: "demoted from rank 1 on the gold probe (1/10 gold-stakes extraction). Its 0.920 runtime-mechanical measurement stands — local remains the door for offload-tier work, not for gold-stakes extraction"},
 		},
 		DocSummarize: {
 			{Lane: "local", Model: "qwythos", Effort: "", Rank: 1, Evidence: "operator-verified config, ≤32K (baseline §1)"},
 			{Lane: "glm", Model: "glm-4.7", Effort: "low", Rank: 2, Evidence: "cheap overflow when >32K or local deferred"},
 		},
 		VerifyGate: {
-			{Lane: "local", Model: "qwythos", Effort: "", Rank: 1, Evidence: "operator smoke n=2 — WEAK, gold-set probe owed; local may GATE, never RE-LABEL (baseline §2)"},
-			{Lane: "claude", Model: "claude-sonnet-5", Effort: "medium", Rank: 2, Evidence: "cloud gate fallback; different-lane-than-worker discipline arrives with slice-3 strategies"},
+			{Lane: "claude", Model: "claude-sonnet-5", Effort: "medium", Rank: 1, Evidence: "V2 gold-set probe 2026-07-19 (the probe this entry OWED): local qwythos 0/12 on gold-level adversarial review; claude-sonnet 5/12 best"},
+			{Lane: "codex", Model: "gpt-5.6-terra", Effort: "medium", Rank: 2, Evidence: "V2 gold-set probe: codex 3/12 on gold review — second measured tier"},
+			{Lane: "local", Model: "qwythos", Effort: "", Rank: 3, Evidence: "demoted from rank 1 by its own owed probe (0/12); retained as the cheap gate for runtime-tier checks (baseline §2: local may GATE, never RE-LABEL)"},
 		},
 		HardCaseReclaim: {
 			{Lane: "local", Model: "qwythos-think", Effort: "", Rank: 1, Evidence: "operator-measured strictly non-negative, 88→100% coverage (baseline §1)"},
@@ -81,13 +97,33 @@ func Seed() Table {
 // file fails open to Seed() (fuses pattern; config-not-code). An empty/partial
 // table on disk is honored verbatim — the operator owns the override file.
 func Load(path string) Table {
+	t, _, _ := LoadChecked(path)
+	return t
+}
+
+// Provenance of the table a decision was made with.
+const (
+	TableSeed     = "seed"     // the compiled, gate-cleared default
+	TableOverride = "override" // an operator file on disk
+)
+
+// LoadChecked is Load plus PROVENANCE and a warning. A silent fail-open to Seed
+// made two machines route on different policies for weeks with nothing to see it
+// (audit 2026-07-25: the laptop had no override file and scored 0.816x vs the
+// desktop's 1.224x). Missing is normal and silent — the seed IS the gate-cleared
+// policy. CORRUPT is not: the operator meant to override and the file is
+// unusable, so it warns.
+func LoadChecked(path string) (t Table, provenance, warn string) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return Seed()
+		return Seed(), TableSeed, "" // absent override: the seed is the policy
 	}
-	var t Table
-	if err := json.Unmarshal(b, &t); err != nil || len(t) == 0 {
-		return Seed()
+	var got Table
+	if err := json.Unmarshal(b, &got); err != nil {
+		return Seed(), TableSeed, "rank-table override unreadable, routing on the compiled seed: " + err.Error()
 	}
-	return t
+	if len(got) == 0 {
+		return Seed(), TableSeed, "rank-table override is empty, routing on the compiled seed"
+	}
+	return got, TableOverride, ""
 }

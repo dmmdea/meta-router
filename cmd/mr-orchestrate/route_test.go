@@ -86,10 +86,15 @@ func TestUnclassifiableDescRoutesToOpus(t *testing.T) {
 // else "mr-orchestrate".
 func TestDispatchViaField(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir()) // hermeticity: buildRouteDecision loads the real quota trace + rank table
-	// mechanical-text at small ctx → local wins → local-offload-mcp
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, router.MechanicalText, 2000, rnow, spendDownReq{})
+	// A local-rank-1 class at small ctx → local wins → local-offload-mcp.
+	// (Re-pointed 2026-07-25 from mechanical-text to doc-summarize: the B'1
+	// gold-stakes floor demoted local to rank 4 in mechanical-text, so that
+	// class no longer reaches the local lane. This test's subject is the
+	// dispatch_via mapping, not the policy — it just needs A class whose rank 1
+	// is local.)
+	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, router.DocSummarize, 2000, rnow, spendDownReq{})
 	if d.Lane != "local" {
-		t.Fatalf("precondition: mechanical-text small ctx should win local: %+v", d)
+		t.Fatalf("precondition: a local-rank-1 class at small ctx should win local: %+v", d)
 	}
 	if got := dispatchVia(d.Lane); got != "local-offload-mcp" {
 		t.Fatalf("local winner → local-offload-mcp, got %q", got)

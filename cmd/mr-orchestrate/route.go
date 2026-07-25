@@ -15,8 +15,8 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/glmlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
-	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/pace"
+	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/router"
 	"github.com/dmmdea/meta-router/internal/orch/spenddown"
 )
@@ -271,7 +271,13 @@ func buildRouteDecision(cfg orchcfg.Config, fzs []fuses.Fuse, snap []ledger.Buck
 			states[lane] = st
 		}
 	}
-	tbl := router.Load(rankTablePath())
+	tbl, tableProvenance, tableWarn := router.LoadChecked(rankTablePath())
+	if tableWarn != "" {
+		// An override the operator MEANT to apply but which cannot be read is a
+		// silent policy swap otherwise (audit 2026-07-25).
+		fmt.Fprintln(os.Stderr, "WARN:", tableWarn)
+	}
+	_ = tableProvenance
 	return router.Route(tbl, class, states, ctxTokens, now, router.Opts{PaceRank: cfg.PaceRankOn})
 }
 

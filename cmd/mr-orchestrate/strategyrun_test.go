@@ -160,8 +160,11 @@ func TestProdNodeRunnerLocalClassDispatchesLocalNotAuto(t *testing.T) {
 		io.WriteString(out, `{"result":"cleaned"}`)
 		return 0, nil
 	}
-	// Empty LaneHint + a class the router sends to local (rank-1).
-	step := strategy.Step{ID: 0, Class: "mechanical-text", Instruction: "normalize this text"}
+	// Empty LaneHint + a class the router sends to local (rank-1). Re-pointed
+	// 2026-07-25: mechanical-text now ranks local 4th (B'1 gold-stakes floor),
+	// so doc-summarize is the local-rank-1 class here. Subject unchanged: an
+	// empty-hint local-class node must resolve an EXPLICIT local lane.
+	step := strategy.Step{ID: 0, Class: "doc-summarize", Instruction: "summarize this document"}
 	res := prodNodeRunner(id, nil)(step, "normalize this text", 0)
 	if gotLane != "local" {
 		t.Fatalf("an empty-hint local-class node must dispatch with the EXPLICIT resolved lane \"local\" (hits runLocalLane / the two-door), got %q — \"auto\" would auto-fall to cloud (S3R-1/R10)", gotLane)
