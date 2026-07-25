@@ -331,3 +331,24 @@ func TestDefaultSubjectStoredEmpty(t *testing.T) {
 		t.Fatalf("single-account bucket must not serialize a subject field: %s", js)
 	}
 }
+
+// The shared expiry test must agree with admission's original inline check
+// (the whole point of extracting it is that six consumers stop disagreeing).
+func TestBucketExpired(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		in   Bucket
+		want bool
+	}{
+		{"unanchored is never expired", Bucket{}, false},
+		{"future reset is live", Bucket{ResetsAt: now.Add(time.Hour)}, false},
+		{"past reset is expired", Bucket{ResetsAt: now.Add(-time.Minute)}, true},
+		{"exactly now is not yet expired", Bucket{ResetsAt: now}, false},
+	}
+	for _, c := range cases {
+		if got := c.in.Expired(now); got != c.want {
+			t.Errorf("%s: Expired=%v want %v", c.name, got, c.want)
+		}
+	}
+}

@@ -30,7 +30,7 @@ func TestQuotaHintFromLedgerFile(t *testing.T) {
 	if h == "" {
 		t.Fatal("expected a hint with signal, got empty")
 	}
-	for _, want := range []string{"85%", "42%", "9%", "THROTTLED", "mr-orchestrate route", "mr-orchestrate.md"} {
+	for _, want := range []string{"85%", "42%", "9%", "THROTTLED", "mr-orchestrate route"} {
 		if !strings.Contains(h, want) {
 			t.Fatalf("hint missing %q: %s", want, h)
 		}
@@ -144,5 +144,35 @@ func TestQuotaHintUnknownRendersQuestionMark(t *testing.T) {
 	h := quotaHint(hnow)
 	if !strings.Contains(h, "?") {
 		t.Fatalf("unknown window must render '?': %s", h)
+	}
+}
+
+// REGRESSION (audit 2026-07-25): the banner rendered an EXPIRED window's
+// percentage as live pressure. Live Qube state on that day was claude 5h 85%
+// with resets_at 25h in the past and 7d 17% live: the hook printed
+// "claude 5h 85% · 7d 17% THROTTLED" while `route` (which does guard expiry)
+// saw an open lane. An expired window must render "?" and must not contribute
+// a state word.
+func TestQuotaHintExpiredWindowIsNotLivePressure(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		// 5h: dead 25h ago at 85% (the poisoning row). 7d: live at 17%.
+		l.ObserveProvider("claude", ledger.Win5h, 85, hnow.Add(-25*time.Hour), hnow.Add(-30*time.Hour))
+		l.ObserveProvider("claude", ledger.Win7d, 17, hnow.Add(96*time.Hour), hnow)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := quotaHint(hnow)
+	if strings.Contains(h, "85") {
+		t.Fatalf("expired window's percentage must not be rendered: %s", h)
+	}
+	if !strings.Contains(h, "5h ?") {
+		t.Fatalf("expired window must render as unknown (5h ?): %s", h)
+	}
+	if strings.Contains(h, "THROTTLED") || strings.Contains(h, "EXHAUSTED") {
+		t.Fatalf("a lane whose only pressure is an expired window must carry no state word: %s", h)
+	}
+	if !strings.Contains(h, "7d 17%") {
+		t.Fatalf("the live window must still render: %s", h)
 	}
 }

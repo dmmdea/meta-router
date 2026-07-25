@@ -65,6 +65,17 @@ type Bucket struct {
 // Plus 5h band × degradation factor), not a fitted or provider-derived value.
 const CapSourceEstimate = "estimate"
 
+// Expired reports whether the window's reset moment has PASSED — the bucket's
+// percentage is then dead history, never live pressure. Every consumer that
+// renders, ranks, or gates on UsedPct must consult this: admission, burnrate,
+// spenddown and pace each had their own copy of this test, and the two that
+// did NOT (the hook's quota banner and the router's worst-window tie-break)
+// spent 6 days reporting a reset-25h-ago window as current throttle pressure.
+// Semantics are identical to admission's original inline check.
+func (b Bucket) Expired(now time.Time) bool {
+	return !b.ResetsAt.IsZero() && now.After(b.ResetsAt)
+}
+
 type Ledger struct {
 	mu      sync.Mutex
 	path    string

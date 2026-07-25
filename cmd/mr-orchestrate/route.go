@@ -21,13 +21,16 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/spenddown"
 )
 
-// worstPct is a lane's worst (highest) window depletion across its buckets;
-// -1 (unknown) is preserved only when EVERY window is unknown, so the router's
-// fail-open normalization applies. A single known window dominates.
-func worstPct(snap []ledger.Bucket, lane string) float64 {
+// worstPct is the lane's worst (highest) LIVE window depletion; -1 = no signal
+// (fail-open, most-available). EXPIRED windows are skipped: their percentages
+// are dead history, and feeding them into the router's depletion tie-break and
+// Pareto filter is what let a 43h-dead codex 5h bucket at 271.87% rank the lane
+// (audit 2026-07-25). admission/burnrate/spenddown/pace all already guard this;
+// this was one of the two readers that did not.
+func worstPct(snap []ledger.Bucket, lane string, now time.Time) float64 {
 	worst := -1.0
 	for _, b := range snap {
-		if b.Lane != lane {
+		if b.Lane != lane || b.Expired(now) {
 			continue
 		}
 		if b.UsedPct > worst {
@@ -61,7 +64,7 @@ func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now 
 				st = "hard_stop"
 			}
 		}
-		ls := router.LaneState{State: st, WorstPct: worstPct(snap, lane), ResumeAt: d.ResumeAt}
+		ls := router.LaneState{State: st, WorstPct: worstPct(snap, lane, now), ResumeAt: d.ResumeAt}
 		// W1: binding pace slack per lane — advisory unless pace_rank_on.
 		var laneBuckets []ledger.Bucket
 		for _, b := range snap {
@@ -77,7 +80,7 @@ func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now 
 	// local: always open. The free lane fails open — its capacity is not ledger
 	// -tracked (it goes through the local-offload MCP, S2R-4); the router's ctx
 	// prohibition floor is what keeps large tasks off it.
-	out["local"] = router.LaneState{State: "open", WorstPct: worstPct(snap, "local")}
+	out["local"] = router.LaneState{State: "open", WorstPct: worstPct(snap, "local", now)}
 	return out
 }
 
