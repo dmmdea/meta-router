@@ -4,6 +4,20 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.13.0] — 2026-07-25
+
+### Fixed
+- **The quota banner told the truth about nothing.** `cmd/mr-hook`'s render printed a bucket's `used_pct` with no expiry test, so an EXPIRED window appeared as live pressure: on the primary machine the per-prompt hint read `claude 5h 85% THROTTLED` off a window that had reset 25h earlier, while `route` (which does guard expiry) saw an open lane. Extracted the one shared test — `ledger.Bucket.Expired(now)` — and applied it in the two readers that lacked it: the hook's render (expired ⇒ `?`, never a percentage or a state word) and `route.worstPct`, which was feeding a 43h-dead codex bucket at 271.87% into the router's depletion tie-break and Pareto filter. admission/burnrate/spenddown/pace already guarded it. Also dropped the banner's dangling `~/.claude/rules/mr-orchestrate.md` pointer (that file has never existed on either machine).
+- **A stale statusline drop was re-ingested as fresh provider truth on every route/run/mcp call.** `quotasig.IngestTraced` only checked that a window's `resets_at` lay in the future, so a 2.5-day-old 147-byte seeded fixture — whose 7d anchor was in the future — overwrote the real vendor-polled 17% with its 39% and re-stamped `ObservedAt`, which also blinded the E6 staleness alarm (it keys on that field) and made the fixture the only calib-eligible sample. Now: a freshness guard (`DropMaxAge`, mtime-based, stated in the note when it skips; a negative age never rejects), the drop's mtime is stamped as the OBSERVATION time on both the bucket and the trace row (un-faking `quota-parity`, which was pairing rows with identical timestamps), and **source precedence** — new `ledger.Observe` + `Bucket.ProviderSource`: a statusline drop never overwrites a live vendor poll, and no source rewinds its own timeline. The two surfaces disagreed by 22pp and 14h of anchor in the same instant.
+- **A corrupt `ledger.json` was silently destroyed on the next write** (reproduced: exit 0, zero stderr, six buckets gone; GLM has no poller, so its consumed weekly window became re-spendable unmetered). `Update` called `Open`, discarding `OpenChecked`'s warning — the contract its own doc comment states. New `UpdateChecked` quarantines the original bytes to `ledger.json.corrupt-<stamp>` on an unmarshal failure ONLY (a transient sharing violation is never renamed — that would cause the loss it prevents), still applies the update and Saves (B4: never dispatch with no accounting), and every `cmd` write now goes through `updateLedger`, which surfaces the warning to stderr.
+
+### Added
+- **`mr-orchestrate fleet`** — the deployed-binary check whose absence let an admission fix from 2026-07-19 sit undeployed through v0.10.0, v0.11.0 and v0.12.0 (B11 version-parity is SOURCE-only: it never looks at `~/.meta-router/bin`). Reads each deployed binary's embedded VCS revision via `debug/buildinfo` and flags any that differs from the reference — revision, not version string, because sibling binaries are versioned independently by design (adjudicated). It is honest about what it cannot know: no reference revision ⇒ `staleness_undetermined`, and an UNSTAMPED deployed binary is reported `unstamped` and counted against the fleet rather than quietly passing. `-expect <rev>` supplies the reference (needed when the checking binary is itself built from a git worktree, where Go omits stamping); `-strict` exits 1. First run against the live fleet found 6 of 7 binaries stale.
+- `mr-hook -version` (a deployed hook could not previously be asked what it was), and `usage` now lists `poll`, `quota-parity`, `profiles` and `fleet` — all dispatched but undocumented.
+
+### Changed
+- B12 complexity budget 16500 → 17500 (measured 16509), and its `_note` corrected to the real measurement — the stale note was itself an audit finding.
+
 ## [0.12.0] — 2026-07-23
 
 ### Added
