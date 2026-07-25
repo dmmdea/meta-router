@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -59,11 +60,115 @@ type Bucket struct {
 	// CapSource marks the capacity's provenance: "" = fitted/measured,
 	// CapSourceEstimate = config guess (S2R-3: throttle-only, never exhaust).
 	CapSource string `json:"cap_source,omitempty"`
+	// ProviderSource records WHICH provider signal wrote UsedPct:
+	// ProviderSourcePoll (vendor usage endpoint) or ProviderSourceDrop (the
+	// statusline tee). "" = unspecified (a lane 429 or a pre-2026-07-25 row).
+	// Precedence needs this: the two surfaces disagreed by 22pp and 14h of
+	// anchor in the same instant, and last-writer-wins let the weaker one win.
+	ProviderSource string `json:"provider_source,omitempty"`
+}
+
+// Provider signal kinds for Bucket.ProviderSource, in ascending authority.
+// A vendor DENIAL outranks a vendor usage reading, which outranks the
+// statusline tee's second-hand numbers.
+const (
+	ProviderSourceDrop  = "drop"  // statusline tee (second-hand, no internal timestamp)
+	ProviderSourcePoll  = "poll"  // vendor usage endpoint
+	ProviderSourceLimit = "limit" // vendor said NO (a 429 observed at dispatch)
+)
+
+// AuthorityTTL bounds how long a higher-authority observation outranks a lower
+// one. Authority EXPIRES: an absolute rule would freeze a lane at the last poll
+// for a whole 7d window if the poller broke (expired token, network), and the
+// router would keep admitting on days-old data. After the TTL the freshest
+// observation wins regardless of source.
+const AuthorityTTL = 15 * time.Minute
+
+func sourceRank(s string) int {
+	switch s {
+	case ProviderSourceLimit:
+		return 3
+	case ProviderSourcePoll:
+		return 2
+	case ProviderSourceDrop:
+		return 1
+	}
+	return 0 // unspecified (pre-2026-07-25 rows)
+}
+
+// Observation is one provider-reported window fact. ObservedAt is when the
+// VENDOR reported it — never the ingest instant: stamping ingest time is what
+// let a 50h-old statusline fixture keep looking fresh to the E6 staleness
+// alarm (audit 2026-07-25).
+type Observation struct {
+	Lane, Subject string
+	Window        WindowKind
+	UsedPct       float64
+	ResetsAt      time.Time
+	ObservedAt    time.Time
+	Source        string // ProviderSourcePoll | ProviderSourceDrop
+}
+
+// Observe applies a provider observation under bounded SOURCE PRECEDENCE and
+// returns whether it landed plus the reason when it did not (a silent refusal
+// is unobservable, which is how the original poisoning hid). Rules:
+//   - a LOWER-authority source cannot overwrite a HIGHER-authority one while
+//     the incumbent is still fresh (within AuthorityTTL) — a statusline drop
+//     must not overwrite a live vendor poll, and neither may re-open a window
+//     the vendor just denied;
+//   - authority EXPIRES (AuthorityTTL), so a broken poller cannot freeze a lane
+//     at stale data for the rest of the window;
+//   - no observation REWINDS an equal-or-higher-authority one (an older reading
+//     never replaces a newer one for the same live window);
+//   - a FUTURE ObservedAt is CLAMPED to now. An unclamped future stamp both
+//     locked out every later poll and blinded the E6 staleness alarm (which
+//     keys on ObservedAt) — reachable from a timestamp-preserving restore, a
+//     synced state dir, or a backwards clock correction.
+//
+// An expired bucket is rolled first, so a refusal only ever protects live data.
+func (l *Ledger) Observe(o Observation, now time.Time) (bool, string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.get(o.Lane, o.Subject, o.Window)
+	b.roll(now)
+	observedAt := o.ObservedAt
+	if observedAt.IsZero() || observedAt.After(now) {
+		observedAt = now // no observation is from the future
+	}
+	if b.Source == "provider" {
+		incumbentFresh := !b.ObservedAt.IsZero() && now.Sub(b.ObservedAt) <= AuthorityTTL
+		if incumbentFresh && sourceRank(o.Source) < sourceRank(b.ProviderSource) {
+			return false, o.Source + " outranked by a fresh " + b.ProviderSource + " observation"
+		}
+		if !b.ObservedAt.IsZero() && observedAt.Before(b.ObservedAt) &&
+			sourceRank(o.Source) <= sourceRank(b.ProviderSource) {
+			return false, o.Source + " observation is older than the one it would replace"
+		}
+	}
+	b.UsedPct = o.UsedPct
+	b.ResetsAt = o.ResetsAt
+	b.Source = "provider"
+	b.ObservedAt = observedAt
+	b.ProviderSource = o.Source
+	return true, ""
 }
 
 // CapSourceEstimate marks a CapTokens that is a config guess (e.g. the codex
 // Plus 5h band × degradation factor), not a fitted or provider-derived value.
 const CapSourceEstimate = "estimate"
+
+// Expired reports whether the window's reset moment has PASSED — the bucket's
+// percentage is then dead history, never live pressure. Every consumer that
+// renders, ranks, or gates on UsedPct must consult this. admission, burnrate,
+// spenddown and pace still carry their own equivalent inline checks (burnrate's
+// differs at exact equality); the two that had NONE — the hook's quota banner
+// and the router's worst-window tie-break — spent 6 days reporting a
+// reset-25h-ago window as live throttle pressure. Semantics here match
+// admission's inline check; migrating the other three is a separate,
+// behavior-pinned change.
+func (b Bucket) Expired(now time.Time) bool {
+	return !b.ResetsAt.IsZero() && now.After(b.ResetsAt)
+}
 
 type Ledger struct {
 	mu      sync.Mutex
@@ -93,23 +198,39 @@ func Open(path string) *Ledger {
 // unreadable/corrupt — the fail-open contract requires the caller to WARN,
 // not to silently zero accumulated state.
 func OpenChecked(path string) (*Ledger, string) {
+	l, warn, _ := openWithKind(path)
+	return l, warn
+}
+
+// openWithKind is OpenChecked plus the distinction the quarantine needs:
+// corrupt (unmarshal failed — the bytes are garbage) vs a transient I/O error.
+func openWithKind(path string) (*Ledger, string, bool) {
+	l, warn, corrupt, _ := openWithBytes(path)
+	return l, warn, corrupt
+}
+
+// openWithBytes additionally returns the raw bytes so a caller can PRESERVE
+// them. Quarantining by RENAME loses the file whenever the rename fails (the
+// AV/backup sharing violation this design anticipates), because Save()
+// overwrites the original either way.
+func openWithBytes(path string) (*Ledger, string, bool, []byte) {
 	l := &Ledger{path: path, buckets: map[string]*Bucket{}}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return l, ""
+			return l, "", false, nil
 		}
-		return l, "ledger unreadable, failing open to empty: " + err.Error()
+		return l, "ledger unreadable, failing open to empty: " + err.Error(), false, nil
 	}
 	var list []Bucket
 	if err := json.Unmarshal(b, &list); err != nil {
-		return l, "ledger corrupt, failing open to empty: " + err.Error()
+		return l, "ledger corrupt, failing open to empty: " + err.Error(), true, b
 	}
 	for i := range list {
 		cp := list[i]
 		l.buckets[key(cp.Lane, cp.Subject, cp.Window)] = &cp
 	}
-	return l, ""
+	return l, "", false, nil
 }
 
 // Update performs a cross-process-safe read-modify-write: acquire the sidecar
@@ -119,14 +240,41 @@ func OpenChecked(path string) (*Ledger, string) {
 // last-writer-wins race silently drops shadow tokens. Reads for admission
 // decisions may still use Open — a stale read fails open by design.
 func Update(path string, fn func(*Ledger)) error {
+	_, err := UpdateChecked(path, fn)
+	return err
+}
+
+// UpdateChecked is Update plus OpenChecked's warning — the caller MUST surface
+// it. Update discarded it, so a corrupt ledger was silently replaced by an
+// empty one on the next write (audit 2026-07-25: exit 0, zero stderr, six
+// buckets gone; GLM has no poller, so its consumed weekly window became
+// re-spendable unmetered).
+//
+// On a CORRUPT file (unmarshal failure) the original bytes are COPIED to
+// ledger.json.corrupt-<UTC stamp> before the fresh state is written: the damage
+// stays inspectable. A transient read error is NOT quarantined — renaming on a
+// sharing violation (Defender, backup) would cause the very loss this prevents.
+// Either way the update still applies and Save still runs: refusing to write
+// would dispatch with no shadow accounting (Bible B4).
+func UpdateChecked(path string, fn func(*Ledger)) (string, error) {
 	unlock, err := acquireLock(path+".lock", 3*time.Second, 30*time.Second)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer unlock()
-	l := Open(path)
+	l, warn, corrupt, raw := openWithBytes(path)
+	if corrupt {
+		// COPY, never rename: Save() overwrites path regardless, so preservation
+		// must not depend on a rename succeeding.
+		dst := path + ".corrupt-" + time.Now().UTC().Format("20060102T150405Z")
+		if werr := os.WriteFile(dst, raw, 0o644); werr != nil {
+			warn += " (quarantine failed: " + werr.Error() + ")"
+		} else {
+			warn += " — original bytes copied to " + filepath.Base(dst)
+		}
+	}
 	fn(l)
-	return l.Save()
+	return warn, l.Save()
 }
 
 // acquireLock takes an exclusive create-only lock file, waiting up to wait and
@@ -178,6 +326,7 @@ func (b *Bucket) roll(now time.Time) {
 		b.UsedPct = -1
 		b.Source = "shadow"
 		b.ResetsAt = time.Time{}
+		b.ProviderSource = "" // a new window inherits no authority from the old one
 	}
 }
 
@@ -196,6 +345,16 @@ func (l *Ledger) ObserveProviderSubject(lane, subject string, w WindowKind, used
 	b.ResetsAt = resetsAt
 	b.Source = "provider"
 	b.ObservedAt = now
+}
+
+// ObserveLimit records a vendor DENIAL (a 429 seen at dispatch) for a window:
+// used_pct 100 with the resume the caller derived, carrying ProviderSourceLimit
+// so a lower-authority reading cannot silently re-open the window inside its
+// AuthorityTTL. It can never itself be refused for lack of authority — nothing
+// outranks a denial — so callers need not check a result.
+func (l *Ledger) ObserveLimit(lane, subject string, w WindowKind, resetsAt, now time.Time) {
+	l.Observe(Observation{Lane: lane, Subject: subject, Window: w, UsedPct: 100,
+		ResetsAt: resetsAt, ObservedAt: now, Source: ProviderSourceLimit}, now)
 }
 
 // BucketSubject is Bucket on an explicit subject (W2; "" = default).

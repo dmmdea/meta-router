@@ -1,6 +1,8 @@
 package quotasig
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,5 +179,96 @@ func TestApplySnapshotsSkipsStale(t *testing.T) {
 	n, _ := ApplySnapshots(l, []quotapoll.Snapshot{{Lane: "claude", Window: ledger.Win5h, UsedPct: 40, ResetsAt: now.Add(-time.Hour)}}, "", "oauth_poll", now)
 	if n != 0 {
 		t.Fatalf("stale reset must be skipped, applied %d", n)
+	}
+}
+
+// REGRESSION (audit 2026-07-25): a 2.5-day-old hand-seeded drop file whose 7d
+// anchor lay in the FUTURE was re-ingested as fresh provider truth on every
+// route/run/mcp call, overwriting the real vendor-polled 17% with a fixture's
+// 39% and re-stamping ObservedAt (which blinded the E6 staleness alarm).
+func TestIngestSkipsStaleDropFile(t *testing.T) {
+	dir := t.TempDir()
+	drop := filepath.Join(dir, "statusline-drop.json")
+	// The exact live payload: 5h anchor already past, 7d anchor in the future.
+	body := `{"rate_limits":{"five_hour":{"used_percentage":11.0,"resets_at":1784785799},"seven_day":{"used_percentage":39.0,"resets_at":1785312000}}}`
+	if err := os.WriteFile(drop, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().UTC().Add(-50 * time.Hour)
+	if err := os.Chtimes(drop, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	l := ledger.Open(filepath.Join(dir, "ledger.json"))
+	n, note, err := IngestTraced(l, drop, filepath.Join(dir, "trace.jsonl"), "claude", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a 50h-old drop must contribute no observations, applied %d", n)
+	}
+	if note == "" || !strings.Contains(note, "old") {
+		t.Fatalf("skipping a stale drop must be STATED, got note=%q", note)
+	}
+	if _, ok := l.Bucket("claude", ledger.Win7d); ok {
+		t.Fatal("stale drop must not create a bucket")
+	}
+}
+
+// A statusline drop must never overwrite a LIVE vendor-polled observation:
+// they disagreed by 22pp and 14h of anchor in the same instant on the live box.
+func TestDropNeverOverwritesLivePoll(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	l := ledger.Open(filepath.Join(dir, "ledger.json"))
+	// Vendor poll lands first: the real number.
+	if n, _ := ApplySnapshotsSubject(l, "", []quotapoll.Snapshot{
+		{Lane: "claude", Window: ledger.Win7d, UsedPct: 17, ResetsAt: now.Add(96 * time.Hour)},
+	}, "", "oauth_poll", now); n != 1 {
+		t.Fatal("poll snapshot must apply")
+	}
+	// A FRESH drop with a different number must be refused for that window.
+	drop := filepath.Join(dir, "statusline-drop.json")
+	future := now.Add(96 * time.Hour).Unix()
+	body := fmt.Sprintf(`{"rate_limits":{"seven_day":{"used_percentage":39.0,"resets_at":%d}}}`, future)
+	if err := os.WriteFile(drop, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	IngestTraced(l, drop, "", "claude", now)
+	b, _ := l.Bucket("claude", ledger.Win7d)
+	if b.UsedPct != 17 {
+		t.Fatalf("a drop must not overwrite a live vendor poll: got %v want 17", b.UsedPct)
+	}
+}
+
+// The trace row's TS must be the DROP's observation time, not the ingest
+// instant — otherwise quota-parity pairs a drop against a poll with identical
+// timestamps and reports a fabricated agreement.
+func TestDropTraceRowCarriesObservationTime(t *testing.T) {
+	dir := t.TempDir()
+	drop := filepath.Join(dir, "statusline-drop.json")
+	now := time.Now().UTC()
+	obs := now.Add(-10 * time.Minute)
+	body := fmt.Sprintf(`{"rate_limits":{"seven_day":{"used_percentage":39.0,"resets_at":%d}}}`, now.Add(96*time.Hour).Unix())
+	if err := os.WriteFile(drop, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(drop, obs, obs); err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(dir, "trace.jsonl")
+	l := ledger.Open(filepath.Join(dir, "ledger.json"))
+	if n, _, _ := IngestTraced(l, drop, trace, "claude", now); n != 1 {
+		t.Fatalf("a 10-minute-old drop is still live and must apply")
+	}
+	raw, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row TraceRow
+	if err := json.Unmarshal([]byte(strings.Split(strings.TrimSpace(string(raw)), "\n")[0]), &row); err != nil {
+		t.Fatal(err)
+	}
+	if d := row.TS.Sub(obs); d > time.Second || d < -time.Second {
+		t.Fatalf("trace TS must be the drop's observation time %v, got %v", obs, row.TS)
 	}
 }

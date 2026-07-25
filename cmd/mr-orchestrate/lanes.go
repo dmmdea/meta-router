@@ -63,7 +63,7 @@ func applyCodexOutcome(l *ledger.Ledger, o codexlane.Outcome, cfg orchcfg.Config
 	if o.Class == "rate_limit" {
 		// Real provider signal — the exec stream has NO rate_limits surface
 		// (fixture-proven), so the veto itself is the observation.
-		l.ObserveProvider("codex", ledger.Win5h, 100, now.Add(5*time.Hour), now)
+		l.ObserveLimit("codex", "", ledger.Win5h, now.Add(5*time.Hour), now)
 	}
 	return predictedUsedPct
 }
@@ -134,7 +134,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		return 1, err // config_error: bad args / version gate — never reached the binary
 	}
 	predicted := -1.0
-	warnIf(ledger.Update(ledgerPath(), func(fresh *ledger.Ledger) {
+	warnIf(updateLedger(func(fresh *ledger.Ledger) {
 		predicted = applyCodexOutcome(fresh, o, cfg, now)
 	}), "ledger update (post-run)")
 	// Burn-anomaly latch (fact-refresh gap #6): a real veto at predicted
@@ -324,18 +324,18 @@ func applyGLMOutcome(l *ledger.Ledger, o claudelane.Outcome, raw []byte, model s
 			if !resume.After(now) { // absent OR stale flush: RS5 conservative
 				resume = now.Add(5 * time.Hour)
 			}
-			l.ObserveProvider("glm", ledger.Win5h, 100, resume, now)
+			l.ObserveLimit("glm", "", ledger.Win5h, resume, now)
 		case glmlane.ActOffline:
 			resume := e.NextFlush
 			if !resume.After(now) {
 				resume = now.Add(24 * time.Hour) // RS5: re-checked daily
 			}
-			l.ObserveProvider("glm", ledger.Win7d, 100, resume, now)
+			l.ObserveLimit("glm", "", ledger.Win7d, resume, now)
 		}
 		return e, true
 	}
 	if o.Class == "rate_limit" { // S2R-8 generic fallback
-		l.ObserveProvider("glm", ledger.Win5h, 100, now.Add(5*time.Hour), now)
+		l.ObserveLimit("glm", "", ledger.Win5h, now.Add(5*time.Hour), now)
 	}
 	return glmlane.GLMErr{}, false
 }
@@ -443,7 +443,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	// Fair-Usage strike and re-admit into a banned-risk account.
 	latchGLMHardStop(raw, glmAlertPath(), now)
 	classified := false
-	warnIf(ledger.Update(ledgerPath(), func(fresh *ledger.Ledger) {
+	warnIf(updateLedger(func(fresh *ledger.Ledger) {
 		_, classified = applyGLMOutcome(fresh, o, raw, model, cfg, fzs, now)
 	}), "ledger update (post-run)")
 	if !classified && o.Class == "rate_limit" {

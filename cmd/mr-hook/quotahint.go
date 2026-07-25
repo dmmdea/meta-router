@@ -60,18 +60,27 @@ func quotaHint(now time.Time) string {
 			continue // omit lanes with no buckets (no signal to report)
 		}
 		var parts []string
+		live := false // does this lane carry ANY real number?
 		for _, w := range windowOrder {
 			b, ok := buckets[w]
 			if !ok {
 				continue
 			}
-			if b.UsedPct < 0 {
+			// An EXPIRED window's percentage is dead history — rendering it as a
+			// live number is what made this banner contradict `route` for 6 days
+			// (audit 2026-07-25). Unknown and expired both render "?": the hook
+			// reports live pressure or nothing.
+			if b.UsedPct < 0 || b.Expired(now) {
 				parts = append(parts, fmt.Sprintf("%s ?", w))
 			} else {
 				parts = append(parts, fmt.Sprintf("%s %.0f%%", w, b.UsedPct))
+				live = true
 			}
 		}
-		if len(parts) == 0 {
+		// Fail-open is ABSOLUTE: a lane with no live number contributes nothing.
+		// An all-"?" row reads like a report while carrying no signal (review
+		// 2026-07-25).
+		if len(parts) == 0 || !live {
 			continue
 		}
 		// State word from admission (open → no word; throttled/exhausted → append).
@@ -87,9 +96,12 @@ func quotaHint(now time.Time) string {
 		return "" // no signal at all: inject nothing (fail-open)
 	}
 
-	// rows are already in hintLanes order (deterministic render).
+	// rows are already in hintLanes order (deterministic render). The pointer
+	// names the oracle only — an earlier version pointed at
+	// ~/.claude/rules/mr-orchestrate.md, which has never existed on either
+	// machine (audit 2026-07-25: dangling escape hatch).
 	return "mr-orchestrate quota: " + strings.Join(rows, " · ") +
-		" — delegable work: consult `mr-orchestrate route` first (rules: ~/.claude/rules/mr-orchestrate.md)"
+		" — delegable work: consult `mr-orchestrate route` first"
 }
 
 // appendHint appends the quota hint to ctx (returns the bare hint when ctx is

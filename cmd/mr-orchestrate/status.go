@@ -210,7 +210,7 @@ func runStatus(args []string) error {
 	// profile registry.
 	pf := fetchPolls(cfg, reg, ps, false, now)
 	var snap []ledger.Bucket
-	err := ledger.Update(ledgerPath(), func(l *ledger.Ledger) {
+	err := updateLedger(func(l *ledger.Ledger) {
 		if _, note, ierr := quotasig.IngestTraced(l, dropPath(), quotaTracePath(), "claude", now); ierr != nil {
 			fmt.Fprintln(os.Stderr, "warn: statusline drop unreadable:", ierr)
 		} else if note != "" {

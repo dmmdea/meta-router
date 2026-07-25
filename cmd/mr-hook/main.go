@@ -168,7 +168,12 @@ func main() {
 	timeoutMs := flag.Int("timeout-ms", 300, "hard deadline for the whole retrieve")
 	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only; measured better on the goldset) or "hybrid" (BM25+embed RRF)`)
 	quotaHintOn := flag.Bool("quota-hint", true, "append the mr-orchestrate quota+route hint (ledger-direct, fail-open, zero policy)")
+	showVersion := flag.Bool("version", false, "print this binary's build revision and exit (deployed-fleet freshness — a deployed hook that cannot be asked what it is stayed 3 releases stale)")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("mr-hook", buildRevision())
+		return
+	}
 
 	// Always exit 0 — fail-open is absolute.
 	defer os.Exit(0)

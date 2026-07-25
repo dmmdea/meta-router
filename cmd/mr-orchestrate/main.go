@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-var version = "0.12.0"
+var version = "0.13.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -29,6 +29,8 @@ func main() {
 		err = runQuotaParity(os.Args[2:])
 	case "profiles":
 		err = runProfiles(os.Args[2:])
+	case "fleet":
+		err = runFleet(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
 	case "run":
@@ -52,8 +54,12 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: mr-orchestrate <version|status|probe|run|route|feedback|mcp|strategy-run> [flags]
-  status --json          per-lane window headroom + resets + receipts audit summary
+	fmt.Fprintln(os.Stderr, `usage: mr-orchestrate <version|status|poll|quota-parity|profiles|fleet|probe|run|route|feedback|mcp|strategy-run> [flags]
+  status --json          per-lane window headroom + resets + receipts audit summary (also runs the rate-limited usage polls)
+  poll                   force the vendor usage polls now (the only manual way to refresh quota truth)
+  quota-parity [-window]  drop-vs-poll divergence per (lane,window) — the W1 soak reading
+  profiles               credential-profile registry: per-subject state, provisioning, login commands
+  fleet [-strict]        build revision of every DEPLOYED mr-* binary; flags any stale vs this one
   probe claude [flags]   capture sanitized live fixtures (authorized probes only)
   run "<prompt>" [--lane claude|codex|glm|auto] --model <id> [--effort e] [--live] [--force]
   route [--class c | --desc "…"] [--ctx-tokens n] [--origin cli|route]  deterministic quota-masked recommendation (read-only)

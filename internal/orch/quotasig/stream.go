@@ -74,7 +74,7 @@ func IngestStreamEvents(l *ledger.Ledger, jsonl []byte, lane string, now time.Ti
 			l.AnchorAuthoritative(lane, w, resetsAt, now)
 			n++
 		case streamStatusExhausted[e.RateLimitInfo.Status]:
-			l.ObserveProvider(lane, w, 100, resetsAt, now)
+			l.ObserveLimit(lane, "", w, resetsAt, now)
 			n++
 			// default: unknown status — schema drift, skipped (S2R-7).
 		}

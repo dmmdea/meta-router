@@ -419,3 +419,24 @@ func TestExcludedLaneCannotArmAcrossEpochFlip(t *testing.T) {
 		t.Fatalf("excluded lane after an epoch flip must persist level 0, got %+v", e)
 	}
 }
+
+// REGRESSION (audit 2026-07-25): worstPct fed EXPIRED percentages into the
+// router's depletion tie-break and Pareto filter — live codex 5h read 271.87%
+// from a 43h-dead bucket. An expired window must not contribute depletion.
+func TestWorstPctIgnoresExpiredWindows(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	snap := []ledger.Bucket{
+		{Lane: "codex", Window: ledger.Win5h, UsedPct: 271.87, ResetsAt: now.Add(-43 * time.Hour), Source: "shadow"},
+		{Lane: "codex", Window: ledger.Win7d, UsedPct: 48, ResetsAt: now.Add(72 * time.Hour), Source: "provider"},
+	}
+	if got := worstPct(snap, "codex", now); got != 48 {
+		t.Fatalf("worstPct must ignore the 43h-dead 271.87%% bucket and report the live 48, got %v", got)
+	}
+	// Every window expired → no signal (-1), which laneStates maps to fail-open.
+	allDead := []ledger.Bucket{
+		{Lane: "glm", Window: ledger.Win5h, UsedPct: 100, ResetsAt: now.Add(-40 * time.Hour)},
+	}
+	if got := worstPct(allDead, "glm", now); got != -1 {
+		t.Fatalf("all-expired lane must report no signal (-1), got %v", got)
+	}
+}
