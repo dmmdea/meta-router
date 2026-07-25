@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/profiles"
 	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
+	"github.com/dmmdea/meta-router/internal/orch/router"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
@@ -51,12 +52,18 @@ type Status struct {
 	BillingMode      string                `json:"claude_billing_mode"`
 	PolicyAlert      json.RawMessage       `json:"policy_alert,omitempty"`
 	PolicyWatchStale string                `json:"policy_watch_stale,omitempty"`
-	CodexAlert       json.RawMessage       `json:"codex_alert,omitempty"`  // burn-anomaly latch (Task 4)
-	GLMAlert         json.RawMessage       `json:"glm_alert,omitempty"`    // 1313 hard-stop latch (Task 6)
-	Receipts         *ReceiptsSummary      `json:"receipts,omitempty"`     // S2R-10 audit block (additive JSON)
-	QuotaHealth      *QuotaHealth          `json:"quota_health,omitempty"` // E6 signal-liveness block
+	CodexAlert       json.RawMessage       `json:"codex_alert,omitempty"`    // burn-anomaly latch (Task 4)
+	GLMAlert         json.RawMessage       `json:"glm_alert,omitempty"`      // 1313 hard-stop latch (Task 6)
+	Receipts         *ReceiptsSummary      `json:"receipts,omitempty"`       // S2R-10 audit block (additive JSON)
+	QuotaHealth      *QuotaHealth          `json:"quota_health,omitempty"`   // E6 signal-liveness block
 	QuotaAbsences    []quotapoll.Absence   `json:"quota_absences,omitempty"` // W1: typed poll absences — stated, never inferred
-	ScopedAlerts     json.RawMessage       `json:"scoped_alerts,omitempty"`  // W1: critical/warning scoped-limit latch (vendor-refreshed)
+	// RankTable names the routing policy in force: "seed" (the compiled,
+	// gate-cleared default) or "override" (an operator file). Two machines
+	// routed on different policies for weeks with nothing on any surface to
+	// show it (audit 2026-07-25).
+	RankTable     string          `json:"rank_table"`
+	RankTableWarn string          `json:"rank_table_warn,omitempty"`
+	ScopedAlerts  json.RawMessage `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
 }
 
 // QuotaHealth is the E6 surface: is the quota signal ALIVE? A stale trace means
@@ -271,6 +278,9 @@ func runStatus(args []string) error {
 	// staleness in quota_health) + the scoped-limit latch (raw passthrough,
 	// glm-alert pattern).
 	st.QuotaAbsences = pf.combined().Absences
+	if _, prov, warn := router.LoadChecked(rankTablePath()); true {
+		st.RankTable, st.RankTableWarn = prov, warn
+	}
 	if raw, err := os.ReadFile(statepaths.ScopedAlert()); err == nil && json.Valid(raw) {
 		st.ScopedAlerts = raw
 	}
