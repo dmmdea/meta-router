@@ -69,6 +69,12 @@ type Config struct {
 	// Slice-4 E6: provider-signal/trace staleness alarm horizon (hours).
 	QuotaStaleHours int `json:"quota_stale_hours"` // default 48
 
+	// Egress policy for THIRD-PARTY lanes (glm today; the approved free lanes
+	// inherit it). Repo context is denied unless its repo is listed here —
+	// deny-by-default, force-proof, multi-brand isolation.
+	GLMAllowRepos          []string `json:"glm_allow_repos"`
+	EgressPromptOnlyDenied bool     `json:"egress_prompt_only_denied"`
+
 	PollMinIntervalMin int  `json:"poll_min_interval_min"` // W1: min minutes between usage polls (status-triggered); default 5
 	PaceRankOn         bool `json:"pace_rank_on"`          // W1: slack tie-break in the router; default OFF (B8 — promotes only via a budget-state eval)
 }

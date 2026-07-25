@@ -13,6 +13,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/claudelane"
 	"github.com/dmmdea/meta-router/internal/orch/codexlane"
 	"github.com/dmmdea/meta-router/internal/orch/dispatch"
+	"github.com/dmmdea/meta-router/internal/orch/egress"
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/glmlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
@@ -367,10 +368,40 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	now := time.Now().UTC()
 	cfg := orchcfg.Load(configPath())
 	fzs, _ := fuses.Load(fusesPath())
+	egressReason := ""
 	l, warn := ledger.OpenChecked(ledgerPath())
 	if warn != "" {
 		fmt.Fprintln(os.Stderr, "warn:", warn)
 	}
+	// DATA BOUNDARY, checked before anything is sent and BEFORE the quota gate:
+	// glm is a third-party lane, and a refusal here is not a quota judgement, so
+	// --force must not bypass it (same force-proof class as the R10 billing
+	// hard-stop). Denials are terminal for this dispatch: the caller re-routes
+	// or runs it on a subscription lane.
+	if d := egress.Check("glm", cwd, egress.Options{
+		AllowRepos:       cfg.GLMAllowRepos,
+		PromptOnlyDenied: cfg.EgressPromptOnlyDenied,
+	}); !d.Allowed {
+		rec := dispatch.Record{
+			TS: now, Lane: "glm", Model: model, OutcomeClass: "egress_denied",
+			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
+			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
+			Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
+			Admit: false, AdmitState: "egress_denied", AdmitReason: d.Reason, Desc: desc,
+			EgressGate: d.Reason,
+		}
+		sf.stamp(&rec)
+		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (egress denial)")
+		fmt.Fprintln(os.Stderr, "BLOCKED:", d.Reason)
+		b, _ := json.MarshalIndent(map[string]any{
+			"egress_denied": true, "lane": "glm", "reason": d.Reason,
+		}, "", "  ")
+		fmt.Fprintln(out, string(b))
+		return exitEgressDenied, nil
+	} else {
+		egressReason = d.Reason
+	}
+
 	g := glmGate(l.Snapshot(), glmAlertPath(), now, defaultThresholds, force)
 	req := claudelane.RunReq{Prompt: prompt, Model: model, Effort: effort, CWD: cwd,
 		TimeoutSec: timeoutSec, Extra: extra}
@@ -462,7 +493,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
 		TokensIn: in, TokensOut: outTok, NumTurns: o.NumTurns, NotionalUSD: o.NotionalUSD,
 		Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
+		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc, EgressGate: egressReason,
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")

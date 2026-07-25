@@ -33,6 +33,11 @@ const (
 	exitDeferred = 3
 	exitNotional = 4
 	exitNotOK    = 5
+	// exitEgressDenied: the data-boundary gate refused to send this operator's
+	// repository context to a third-party lane. Distinct from a quota deferral
+	// (3) because retrying later cannot help — the caller must re-lane, drop the
+	// working directory, or allowlist the repo.
+	exitEgressDenied = 6
 )
 
 // gateResult is the pre-dispatch admission verdict, pure and unit-testable.

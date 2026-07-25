@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"os"
 	"os/exec"
 	"regexp"
@@ -101,7 +102,9 @@ func Run(ctx context.Context, req RunReq) (Outcome, []byte, error) {
 	// (immediate EOF). codex otherwise BLOCKS FOREVER waiting on interactive
 	// stdin when spawned headless — proven live 2026-07-06.
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "CODEX_HOME="+req.Home)
+	// R10 boundary (see claudelane): scrub ambient credential/routing vars, then
+	// append this lane's deliberate CODEX_HOME pin.
+	cmd.Env = append(childenv.Scrub(os.Environ()), "CODEX_HOME="+req.Home)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	// F15 interim tree-kill (same as claudelane). Carry-forward note (also in

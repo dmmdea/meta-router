@@ -3,10 +3,13 @@ package claudelane
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,8 +33,11 @@ func Run(ctx context.Context, req RunReq) (Outcome, []byte, error) {
 	if req.CWD != "" {
 		cmd.Dir = req.CWD
 	}
-	if len(req.Env) > 0 { // glm lane env pinning; empty = claude behavior, unchanged
-		cmd.Env = append(os.Environ(), req.Env...)
+	// R10 data/billing boundary — see childEnv.
+	cmd.Env = childEnv(os.Environ(), req.Env)
+	if dropped := childenv.Removed(os.Environ()); len(dropped) > 0 {
+		fmt.Fprintln(os.Stderr, "WARN: ignoring credential/routing env for the child:",
+			strings.Join(dropped, ", "), "(R10: subscription auth only)")
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -56,4 +62,18 @@ func Run(ctx context.Context, req RunReq) (Outcome, []byte, error) {
 		return Outcome{Class: "spawn_error", Result: msg}, nil, nil
 	}
 	return Parse(out.Bytes()), out.Bytes(), nil
+}
+
+// childEnv composes the environment a spawned lane binary receives: the
+// ambient environment SCRUBBED of credential/routing overrides, then the
+// lane's own deliberate pins. Order matters — the GLM lane intentionally sets
+// ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN and must not be scrubbed by its own
+// adapter. Exported to the package's tests so they exercise the composition
+// Run actually performs rather than a copy of it.
+func childEnv(ambient, pins []string) []string {
+	env := childenv.Scrub(ambient)
+	if len(pins) > 0 {
+		env = append(env, pins...)
+	}
+	return env
 }
