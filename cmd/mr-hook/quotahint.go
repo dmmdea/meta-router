@@ -60,6 +60,7 @@ func quotaHint(now time.Time) string {
 			continue // omit lanes with no buckets (no signal to report)
 		}
 		var parts []string
+		live := false // does this lane carry ANY real number?
 		for _, w := range windowOrder {
 			b, ok := buckets[w]
 			if !ok {
@@ -73,9 +74,13 @@ func quotaHint(now time.Time) string {
 				parts = append(parts, fmt.Sprintf("%s ?", w))
 			} else {
 				parts = append(parts, fmt.Sprintf("%s %.0f%%", w, b.UsedPct))
+				live = true
 			}
 		}
-		if len(parts) == 0 {
+		// Fail-open is ABSOLUTE: a lane with no live number contributes nothing.
+		// An all-"?" row reads like a report while carrying no signal (review
+		// 2026-07-25).
+		if len(parts) == 0 || !live {
 			continue
 		}
 		// State word from admission (open → no word; throttled/exhausted → append).

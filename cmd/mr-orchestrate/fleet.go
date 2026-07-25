@@ -12,6 +12,17 @@ import (
 	"strings"
 )
 
+// buildRev is injected at build time with
+//
+//	-ldflags "-X main.buildRev=$(git rev-parse HEAD)"
+//
+// Go's AUTOMATIC vcs stamping is absent whenever the build happens in a git
+// worktree — which is exactly how this project's deploys are built, so relying
+// on it alone left the check inert on the only path that matters. The -ldflags
+// setting IS recorded in build info, so an injected revision is readable from a
+// deployed file with no subprocess.
+var buildRev = ""
+
 // fleetBinary is one deployed binary's build identity.
 type fleetBinary struct {
 	Name     string `json:"name"`
@@ -22,26 +33,66 @@ type fleetBinary struct {
 	// Unstamped: the binary carries NO vcs.revision, so its provenance cannot
 	// be verified at all. Reporting it as "not stale" would be a false
 	// all-clear — it counts against the fleet exactly like a stale one.
-	Unstamped bool `json:"unstamped"`
-	Err      string `json:"error,omitempty"`
+	Unstamped bool   `json:"unstamped"`
+	Err       string `json:"error,omitempty"`
 }
 
 // selfBuild reports the running orchestrator's own build identity.
 func selfBuild() (version, revision string, dirty bool) {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
-		return version, "", false
+		return version, buildRev, false
 	}
 	version = bi.Main.Version
+	revision = buildRev // injected wins: it survives worktree builds
 	for _, s := range bi.Settings {
 		switch s.Key {
 		case "vcs.revision":
-			revision = s.Value
+			if revision == "" {
+				revision = s.Value
+			}
 		case "vcs.modified":
 			dirty = s.Value == "true"
 		}
 	}
 	return version, revision, dirty
+}
+
+// revFromBuildInfo extracts a deployed binary's revision: the automatic vcs
+// stamp when present, else the -ldflags-injected main.buildRev.
+func revFromBuildInfo(bi *debug.BuildInfo) (rev string, dirty bool) {
+	for _, st := range bi.Settings {
+		switch st.Key {
+		case "vcs.revision":
+			rev = st.Value
+		case "vcs.modified":
+			dirty = st.Value == "true"
+		case "-ldflags":
+			if rev == "" {
+				if i := strings.Index(st.Value, "main.buildRev="); i >= 0 {
+					v := st.Value[i+len("main.buildRev="):]
+					if j := strings.IndexAny(v, " \"'"); j >= 0 {
+						v = v[:j]
+					}
+					rev = v
+				}
+			}
+		}
+	}
+	return rev, dirty
+}
+
+// revMatch compares revisions by PREFIX so an operator's 7-char
+// `git rev-parse --short` matches a full 40-char stamp. Comparing fixed
+// 12-char truncations reported every binary stale for a short sha.
+func revMatch(have, want string) bool {
+	if have == "" || want == "" {
+		return false
+	}
+	if len(want) <= len(have) {
+		return strings.HasPrefix(have, want)
+	}
+	return strings.HasPrefix(want, have)
 }
 
 func shortRev(r string) string {
@@ -88,9 +139,9 @@ func runFleet(args []string) error {
 	// known, staleness is UNDETERMINED and must be said so — silently reporting
 	// stale=false for everything would be a false all-clear, which is the exact
 	// failure class this subcommand exists to end.
-	want := shortRev(selfRev)
+	want := selfRev
 	if *expect != "" {
-		want = shortRev(*expect)
+		want = *expect // compared by prefix, so a short sha is fine
 	}
 
 	var out []fleetBinary
@@ -110,22 +161,18 @@ func runFleet(args []string) error {
 			continue
 		}
 		fb.Version = bi.Main.Version
-		for _, s := range bi.Settings {
-			switch s.Key {
-			case "vcs.revision":
-				fb.Revision = shortRev(s.Value)
-			case "vcs.modified":
-				fb.Dirty = s.Value == "true"
-			}
-		}
-		// Stale iff we know the reference and this binary's revision, and differ.
-		fb.Unstamped = fb.Revision == ""
-		fb.Stale = want != "" && fb.Revision != "" && fb.Revision != want
+		full, dirty := revFromBuildInfo(bi)
+		fb.Revision = shortRev(full)
+		fb.Dirty = dirty
+		// Stale iff we know the reference and this binary's revision, and they
+		// disagree by prefix.
+		fb.Unstamped = full == ""
+		fb.Stale = want != "" && full != "" && !revMatch(full, want)
 		out = append(out, fb)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 
-	staleCount, dirtyCount, unstampedCount := 0, 0, 0
+	staleCount, dirtyCount, unstampedCount, errCount := 0, 0, 0, 0
 	for _, b := range out {
 		if b.Stale {
 			staleCount++
@@ -136,16 +183,23 @@ func runFleet(args []string) error {
 		if b.Unstamped {
 			unstampedCount++
 		}
+		if b.Err != "" {
+			errCount++
+		}
 	}
 	undetermined := want == ""
-	note := "deployed binaries are compared on BUILD REVISION (versions differ per binary by design). Rebuild the fleet from HEAD when any is stale."
+	note := "deployed binaries are compared on BUILD REVISION by prefix (versions differ per binary by design). Rebuild the fleet when any is stale."
 	switch {
+	case len(out) == 0:
+		note = "NO mr-* BINARIES FOUND in " + dir + " — nothing was verified (wrong -bin, or a non-Windows host where the .exe filter matches nothing)."
 	case undetermined:
-		note = "STALENESS UNDETERMINED: this binary carries no VCS stamp (Go omits it when building from a git worktree). Pass -expect <revision> to compare."
+		note = "STALENESS UNDETERMINED: no reference revision. Pass -expect <revision>, or build with -ldflags \"-X main.buildRev=$(git rev-parse HEAD)\" (Go omits automatic VCS stamping for worktree builds)."
+	case errCount > 0:
+		note = "UNVERIFIABLE: " + fmt.Sprint(errCount) + " deployed binary(ies) could not be read (deploy in progress, truncated copy) — treated as not-current."
 	case unstampedCount > 0:
-		note = "UNVERIFIABLE: " + fmt.Sprint(unstampedCount) + " deployed binary(ies) carry no VCS stamp — provenance unknown, treated as not-current. Rebuild them from a normal checkout (Go omits stamping in a git worktree)."
+		note = "UNVERIFIABLE: " + fmt.Sprint(unstampedCount) + " deployed binary(ies) carry no revision — build them with -ldflags \"-X main.buildRev=...\"; treated as not-current."
 	case staleCount == 0 && dirtyCount == 0:
-		note = "fleet is uniform at revision " + want + "."
+		note = "fleet is uniform at revision " + shortRev(want) + "."
 	}
 	rep := struct {
 		BinDir       string        `json:"bin_dir"`
@@ -158,19 +212,24 @@ func runFleet(args []string) error {
 		StaleCount   int           `json:"stale_count"`
 		DirtyCount   int           `json:"dirty_count"`
 		Unstamped    int           `json:"unstamped_count"`
+		Unreadable   int           `json:"unreadable_count"`
 		Note         string        `json:"note"`
-	}{dir, selfVer, shortRev(selfRev), selfDirty, want, undetermined, out, staleCount, dirtyCount, unstampedCount, note}
+	}{dir, selfVer, shortRev(selfRev), selfDirty, shortRev(want), undetermined, out, staleCount, dirtyCount, unstampedCount, errCount, note}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(rep); err != nil {
 		return err
 	}
 	if *strict {
+		if len(out) == 0 {
+			return fmt.Errorf("no mr-* binaries found in %s: nothing verified", dir)
+		}
 		if undetermined {
 			return fmt.Errorf("fleet staleness undetermined: no reference revision (pass -expect)")
 		}
-		if staleCount > 0 || dirtyCount > 0 || unstampedCount > 0 {
-			return fmt.Errorf("fleet not current: %d stale, %d dirty, %d unstamped", staleCount, dirtyCount, unstampedCount)
+		if staleCount > 0 || dirtyCount > 0 || unstampedCount > 0 || errCount > 0 {
+			return fmt.Errorf("fleet not current: %d stale, %d dirty, %d unstamped, %d unreadable",
+				staleCount, dirtyCount, unstampedCount, errCount)
 		}
 	}
 	return nil

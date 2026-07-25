@@ -63,7 +63,7 @@ func applyCodexOutcome(l *ledger.Ledger, o codexlane.Outcome, cfg orchcfg.Config
 	if o.Class == "rate_limit" {
 		// Real provider signal — the exec stream has NO rate_limits surface
 		// (fixture-proven), so the veto itself is the observation.
-		l.ObserveProvider("codex", ledger.Win5h, 100, now.Add(5*time.Hour), now)
+		l.ObserveLimit("codex", "", ledger.Win5h, now.Add(5*time.Hour), now)
 	}
 	return predictedUsedPct
 }
@@ -324,18 +324,18 @@ func applyGLMOutcome(l *ledger.Ledger, o claudelane.Outcome, raw []byte, model s
 			if !resume.After(now) { // absent OR stale flush: RS5 conservative
 				resume = now.Add(5 * time.Hour)
 			}
-			l.ObserveProvider("glm", ledger.Win5h, 100, resume, now)
+			l.ObserveLimit("glm", "", ledger.Win5h, resume, now)
 		case glmlane.ActOffline:
 			resume := e.NextFlush
 			if !resume.After(now) {
 				resume = now.Add(24 * time.Hour) // RS5: re-checked daily
 			}
-			l.ObserveProvider("glm", ledger.Win7d, 100, resume, now)
+			l.ObserveLimit("glm", "", ledger.Win7d, resume, now)
 		}
 		return e, true
 	}
 	if o.Class == "rate_limit" { // S2R-8 generic fallback
-		l.ObserveProvider("glm", ledger.Win5h, 100, now.Add(5*time.Hour), now)
+		l.ObserveLimit("glm", "", ledger.Win5h, now.Add(5*time.Hour), now)
 	}
 	return glmlane.GLMErr{}, false
 }

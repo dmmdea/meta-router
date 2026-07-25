@@ -401,3 +401,94 @@ func TestUpdateCheckedDoesNotQuarantineHealthyOrMissing(t *testing.T) {
 		t.Fatalf("nothing to quarantine on a clean run, found %v", q)
 	}
 }
+
+// C1 (review 2026-07-25): a FUTURE ObservedAt must be clamped. Unclamped, a
+// drop file touched days ahead locked out every later poll AND blinded the E6
+// staleness alarm (which keys on ObservedAt) for as long as the skew lasted.
+func TestObserveClampsFutureObservedAt(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "l.json"))
+	now := time.Now().UTC()
+	ok, why := l.Observe(Observation{Lane: "claude", Window: Win7d, UsedPct: 39,
+		ResetsAt: now.Add(96 * time.Hour), ObservedAt: now.Add(9 * 24 * time.Hour),
+		Source: ProviderSourceDrop}, now)
+	if !ok {
+		t.Fatalf("the observation itself is valid: %s", why)
+	}
+	b, _ := l.Bucket("claude", Win7d)
+	if b.ObservedAt.After(now) {
+		t.Fatalf("ObservedAt must be clamped to now, got %v (now %v)", b.ObservedAt, now)
+	}
+	// And a later poll must still be able to land.
+	ok, why = l.Observe(Observation{Lane: "claude", Window: Win7d, UsedPct: 17,
+		ResetsAt: now.Add(96 * time.Hour), ObservedAt: now.Add(time.Second),
+		Source: ProviderSourcePoll}, now.Add(time.Second))
+	if !ok {
+		t.Fatalf("a fresh poll must not be locked out by a future-dated drop: %s", why)
+	}
+	if b, _ := l.Bucket("claude", Win7d); b.UsedPct != 17 {
+		t.Fatalf("poll must win, got %v", b.UsedPct)
+	}
+}
+
+// M6: a vendor DENIAL outranks lower-authority readings, so a drop cannot
+// re-open a window the vendor just closed.
+func TestObserveLimitOutranksDrop(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "l.json"))
+	now := time.Now().UTC()
+	l.ObserveLimit("glm", "", Win5h, now.Add(5*time.Hour), now)
+	ok, why := l.Observe(Observation{Lane: "glm", Window: Win5h, UsedPct: 30,
+		ResetsAt: now.Add(5 * time.Hour), ObservedAt: now.Add(time.Minute),
+		Source: ProviderSourceDrop}, now.Add(time.Minute))
+	if ok {
+		t.Fatal("a drop must not re-open a window the vendor denied")
+	}
+	if why == "" {
+		t.Fatal("the refusal must state a reason")
+	}
+	if b, _ := l.Bucket("glm", Win5h); b.UsedPct != 100 || b.ProviderSource != ProviderSourceLimit {
+		t.Fatalf("the denial must stand and stay labelled: %+v", b)
+	}
+}
+
+// M8: authority EXPIRES. An absolute rule would freeze a lane at the last poll
+// for the whole window if the poller broke; after AuthorityTTL the freshest
+// observation wins.
+func TestObserveAuthorityExpires(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "l.json"))
+	t0 := time.Now().UTC()
+	l.Observe(Observation{Lane: "claude", Window: Win7d, UsedPct: 17,
+		ResetsAt: t0.Add(96 * time.Hour), ObservedAt: t0, Source: ProviderSourcePoll}, t0)
+	// Inside the TTL: the drop is refused.
+	if ok, _ := l.Observe(Observation{Lane: "claude", Window: Win7d, UsedPct: 39,
+		ResetsAt: t0.Add(96 * time.Hour), ObservedAt: t0.Add(time.Minute),
+		Source: ProviderSourceDrop}, t0.Add(time.Minute)); ok {
+		t.Fatal("a fresh poll must outrank a drop inside AuthorityTTL")
+	}
+	// Past the TTL (poller broke): the fresher drop wins rather than the lane
+	// freezing on stale data.
+	late := t0.Add(AuthorityTTL + time.Minute)
+	if ok, why := l.Observe(Observation{Lane: "claude", Window: Win7d, UsedPct: 39,
+		ResetsAt: t0.Add(96 * time.Hour), ObservedAt: late, Source: ProviderSourceDrop}, late); !ok {
+		t.Fatalf("past AuthorityTTL the freshest observation must win: %s", why)
+	}
+	if b, _ := l.Bucket("claude", Win7d); b.UsedPct != 39 {
+		t.Fatalf("expected the drop to land after the TTL, got %v", b.UsedPct)
+	}
+}
+
+// roll must clear provenance: a NEW window inherits no authority from the old.
+func TestRollClearsProviderSource(t *testing.T) {
+	l := Open(filepath.Join(t.TempDir(), "l.json"))
+	t0 := time.Now().UTC()
+	l.Observe(Observation{Lane: "codex", Window: Win5h, UsedPct: 100,
+		ResetsAt: t0.Add(time.Minute), ObservedAt: t0, Source: ProviderSourceLimit}, t0)
+	after := t0.Add(2 * time.Minute) // window has reset
+	ok, why := l.Observe(Observation{Lane: "codex", Window: Win5h, UsedPct: 5,
+		ResetsAt: after.Add(5 * time.Hour), ObservedAt: after, Source: ProviderSourceDrop}, after)
+	if !ok {
+		t.Fatalf("a rolled window carries no authority: %s", why)
+	}
+	if b, _ := l.Bucket("codex", Win5h); b.UsedPct != 5 || b.ProviderSource != ProviderSourceDrop {
+		t.Fatalf("the new window must accept the new observation: %+v", b)
+	}
+}

@@ -144,7 +144,7 @@ func applyRunOutcomeSubject(l *ledger.Ledger, subject string, o claudelane.Outco
 	l.AddShadowSubject("claude", subject, ledger.Win5h, tok, now)
 	l.AddShadowSubject("claude", subject, ledger.Win7d, tok, now)
 	if o.Class == "rate_limit" {
-		l.ObserveProviderSubject("claude", subject, ledger.Win5h, 100, now.Add(5*time.Hour), now)
+		l.ObserveLimit("claude", subject, ledger.Win5h, now.Add(5*time.Hour), now)
 	}
 }
 

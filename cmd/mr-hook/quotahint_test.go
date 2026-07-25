@@ -134,16 +134,23 @@ func TestQuotaHintFitsWithinHookDeadlineBudget(t *testing.T) {
 func TestQuotaHintUnknownRendersQuestionMark(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir())
 	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
-		// claude with a known signal so the hint has signal at all.
+		// PARTIAL knowledge within ONE lane is the case where "?" carries
+		// meaning: a known 5h next to an unlearned 7d. (Re-pointed 2026-07-25:
+		// this test previously got its "?" from a lane whose ONLY window was
+		// unknown — and such a lane is now omitted entirely, because a row of
+		// bare "?" marks is an absent signal, and the hook's fail-open is
+		// absolute. The intent — unknown windows render "?" — is unchanged.)
 		l.ObserveProvider("claude", ledger.Win5h, 30, hnow.Add(3*time.Hour), hnow)
-		// codex bucket with unknown pct (shadow floor unlearned).
-		l.AddShadow("codex", ledger.Win7d, 0, hnow) // stays -1 (uncapped/unanchored)
+		l.AddShadow("claude", ledger.Win7d, 0, hnow) // stays -1 (uncapped/unanchored)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	h := quotaHint(hnow)
-	if !strings.Contains(h, "?") {
-		t.Fatalf("unknown window must render '?': %s", h)
+	if !strings.Contains(h, "5h 30%") {
+		t.Fatalf("the known window must render its number: %s", h)
+	}
+	if !strings.Contains(h, "7d ?") {
+		t.Fatalf("an unknown window beside a known one must render '?': %s", h)
 	}
 }
 
@@ -174,5 +181,42 @@ func TestQuotaHintExpiredWindowIsNotLivePressure(t *testing.T) {
 	}
 	if !strings.Contains(h, "7d 17%") {
 		t.Fatalf("the live window must still render: %s", h)
+	}
+}
+
+// REGRESSION (review 2026-07-25): when EVERY window is expired/unknown the
+// render produced a row of bare "?" marks and injected it — "fail-open
+// absolute" means an absent signal injects NOTHING, and a banner of question
+// marks reads like a live report in every prompt.
+func TestQuotaHintAllUnknownInjectsNothing(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("claude", ledger.Win5h, 85, hnow.Add(-25*time.Hour), hnow.Add(-30*time.Hour))
+		l.ObserveProvider("codex", ledger.Win5h, 271, hnow.Add(-43*time.Hour), hnow.Add(-44*time.Hour))
+		l.ObserveProvider("glm", ledger.Win5h, 100, hnow.Add(-40*time.Hour), hnow.Add(-41*time.Hour))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if h := quotaHint(hnow); h != "" {
+		t.Fatalf("no live number anywhere ⇒ inject nothing, got: %s", h)
+	}
+}
+
+// A lane with NO live number must not contribute an all-"?" row while another
+// lane still has real signal.
+func TestQuotaHintOmitsFullyUnknownLanes(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("claude", ledger.Win7d, 17, hnow.Add(96*time.Hour), hnow) // live
+		l.ObserveProvider("codex", ledger.Win5h, 271, hnow.Add(-43*time.Hour), hnow.Add(-44*time.Hour))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := quotaHint(hnow)
+	if !strings.Contains(h, "claude 7d 17%") {
+		t.Fatalf("the live lane must render: %s", h)
+	}
+	if strings.Contains(h, "codex") {
+		t.Fatalf("a lane with no live number must be omitted, not rendered as ?: %s", h)
 	}
 }
