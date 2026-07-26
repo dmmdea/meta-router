@@ -100,7 +100,10 @@ func TestCanonicalResolvesAnAncestorLinkForAMissingLeaf(t *testing.T) {
 // twice already.
 func TestCanonicalOnAFabricatedPathStaysUsable(t *testing.T) {
 	for _, p := range []string{
-		filepath.FromSlash("D:/dev/pepsdubai/does-not-exist-anywhere"),
+		// absTest, not a "D:/…" literal: on Linux that literal is RELATIVE, so
+		// canonical correctly returns an absolute path and the equality below
+		// would compare an absolute result against a relative expectation.
+		absTest("dev", "pepsdubai", "does-not-exist-anywhere"),
 		filepath.Join(t.TempDir(), "no", "such", "tree"),
 	} {
 		got, err := canonical(p)

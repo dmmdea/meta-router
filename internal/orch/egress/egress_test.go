@@ -8,9 +8,25 @@ import (
 	"testing"
 )
 
+// absTest builds a path that is FULLY QUALIFIED on the host platform.
+//
+// Hardcoded "D:/Dev/..." literals are absolute on Windows and RELATIVE on Linux —
+// where the allowlist guard correctly refuses them for depending on the process's
+// current directory. That made three of these tests pass locally and fail on the
+// POSIX CI runner (2026-07-26). The gate's behaviour was right; the fixtures were
+// Windows-shaped. Same environment-assumption class this repo has now been bitten
+// by three times, so the shape is built rather than written.
+func absTest(parts ...string) string {
+	base := "/"
+	if runtime.GOOS == "windows" {
+		base = `D:\`
+	}
+	return filepath.Join(append([]string{base}, parts...)...)
+}
+
 func TestSubscriptionLanesAreNotGated(t *testing.T) {
 	for _, lane := range []string{"claude", "codex", "local"} {
-		if d := Check(lane, "C:/Dev/anything", Options{}); !d.Allowed {
+		if d := Check(lane, absTest("Dev", "anything"), Options{}); !d.Allowed {
 			t.Fatalf("%s is not a third-party lane and must never be gated: %+v", lane, d)
 		}
 	}
@@ -20,7 +36,7 @@ func TestSubscriptionLanesAreNotGated(t *testing.T) {
 // inside a real repo. With no allowlist configured that export must be REFUSED,
 // not silently performed.
 func TestRepoContextDeniedByDefault(t *testing.T) {
-	d := Check("glm", "D:/dev/pepsdubai/readypep-store", Options{})
+	d := Check("glm", absTest("dev", "pepsdubai", "readypep-store"), Options{})
 	if d.Allowed {
 		t.Fatal("repository context to a third-party lane must deny by default")
 	}
@@ -30,7 +46,7 @@ func TestRepoContextDeniedByDefault(t *testing.T) {
 }
 
 func TestAllowlistedRepoIsAllowed(t *testing.T) {
-	root := filepath.FromSlash("D:/Dev/dmmdea/meta-router")
+	root := absTest("Dev", "dmmdea", "meta-router")
 	sub := filepath.Join(root, "internal", "orch")
 	d := Check("glm", sub, Options{AllowRepos: []string{root}})
 	if !d.Allowed {
@@ -44,8 +60,8 @@ func TestAllowlistedRepoIsAllowed(t *testing.T) {
 // A sibling whose path merely shares a PREFIX with an allowlisted repo must not
 // slip through: "…/client-secret" is not inside "…/client".
 func TestPrefixSiblingIsNotInside(t *testing.T) {
-	d := Check("glm", filepath.FromSlash("D:/Dev/client-secret"), Options{
-		AllowRepos: []string{filepath.FromSlash("D:/Dev/client")},
+	d := Check("glm", absTest("Dev", "client-secret"), Options{
+		AllowRepos: []string{absTest("Dev", "client")},
 	})
 	if d.Allowed {
 		t.Fatalf("a prefix-sharing sibling must not be treated as inside: %+v", d)
@@ -55,8 +71,8 @@ func TestPrefixSiblingIsNotInside(t *testing.T) {
 // The brand-isolation case, stated concretely: an allowlisted personal repo
 // must not license a client checkout on another path.
 func TestOtherRepoStillDenied(t *testing.T) {
-	d := Check("glm", filepath.FromSlash("D:/dev/pepsdubai/peptidoteca"), Options{
-		AllowRepos: []string{filepath.FromSlash("D:/Dev/dmmdea/meta-router")},
+	d := Check("glm", absTest("dev", "pepsdubai", "peptidoteca"), Options{
+		AllowRepos: []string{absTest("Dev", "dmmdea", "meta-router")},
 	})
 	if d.Allowed {
 		t.Fatalf("a non-allowlisted repo must stay denied: %+v", d)
@@ -77,7 +93,7 @@ func TestPromptOnlyAllowedUnlessClosed(t *testing.T) {
 
 func TestUnresolvablePathFailsClosed(t *testing.T) {
 	// A path with a NUL byte cannot be resolved on any platform.
-	if d := Check("glm", "bad\x00path", Options{AllowRepos: []string{"D:/Dev"}}); d.Allowed {
+	if d := Check("glm", "bad\x00path", Options{AllowRepos: []string{absTest("Dev")}}); d.Allowed {
 		t.Fatal("an unresolvable working directory must fail closed")
 	}
 }
@@ -89,7 +105,7 @@ func TestFutureFreeLanesInheritTheGate(t *testing.T) {
 		if !ThirdParty(lane) {
 			t.Fatalf("%s must be treated as third-party", lane)
 		}
-		if d := Check(lane, "D:/dev/anything", Options{}); d.Allowed {
+		if d := Check(lane, absTest("dev", "anything"), Options{}); d.Allowed {
 			t.Fatalf("%s must deny repo context by default: %+v", lane, d)
 		}
 	}
@@ -143,8 +159,8 @@ func TestPlanUsesAnAllowlistedInheritedCwd(t *testing.T) {
 // An EXPLICIT non-allowlisted cwd is a deliberate request for that repo's
 // context and must be refused outright — never silently neutralised.
 func TestPlanRefusesExplicitNonAllowlistedCwd(t *testing.T) {
-	_, cleanup, d := Plan("glm", filepath.FromSlash("D:/dev/pepsdubai/client"), Options{
-		AllowRepos: []string{filepath.FromSlash("D:/Dev/dmmdea/meta-router")},
+	_, cleanup, d := Plan("glm", absTest("dev", "pepsdubai", "client"), Options{
+		AllowRepos: []string{absTest("Dev", "dmmdea", "meta-router")},
 	})
 	defer cleanup()
 	if d.Allowed {
@@ -237,7 +253,7 @@ func TestRefuseExtrasRefusesTheAmbiguous(t *testing.T) {
 // A RELATIVE allowlist entry would resolve against whatever directory the
 // orchestrator is standing in — "." self-allowlists every checkout in turn.
 func TestRelativeAllowlistEntryIsRefused(t *testing.T) {
-	d := Check("glm", filepath.FromSlash("D:/dev/anything"), Options{AllowRepos: []string{"."}})
+	d := Check("glm", absTest("dev", "anything"), Options{AllowRepos: []string{"."}})
 	if d.Allowed {
 		t.Fatal("a relative allowlist entry must never allow anything")
 	}
@@ -357,5 +373,19 @@ func TestRefuseExtrasJudgesOptionalValues(t *testing.T) {
 		if bad := RefuseExtras(extra); len(bad) != 0 {
 			t.Errorf("%v is an inert debug filter and must be allowed, refused %v", extra, bad)
 		}
+	}
+}
+
+// absTest must actually produce a fully-qualified path on whatever platform the
+// tests run on — otherwise the fixtures silently exercise the refusal branch and
+// every "allowed" assertion above becomes vacuous. This is the guard that would
+// have caught the Windows-shaped literals before CI did.
+func TestAbsTestIsFullyQualifiedOnThisPlatform(t *testing.T) {
+	p := absTest("Dev", "example")
+	if !fullyQualified(p) {
+		t.Fatalf("absTest produced %q, which this platform does not consider fully qualified", p)
+	}
+	if !filepath.IsAbs(p) {
+		t.Fatalf("absTest produced %q, which is not absolute", p)
 	}
 }
