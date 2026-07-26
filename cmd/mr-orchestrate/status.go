@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -61,9 +62,13 @@ type Status struct {
 	// gate-cleared default) or "override" (an operator file). Two machines
 	// routed on different policies for weeks with nothing on any surface to
 	// show it (audit 2026-07-25).
-	RankTable     string          `json:"rank_table"`
-	RankTableWarn string          `json:"rank_table_warn,omitempty"`
-	ScopedAlerts  json.RawMessage `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
+	RankTable     string `json:"rank_table"`
+	RankTableWarn string `json:"rank_table_warn,omitempty"`
+	// A2Alert is the weekly drift-replay verdict. It had NO reader anywhere, so
+	// a DRIFT alarm would have reached nobody (audit 2026-07-25); status is now
+	// its surface, like the GLM 1313 latch.
+	A2Alert      json.RawMessage `json:"a2_alert,omitempty"`
+	ScopedAlerts json.RawMessage `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
 }
 
 // QuotaHealth is the E6 surface: is the quota signal ALIVE? A stale trace means
@@ -281,9 +286,8 @@ func runStatus(args []string) error {
 	if _, prov, warn := router.LoadChecked(rankTablePath()); true {
 		st.RankTable, st.RankTableWarn = prov, warn
 	}
-	if raw, err := os.ReadFile(statepaths.ScopedAlert()); err == nil && json.Valid(raw) {
-		st.ScopedAlerts = raw
-	}
+	st.ScopedAlerts = readAlertJSON(statepaths.ScopedAlert())
+	st.A2Alert = readAlertJSON(statepaths.A2Alert())
 	// S2R-10 receipts audit block: coverage/obedience/deviation/per-lane counts
 	// from dispatch.jsonl. Additive JSON on the machine contract — stdout stays
 	// pure JSON. Fail-open: an unreadable/corrupt log yields an all-zero summary,
@@ -296,4 +300,20 @@ func runStatus(args []string) error {
 	}
 	fmt.Println(string(out))
 	return nil
+}
+
+// readAlertJSON reads a raw-passthrough alert file, tolerating a UTF-8 BOM.
+// Windows PowerShell's -Encoding UTF8 prepends one, and json.Valid rejects it —
+// which would silently drop an alarm on the floor (rehearsal finding
+// 2026-07-25). Returns nil unless the remainder is valid JSON.
+func readAlertJSON(path string) json.RawMessage {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
+	if !json.Valid(raw) {
+		return nil
+	}
+	return raw
 }
