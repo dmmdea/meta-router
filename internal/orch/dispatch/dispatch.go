@@ -40,6 +40,10 @@ type Record struct {
 	// default). RotationFrom + RotationReason are populated only when the
 	// selected subject was NOT the registry-first one — the typed-limit
 	// rotation provenance (claudexor discipline: never a network error).
+	// EgressGate records the data-boundary decision for a third-party lane:
+	// why an export was permitted, or why it was refused. An export must never
+	// be implicit in the record (audit 2026-07-25).
+	EgressGate string `json:"egress_gate,omitempty"`
 	Subject        string `json:"subject,omitempty"`
 	RotationFrom   string `json:"rotation_from,omitempty"`
 	RotationReason string `json:"rotation_reason,omitempty"`

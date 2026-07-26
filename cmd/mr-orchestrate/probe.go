@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"io"
 	"net/http"
 	"os"
@@ -98,6 +99,7 @@ func runProbe(args []string) error {
 		cmdArgs = []string{"-p", "Reply with exactly: ok", "--model", *model, "--output-format", format, "--verbose"}
 	}
 	cmd := exec.Command("claude", cmdArgs...)
+	cmd.Env = childenv.Scrub(os.Environ()) // R10: never hand a child an ambient API key
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -222,7 +224,6 @@ func runCodexUsageCapture() error {
 	fmt.Printf("probe: wrote %s (%d bytes) — inspect the schema BEFORE writing any parser (fixtures-first)\n", dst, len(body))
 	return nil
 }
-
 
 var idFields = regexp.MustCompile(`"(session_id|uuid|leafUuid|thread_id|user_id|account_id|email)"\s*:\s*"[^"]*"`)
 

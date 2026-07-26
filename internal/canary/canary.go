@@ -58,6 +58,87 @@ func GoSourceFiles(root string, includeTests bool) ([]string, error) {
 	return out, err
 }
 
+// StripGoComments removes // and /* */ comments from Go source, leaving string
+// literals intact. It also normalizes CRLF to LF.
+//
+// Why a canary needs this: a source-scanning canary that asks
+// strings.Contains(src, "childenv.Scrub") is satisfied by a COMMENT saying
+// "childenv.Scrub is called below" — so deleting the actual call still passes.
+// That is not a hypothetical: the B14 gate check passed with its only
+// egress.Plan CALL removed, because the explanatory comment above it survived
+// (mutation-tested 2026-07-25). Every canary that greps for a call must scan
+// code, not prose.
+//
+// Deliberately conservative about the failure direction: string literals are
+// preserved so a URL like "http://x" is never mistaken for a comment. Anything
+// this misreads costs a false FAILURE, which is loud, rather than a false pass.
+func StripGoComments(src string) string {
+	src = strings.ReplaceAll(src, "\r\n", "\n")
+	var b strings.Builder
+	b.Grow(len(src))
+	const (
+		code = iota
+		lineComment
+		blockComment
+		str    // "..."
+		rawStr // `...`
+		chr    // '...'
+	)
+	state := code
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch state {
+		case code:
+			switch {
+			case c == '/' && i+1 < len(src) && src[i+1] == '/':
+				state = lineComment
+				i++
+			case c == '/' && i+1 < len(src) && src[i+1] == '*':
+				state = blockComment
+				i++
+			default:
+				switch c {
+				case '"':
+					state = str
+				case '`':
+					state = rawStr
+				case '\'':
+					state = chr
+				}
+				b.WriteByte(c)
+			}
+		case lineComment:
+			if c == '\n' {
+				state = code
+				b.WriteByte(c) // keep line structure for body-boundary regexes
+			}
+		case blockComment:
+			if c == '*' && i+1 < len(src) && src[i+1] == '/' {
+				state = code
+				i++
+			} else if c == '\n' {
+				b.WriteByte(c)
+			}
+		case str, chr:
+			b.WriteByte(c)
+			if c == '\\' && i+1 < len(src) {
+				i++
+				b.WriteByte(src[i])
+				continue
+			}
+			if (state == str && c == '"') || (state == chr && c == '\'') {
+				state = code
+			}
+		case rawStr:
+			b.WriteByte(c)
+			if c == '`' {
+				state = code
+			}
+		}
+	}
+	return b.String()
+}
+
 // B1Forbidden is the single source of truth for the B1 API-key-auth pattern:
 // env reads (Getenv/LookupEnv) of *_API_KEY / *APIKEY names, or a quoted
 // x-api-key header literal. The header token is concatenated so this

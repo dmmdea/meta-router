@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -142,5 +143,34 @@ func TestMaybeFitFitsCodexFromWhamTrace(t *testing.T) {
 	b, _ := l.Bucket("codex", ledger.Win5h)
 	if b.CapSource != "" || b.CapTokens == 90_000 {
 		t.Fatalf("fit must replace the estimate (cap_source cleared): %+v", b)
+	}
+}
+
+// A2's verdict is only meaningful if the run happened: a frozen ok=true from
+// last month renders identically to a fresh pass. These pin the age guard.
+func TestA2WatchStale(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	mk := func(ts string) json.RawMessage {
+		return json.RawMessage(`{"ts":"` + ts + `","ok":true,"source":"a2-weekly-replay"}`)
+	}
+	if got := a2WatchStale(nil, now); got != "" {
+		t.Fatalf("an absent alert is the disabled-task normal case, not an alarm: %s", got)
+	}
+	if got := a2WatchStale(mk("2026-07-30T09:00:00Z"), now); got != "" {
+		t.Fatalf("a verdict from 2 days ago is current: %s", got)
+	}
+	if got := a2WatchStale(mk("2026-07-10T09:00:00Z"), now); !strings.Contains(got, "frozen") {
+		t.Fatalf("a 22-day-old verdict must be called frozen, got %q", got)
+	}
+	// PowerShell's `Get-Date -Format o` shape, with offset and 7-digit fraction.
+	if got := a2WatchStale(mk("2026-07-31T09:00:00.1234567+04:00"), now); got != "" {
+		t.Fatalf("the writer's actual timestamp format must parse: %s", got)
+	}
+	if got := a2WatchStale(json.RawMessage(`{"ok":true}`), now); !strings.Contains(got, "unverifiable") {
+		t.Fatalf("a verdict with no ts cannot be aged and must say so, got %q", got)
+	}
+	// Clock skew must not suppress the guard forever (the ledger ObservedAt lesson).
+	if got := a2WatchStale(mk("2027-01-01T00:00:00Z"), now); !strings.Contains(got, "FUTURE") {
+		t.Fatalf("a future stamp must be reported, not silently treated as fresh: %q", got)
 	}
 }

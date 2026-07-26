@@ -31,6 +31,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -236,6 +238,9 @@ func runCmdStdin(ctx context.Context, bin string, args []string, stdin string, t
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
+	// R10: the local harness is free, but an ambient credential var must not
+	// ride along into any child this system spawns (audit R4).
+	cmd.Env = childenv.Scrub(os.Environ())
 	if stdin != "" {
 		cmd.Stdin = bytes.NewBufferString(stdin)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"os"
 	"os/exec"
 	"regexp"
@@ -53,7 +54,12 @@ var (
 // WARNed at the caller.
 func VersionGate() (version string, ok bool) {
 	versionOnce.Do(func() {
-		out, err := exec.Command("codex", "--version").Output()
+		// Scrubbed like every other lane spawn: `--version` cannot itself bill,
+		// but this is the codex binary and B13 admits no per-site exceptions
+		// reasoned from intent — only from argv[0] not being a model lane.
+		vc := exec.Command("codex", "--version")
+		vc.Env = childenv.Scrub(os.Environ())
+		out, err := vc.Output()
 		if err != nil {
 			cachedVersion = "unknown (" + err.Error() + ")"
 			return
@@ -101,7 +107,9 @@ func Run(ctx context.Context, req RunReq) (Outcome, []byte, error) {
 	// (immediate EOF). codex otherwise BLOCKS FOREVER waiting on interactive
 	// stdin when spawned headless — proven live 2026-07-06.
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "CODEX_HOME="+req.Home)
+	// R10 boundary (see claudelane): scrub ambient credential/routing vars, then
+	// append this lane's deliberate CODEX_HOME pin.
+	cmd.Env = append(childenv.Scrub(os.Environ()), "CODEX_HOME="+req.Home)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	// F15 interim tree-kill (same as claudelane). Carry-forward note (also in

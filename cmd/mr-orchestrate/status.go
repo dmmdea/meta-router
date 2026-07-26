@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/admission"
@@ -61,9 +63,17 @@ type Status struct {
 	// gate-cleared default) or "override" (an operator file). Two machines
 	// routed on different policies for weeks with nothing on any surface to
 	// show it (audit 2026-07-25).
-	RankTable     string          `json:"rank_table"`
-	RankTableWarn string          `json:"rank_table_warn,omitempty"`
-	ScopedAlerts  json.RawMessage `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
+	RankTable     string `json:"rank_table"`
+	RankTableWarn string `json:"rank_table_warn,omitempty"`
+	// A2Alert is the weekly drift-replay verdict. It had NO reader anywhere, so
+	// a DRIFT alarm would have reached nobody (audit 2026-07-25); status is now
+	// its surface, like the GLM 1313 latch.
+	A2Alert json.RawMessage `json:"a2_alert,omitempty"`
+	// A2WatchStale is the F18-class guard for A2 itself: the weekly replay's
+	// verdict is only meaningful if the run happened. A verdict frozen at last
+	// month's ok=true reads identically to a healthy one on every surface.
+	A2WatchStale string          `json:"a2_watch_stale,omitempty"`
+	ScopedAlerts json.RawMessage `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
 }
 
 // QuotaHealth is the E6 surface: is the quota signal ALIVE? A stale trace means
@@ -281,9 +291,9 @@ func runStatus(args []string) error {
 	if _, prov, warn := router.LoadChecked(rankTablePath()); true {
 		st.RankTable, st.RankTableWarn = prov, warn
 	}
-	if raw, err := os.ReadFile(statepaths.ScopedAlert()); err == nil && json.Valid(raw) {
-		st.ScopedAlerts = raw
-	}
+	st.ScopedAlerts = readAlertJSON(statepaths.ScopedAlert())
+	st.A2Alert = readAlertJSON(statepaths.A2Alert())
+	st.A2WatchStale = a2WatchStale(st.A2Alert, now)
 	// S2R-10 receipts audit block: coverage/obedience/deviation/per-lane counts
 	// from dispatch.jsonl. Additive JSON on the machine contract — stdout stays
 	// pure JSON. Fail-open: an unreadable/corrupt log yields an all-zero summary,
@@ -296,4 +306,63 @@ func runStatus(args []string) error {
 	}
 	fmt.Println(string(out))
 	return nil
+}
+
+// a2StaleAfter bounds the A2 watch: the replay is WEEKLY, so one missed week
+// plus a day of slack. ABSENCE is deliberately not staleness — the task is
+// disabled until the operator enables it, and an alarm for a watch that has
+// never run is noise.
+const a2StaleAfter = 8 * 24 * time.Hour
+
+// a2WatchStale ages the weekly drift verdict. Surfacing the verdict without its
+// age was only half the fix: a frozen ok=true from last month renders exactly
+// like a fresh pass, which is the same silence the a2_alert reader was added to
+// end (F18 class, mirroring PolicyWatchStale).
+func a2WatchStale(raw json.RawMessage, now time.Time) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var a struct {
+		TS time.Time `json:"ts"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil || a.TS.IsZero() {
+		return "a2 alert carries no readable `ts`: its age cannot be checked, so the verdict below is unverifiable"
+	}
+	// A future stamp would suppress this guard forever — the same clock-skew
+	// lock-out the ledger's ObservedAt clamp exists for. Say so instead.
+	if a.TS.After(now.Add(time.Hour)) {
+		return "a2 alert is stamped in the FUTURE (" + a.TS.UTC().Format(time.RFC3339) +
+			"): staleness cannot be judged — check the writer's clock"
+	}
+	if age := now.Sub(a.TS); age > a2StaleAfter {
+		return fmt.Sprintf("a2 weekly replay last ran %.0fd ago (>8d): the weekly task is not firing — the verdict below is frozen, not current", age.Hours()/24)
+	}
+	return ""
+}
+
+// readAlertJSON reads a raw-passthrough alert file, tolerating a UTF-8 BOM.
+// Windows PowerShell's -Encoding UTF8 prepends one, and json.Valid rejects it —
+// which would silently drop an alarm on the floor (rehearsal finding
+// 2026-07-25). Returns nil unless the remainder is valid JSON.
+func readAlertJSON(path string) json.RawMessage {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil // absent is the normal case
+	}
+	if bytes.HasPrefix(raw, []byte{0xFF, 0xFE}) || bytes.HasPrefix(raw, []byte{0xFE, 0xFF}) {
+		// PowerShell's `>` and bare Out-File default to UTF-16LE. Say so loudly
+		// rather than dropping the alarm on the floor.
+		fmt.Fprintln(os.Stderr, "WARN:", filepath.Base(path),
+			"is UTF-16 encoded; alerts must be UTF-8 (alarm NOT surfaced)")
+		return nil
+	}
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
+	if !json.Valid(raw) {
+		// A corrupt alert that reads as "absent" is exactly the silence this
+		// function exists to end (torn write, encoding regression).
+		fmt.Fprintln(os.Stderr, "WARN:", filepath.Base(path),
+			"exists but is not valid JSON (alarm NOT surfaced)")
+		return nil
+	}
+	return raw
 }

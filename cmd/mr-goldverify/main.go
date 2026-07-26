@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 )
 
 const version = "0.1.0"
@@ -52,6 +53,12 @@ func touchesTestFile(patch []byte, testFiles []string) string {
 func run(ctx context.Context, dir string, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	// name is a VARIABLE: the gold task's own verify command flows through here
+	// (`run(ctx, wt, parts[0], parts[1:]...)`), so this helper can spawn anything
+	// a task file names — including a model CLI. The old B13 exempted this whole
+	// file by reasoning about what tasks *usually* contain; the environment is
+	// scrubbed instead (R10, B13).
+	cmd.Env = childenv.Scrub(os.Environ())
 	return cmd.CombinedOutput()
 }
 

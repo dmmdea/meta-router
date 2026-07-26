@@ -27,7 +27,9 @@ type ReceiptsSummary struct {
 	ObediencePct       float64        `json:"obedience_pct"`        // of consulted runs, fraction NOT deviated
 	DeviationsByReason map[string]int `json:"deviations_by_reason"` // deviation_reason → count
 	DispatchByLane     map[string]int `json:"dispatch_by_lane"`     // lane → run-receipt count
-	Consults           int            `json:"consults"`             // route_recommendation receipts (context)
+	EgressDenied       int            `json:"egress_denied"`        // exports the data-boundary gate refused
+	EgressDeniedByLane map[string]int `json:"egress_denied_by_lane,omitempty"`
+	Consults           int            `json:"consults"` // route_recommendation receipts (context)
 	Note               string         `json:"note"`
 }
 
@@ -55,6 +57,19 @@ func summarizeReceipts(recs []dispatch.Record) ReceiptsSummary {
 		if r.OutcomeClass == "route_recommendation" {
 			s.Consults++
 			continue // consults are not run receipts
+		}
+		// A refused EXPORT is not a dispatch: nothing ran, nothing was sent.
+		// Counting it under dispatch_by_lane would credit glm with work it
+		// never did and dilute coverage_pct. It gets its own counter instead —
+		// for a gate whose premise is "an export is always countable", the
+		// REFUSALS have to be countable too (review 2026-07-25).
+		if r.OutcomeClass == "egress_denied" {
+			s.EgressDenied++
+			if s.EgressDeniedByLane == nil {
+				s.EgressDeniedByLane = map[string]int{}
+			}
+			s.EgressDeniedByLane[r.Lane]++
+			continue
 		}
 		// S3R-4: a strategy DAG step is INTERNAL orchestration, not an
 		// interactive delegation the brain "could have delegated but didn't" —

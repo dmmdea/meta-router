@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 )
 
 // runVerify is the RS8 gate entrypoint: one tiny live sonnet capture, key-set
@@ -19,6 +21,9 @@ func runVerify(fixtureDir string) error {
 	}
 	cmd := exec.Command("claude", "-p", "Reply with exactly: ok",
 		"--model", "sonnet", "--output-format", "json")
+	// R10: never hand a child an ambient API key — this is a LIVE billable call
+	// and it writes no dispatch receipt, so unscrubbed spend here is invisible.
+	cmd.Env = childenv.Scrub(os.Environ())
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr

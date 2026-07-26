@@ -7,12 +7,15 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/admission"
 	"github.com/dmmdea/meta-router/internal/orch/claudelane"
 	"github.com/dmmdea/meta-router/internal/orch/codexlane"
 	"github.com/dmmdea/meta-router/internal/orch/dispatch"
+	"github.com/dmmdea/meta-router/internal/orch/egress"
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/glmlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
@@ -367,10 +370,57 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	now := time.Now().UTC()
 	cfg := orchcfg.Load(configPath())
 	fzs, _ := fuses.Load(fusesPath())
+	egressReason := ""
 	l, warn := ledger.OpenChecked(ledgerPath())
 	if warn != "" {
 		fmt.Fprintln(os.Stderr, "warn:", warn)
 	}
+	// DATA BOUNDARY, resolved before anything is sent and BEFORE the quota gate.
+	// egress.Plan resolves the EFFECTIVE working directory — an empty CWD means
+	// the child inherits the orchestrator's cwd, not "no context" — and either
+	// allowlists it, enforces genuine prompt-only in a neutral directory, or
+	// refuses. --force must not bypass it: a data export is not a quota
+	// judgement (same force-proof class as the R10 billing hard-stop).
+	// --extra can widen the child's reach past cwd (--add-dir), so every such
+	// directory is gated too.
+	egressOpt := egress.Options{AllowRepos: cfg.GLMAllowRepos, PromptOnlyDenied: cfg.EgressPromptOnlyDenied}
+	denyEgress := func(reason string) (int, error) {
+		rec := dispatch.Record{
+			TS: now, Lane: "glm", Model: model, OutcomeClass: "egress_denied",
+			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
+			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
+			Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
+			Admit: false, AdmitState: "egress_denied", AdmitReason: reason, Desc: desc,
+			EgressGate: reason,
+		}
+		sf.stamp(&rec)
+		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (egress denial)")
+		fmt.Fprintln(os.Stderr, "BLOCKED:", reason)
+		b, _ := json.MarshalIndent(map[string]any{
+			"egress_denied": true, "lane": "glm", "reason": reason,
+		}, "", "  ")
+		fmt.Fprintln(out, string(b))
+		return exitEgressDenied, nil
+	}
+	planDir, planCleanup, ed := egress.Plan("glm", cwd, egressOpt)
+	defer planCleanup()
+	if !ed.Allowed {
+		return denyEgress(ed.Reason)
+	}
+	// --extra is forwarded VERBATIM to the child, so it is a second export
+	// channel with the same reach as cwd. Gate every path it carries, and refuse
+	// anything the gate cannot account for: --add-dir is variadic in the shipped
+	// binary, so a token the extractor does not model is a token that reaches the
+	// provider ungated (review 2026-07-25).
+	if bad := egress.RefuseExtras(extra); len(bad) > 0 {
+		return denyEgress("third-party lane glm denied: --extra contains " +
+			strconv.Itoa(len(bad)) + " token(s) that may name a filesystem path: " +
+			strings.Join(bad, " ") +
+			" — they are forwarded VERBATIM to the provider and resolved by the child against ITS working directory, so this gate cannot judge what they point at. Repository context reaches a third-party lane through -cwd plus glm_allow_repos, which is gated in one place with one rule.")
+	}
+	cwd = planDir // ALWAYS explicit: never let the child inherit our cwd
+	egressReason = ed.Reason
+
 	g := glmGate(l.Snapshot(), glmAlertPath(), now, defaultThresholds, force)
 	req := claudelane.RunReq{Prompt: prompt, Model: model, Effort: effort, CWD: cwd,
 		TimeoutSec: timeoutSec, Extra: extra}
@@ -381,6 +431,9 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 			Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: desc,
+			// The gate already ruled before quota was consulted; omitting it here
+			// made "every decision lands on the receipt" false for every deferral.
+			EgressGate: egressReason,
 		}
 		sf.stamp(&rec)
 		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (deferral)")
@@ -401,6 +454,10 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 		b, _ := json.MarshalIndent(map[string]any{
 			"dry_run": true, "admit": true, "admit_state": g.State, "admit_reason": g.Reason,
 			"forced": g.Forced, "args": argv, "base_url": glmlane.BaseURL,
+			// The data-boundary decision and the directory the child would
+			// ACTUALLY run in — without these a dry-run cannot show what would
+			// leave the machine, which is the whole question for this lane.
+			"egress_gate": egressReason, "effective_cwd": cwd,
 		}, "", "  ")
 		fmt.Fprintln(out, string(b))
 		return 0, nil
@@ -420,6 +477,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 				Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 				RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 				Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: desc,
+				EgressGate: egressReason,
 			}
 			sf.stamp(&rec)
 			warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (deferral)")
@@ -462,7 +520,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
 		TokensIn: in, TokensOut: outTok, NumTurns: o.NumTurns, NotionalUSD: o.NotionalUSD,
 		Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
-		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
+		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc, EgressGate: egressReason,
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")

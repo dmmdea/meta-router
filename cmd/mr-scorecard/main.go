@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 	"github.com/dmmdea/meta-router/internal/policyeval"
 	"github.com/dmmdea/meta-router/internal/policyzoo"
@@ -348,7 +349,7 @@ type SplitInfo struct {
 // as the 2026-07-20 label→class proxy bug). It also spams the live dispatch
 // log with 56 consult receipts per scorecard run.
 func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool) (policyeval.Policy, error) {
-	var extraEnv []string
+	stateOverride := "" // set when probing in a neutral state dir
 	if !liveQuota {
 		dir, err := os.MkdirTemp("", "mr-scorecard-neutral-*")
 		if err != nil {
@@ -380,13 +381,19 @@ func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool) (p
 				return nil, fmt.Errorf("neutral state seed %s: %w", f, werr)
 			}
 		}
-		extraEnv = append(os.Environ(), "MR_ORCH_STATE="+dir)
+		stateOverride = dir
 	}
 	laneFor := map[string]string{}
 	for task, prompt := range promptOf {
 		cmd := exec.Command(bin, "route", "-desc", prompt, "-no-receipt")
-		if extraEnv != nil {
-			cmd.Env = extraEnv
+		// R10 (canary B13): even a read-only child gets a scrubbed environment.
+		// The neutral-state variant EXTENDS this rather than replacing it — the
+		// old shape assigned cmd.Env twice, and the second assignment named a
+		// variable, so neither a reader nor the canary could tell a scrubbed
+		// override from an ambient one. Same bytes, provably scrubbed.
+		cmd.Env = childenv.Scrub(os.Environ())
+		if stateOverride != "" {
+			cmd.Env = append(cmd.Env, "MR_ORCH_STATE="+stateOverride)
 		}
 		out, err := cmd.Output()
 		if err != nil {
