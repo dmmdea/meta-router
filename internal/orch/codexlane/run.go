@@ -54,7 +54,12 @@ var (
 // WARNed at the caller.
 func VersionGate() (version string, ok bool) {
 	versionOnce.Do(func() {
-		out, err := exec.Command("codex", "--version").Output()
+		// Scrubbed like every other lane spawn: `--version` cannot itself bill,
+		// but this is the codex binary and B13 admits no per-site exceptions
+		// reasoned from intent — only from argv[0] not being a model lane.
+		vc := exec.Command("codex", "--version")
+		vc.Env = childenv.Scrub(os.Environ())
+		out, err := vc.Output()
 		if err != nil {
 			cachedVersion = "unknown (" + err.Error() + ")"
 			return

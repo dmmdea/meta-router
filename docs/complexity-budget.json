@@ -1,4 +1,4 @@
 {
-  "_note": "B12 ratchet: total non-test Go LOC ceiling. Raising this is a conscious act reviewed in the PR that needs it. Measured 17385 at 2026-07-25 (v0.15.0: egress gate + childenv scrub + B13/B14 canaries + a2 staleness guard). Ceiling deliberately NOT raised — only 115 lines of headroom remain, so the next feature-bearing PR must raise it consciously rather than discover it. Keep this number in sync with the measurement — a stale _note was itself an audit finding (it read 15740 while the tree held 16137).",
-  "max_go_loc": 17500
+  "_note": "B12 ratchet: total non-test Go LOC ceiling. Raising this is a conscious act reviewed in the PR that needs it. Measured 17973 at 2026-07-25 (v0.15.0 review round 2: internal/canary/b13.go — the AST spawn/scrub resolver that replaced a grep whose three successive shapes all passed while the invariant was broken — plus the egress variadic --extra extractor and Windows junction canonicalization). Raised 17500 -> 18300: the growth is a structural check replacing a textual one, which is the trade this budget exists to make deliberately rather than to forbid. Keep this number in sync with the measurement — a stale _note was itself an audit finding (it read 15740 while the tree held 16137).",
+  "max_go_loc": 18300
 }

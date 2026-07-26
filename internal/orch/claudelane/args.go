@@ -9,9 +9,12 @@ type RunReq struct {
 	Prompt, Model, Effort, CWD string
 	TimeoutSec                 int
 	Extra                      []string // operator passthrough (R11); validated against the forbidden list
-	// Env entries are APPENDED to os.Environ() for the child (glm lane: base
-	// URL + auth token + model pins). Empty = claude-lane behavior, unchanged.
-	// Never placed in argv, never logged (R10).
+	// Env entries are appended to the SCRUBBED ambient environment for the child
+	// (glm lane: base URL + auth token + model pins) — see childEnv. They are
+	// applied AFTER the scrub precisely so a lane's deliberate pins survive it,
+	// which is also why this is not "appended to os.Environ()": that wording
+	// predated the scrub and read as though the ambient env passed through whole.
+	// Empty = claude-lane behavior, unchanged. Never in argv, never logged (R10).
 	Env []string
 }
 

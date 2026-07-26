@@ -139,34 +139,32 @@ func Check(lane, cwd string, opt Options) Decision {
 		}
 		return Decision{Allowed: true, Reason: "prompt-only (no repository context leaves)"}
 	}
-	abs, err := filepath.Abs(cwd)
+	abs, err := canonical(cwd)
 	if err != nil {
 		return Decision{Allowed: false,
-			Reason: fmt.Sprintf("third-party lane %s denied: working directory %q cannot be resolved (fail closed)", lane, cwd)}
+			Reason: fmt.Sprintf("third-party lane %s denied: working directory %q cannot be resolved to a real path (fail closed): %v", lane, cwd, err)}
 	}
 	if len(opt.AllowRepos) == 0 {
 		return Decision{Allowed: false,
 			Reason: fmt.Sprintf("third-party lane %s denied: dispatch carries repository context (%s) and no repo is allowlisted. Add the repo to glm_allow_repos in config.json, or dispatch without a working directory.", lane, abs)}
 	}
-	// Resolve links on the cwd side: filepath.Abs is LEXICAL, so a junction
-	// inside an allowlisted repo would otherwise re-export its target.
-	// Fail closed if the path cannot be resolved at all.
-	if real, rerr := filepath.EvalSymlinks(abs); rerr == nil {
-		abs = real
-	} else if !os.IsNotExist(rerr) {
-		return Decision{Allowed: false,
-			Reason: fmt.Sprintf("third-party lane %s denied: %s cannot be resolved through links (fail closed)", lane, abs)}
-	}
 	for _, root := range opt.AllowRepos {
 		if root == "" {
 			continue
 		}
-		rabs, rerr := filepath.Abs(root)
-		if rerr != nil {
-			continue // an unresolvable allowlist entry allows nothing
+		// A RELATIVE allowlist entry resolves against whatever directory the
+		// orchestrator happens to be standing in, so "." would silently
+		// allowlist every checkout in turn. Refuse it instead of resolving it.
+		if !fullyQualified(root) {
+			return Decision{Allowed: false,
+				Reason: fmt.Sprintf("third-party lane %s denied: glm_allow_repos entry %q is not fully qualified, so what it allows depends on the orchestrator's current directory or drive (%q self-allowlists any checkout). Use an absolute path.", lane, root, ".")}
 		}
-		if real, lerr := filepath.EvalSymlinks(rabs); lerr == nil {
-			rabs = real
+		rabs, rerr := canonical(root)
+		if rerr != nil {
+			// An allowlist entry we cannot resolve allows nothing, and the
+			// operator meant it to allow something — say so rather than skip.
+			return Decision{Allowed: false,
+				Reason: fmt.Sprintf("third-party lane %s denied: glm_allow_repos entry %q cannot be resolved to a real path (fail closed): %v", lane, root, rerr)}
 		}
 		if within(abs, rabs) {
 			return Decision{Allowed: true,
@@ -175,6 +173,73 @@ func Check(lane, cwd string, opt Options) Decision {
 	}
 	return Decision{Allowed: false,
 		Reason: fmt.Sprintf("third-party lane %s denied: %s is not inside any allowlisted repo (fail closed — multi-brand isolation)", lane, abs)}
+}
+
+// canonical resolves p to the path the filesystem will actually use, so the
+// containment test compares real locations rather than spellings.
+//
+// filepath.Abs alone is LEXICAL. filepath.EvalSymlinks is not enough either —
+// see realpath_windows.go for why a junction sails through it. When the leaf
+// does not exist yet it cannot itself be a reparse point, but an ANCESTOR can
+// be, so we resolve the deepest existing ancestor and re-attach the rest.
+// Anything that exists but cannot be resolved is a hard failure: this function's
+// callers all fail closed on an error, which is the only safe default for a
+// data boundary.
+func canonical(p string) (string, error) {
+	abs := p
+	if isUNC(p) {
+		// filepath.Abs MANGLES a UNC path on Windows: \\server\share\x becomes
+		// <current-drive>\server\share\x, silently pointing the containment test
+		// at a local directory that has nothing to do with the share.
+		abs = filepath.Clean(p)
+	} else {
+		a, err := filepath.Abs(p)
+		if err != nil {
+			return "", err
+		}
+		abs = a
+	}
+	rest := []string{}
+	dir := abs
+	for {
+		real, rerr := realPath(dir)
+		if rerr == nil {
+			return filepath.Clean(filepath.Join(append([]string{real}, rest...)...)), nil
+		}
+		if !os.IsNotExist(rerr) {
+			return "", rerr
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Nothing along the path exists (a fabricated path in a test, or a
+			// drive that is not mounted). Lexical is all there is, and since
+			// nothing exists there is no reparse point to hide behind.
+			return filepath.Clean(abs), nil
+		}
+		rest = append([]string{filepath.Base(dir)}, rest...)
+		dir = parent
+	}
+}
+
+// isUNC reports whether p is a UNC path (\\server\share\...).
+func isUNC(p string) bool {
+	return strings.HasPrefix(filepath.ToSlash(p), "//")
+}
+
+// fullyQualified reports whether a path names a location independent of BOTH the
+// process's current directory and its current drive.
+//
+// filepath.IsAbs is not sufficient on Windows in either direction:
+//   - "/tmp/x" and "\tmp\x" are NOT absolute (verified), and filepath.Abs
+//     resolves them against whatever drive the process is on — so an allowlist
+//     entry spelled that way means a different directory depending on where the
+//     orchestrator was launched.
+//   - "C:x" is drive-RELATIVE and must be refused for the same reason, even
+//     though it carries a volume name.
+//   - a UNC path is fully qualified but IsAbs reports false for it, so checking
+//     IsAbs alone would refuse a legitimate network-share entry.
+func fullyQualified(p string) bool {
+	return filepath.IsAbs(p) || isUNC(p)
 }
 
 // within reports whether path p is inside root, comparing cleaned paths and
@@ -201,23 +266,89 @@ func within(p, root string) bool {
 	return true
 }
 
-// AddDirs extracts directories a lane's --extra arguments would grant the child
-// beyond its working directory. Claude Code's --add-dir widens file access, so
-// gating only cwd would leave a second, unmeasured export channel open (found
-// in review, 2026-07-25). Accepts both "--add-dir X" and "--add-dir=X".
-func AddDirs(extra []string) []string {
-	var out []string
+// pathBearing are the flags whose values are filesystem paths; the bool is
+// whether the flag is VARIADIC (commander's `<x...>` form, which greedily
+// consumes every following token until the next one starting with '-').
+//
+// Read out of the shipped `claude` executable's own commander registrations
+// rather than from documentation — the first version of this extractor modelled
+// --add-dir as arity-1 and the binary declares `--add-dir <directories...>`, so
+// `--add-dir <allowed> <client>` sent the client checkout to a PRC-hosted
+// provider with the receipt certifying it as allowlisted. A plain typo
+// (`--add-dir ../lib ../shared`) was enough; no adversary required
+// (review 2026-07-25).
+var pathBearing = map[string]bool{
+	"--add-dir":    true,  // <directories...>
+	"--mcp-config": true,  // <configs...> — a config file can name any path
+	"--file":       true,  // <specs...>
+	"--sparse":     true,  // <paths...>
+	"--plugin-dir": false, // <path>
+	"--settings":   false, // <file-or-json>
+	"--debug-file": false, // <path>
+	"--output-dir": false, // <dir>
+	"--report":     false, // <path>
+}
+
+// pathFree are flags that cannot carry a filesystem path; the int is how many
+// following tokens the flag consumes.
+//
+// Everything in neither table is UNACCOUNTED and therefore denied for a
+// third-party lane. That asymmetry is deliberate: the shipped CLI has 82
+// options and seven variadic ones, and it grows. A gate that enumerates only
+// the dangerous flags fails SILENTLY the first time a new path-bearing flag
+// ships, which is exactly how the --add-dir arity bug stayed invisible. A gate
+// that enumerates the safe ones fails LOUDLY, and a loud failure gets fixed.
+var pathFree = map[string]int{
+	"--model": 1, "--output-format": 1, "--input-format": 1, "--effort": 1,
+	"--permission-mode": 1, "--session-id": 1, "--agents": 1,
+	"-p": 0, "--print": 0, "--verbose": 0, "--debug": 0,
+	"--dangerously-skip-permissions": 0, "--strict-mcp-config": 0,
+	"--include-partial-messages": 0, "--replay-user-messages": 0, "--safe-mode": 0,
+}
+
+// Extras returns every filesystem path a lane's --extra arguments would grant
+// the child beyond its working directory, plus the tokens this gate could not
+// account for. A third-party dispatch must gate each path AND refuse outright
+// when unaccounted is non-empty — see Options and the tables above.
+//
+// Values attached with '=' are handled too, and a variadic flag keeps
+// collecting after its '=' value: over-collecting only gates MORE paths, which
+// is the safe direction to be wrong in.
+func Extras(extra []string) (paths []string, unaccounted []string) {
 	for i := 0; i < len(extra); i++ {
-		a := extra[i]
-		switch {
-		case a == "--add-dir":
-			if i+1 < len(extra) {
-				out = append(out, extra[i+1])
-				i++
-			}
-		case strings.HasPrefix(a, "--add-dir="):
-			out = append(out, strings.TrimPrefix(a, "--add-dir="))
+		tok := extra[i]
+		if !strings.HasPrefix(tok, "-") || tok == "-" {
+			// A bare positional forwarded to the child: the prompt is already
+			// passed explicitly, so this is something the gate does not model.
+			unaccounted = append(unaccounted, tok)
+			continue
 		}
+		name, val, hasVal := strings.Cut(tok, "=")
+		variadic, isPath := pathBearing[name]
+		if isPath {
+			if hasVal {
+				paths = append(paths, val)
+			}
+			if !hasVal || variadic {
+				// Mirror commander: consume following tokens until the next flag.
+				// Non-variadic flags take exactly one.
+				for i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
+					paths = append(paths, extra[i+1])
+					i++
+					if !variadic {
+						break
+					}
+				}
+			}
+			continue
+		}
+		if skip, ok := pathFree[name]; ok {
+			if !hasVal {
+				i += skip
+			}
+			continue
+		}
+		unaccounted = append(unaccounted, tok)
 	}
-	return out
+	return paths, unaccounted
 }

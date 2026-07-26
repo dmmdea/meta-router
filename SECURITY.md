@@ -40,15 +40,27 @@ send data off the machine. Being explicit about that is the point of this sectio
   Anthropic/OpenAI subscriptions (currently `glm`, and the seated-but-unshipped
   `groq`/`cloudflare`/`gemini`/`nim`) is **deny-by-default** for repository context: a
   dispatch may only run inside a directory you have explicitly allowlisted in
-  `glm_allow_repos`. An unresolvable path, a symlink out of the tree, a `--add-dir` outside
-  the allowlist, and an empty allowlist all **fail closed**, and `--force` does not bypass it
-  — `--force` overrides quota judgement, never a data export.
+  `glm_allow_repos`. Entries must be **absolute** — a relative entry would resolve against
+  whatever directory the orchestrator happens to be in, so `"."` would self-allowlist every
+  checkout in turn, and it is refused. An unresolvable path, a link or junction whose target
+  leaves the allowlisted tree, and an empty allowlist all **fail closed**, and `--force` does
+  not bypass it — `--force` overrides quota judgement, never a data export.
   - Because `os/exec` runs a child in the parent's directory, "no working directory" is not
     the same as "no repository context". When the inherited directory is not allowlisted, the
     dispatch is run in a **neutral empty directory** so prompt-only is enforced, not assumed.
-  - Set `egress_prompt_only_denied: true` to close third-party lanes entirely.
-  - Every dispatch records its gate decision and basis on the receipt (`egress_gate`), so an
-    export is always countable after the fact.
+  - **`--extra` is gated on the same footing as the working directory**, because it is
+    forwarded verbatim to the child. Values of path-bearing flags are checked against the
+    allowlist, including the *whole* value list of a variadic flag such as
+    `--add-dir <directories...>` or `--mcp-config <configs...>`. Any token the gate cannot
+    account for — an unrecognized flag, a bare positional — is **refused**, on the reasoning
+    that an unmodelled flag may carry a path and the CLI's flag set grows over time.
+  - `egress_prompt_only_denied: true` closes the **prompt-only** path, i.e. dispatches that
+    carry no repository context at all. It is a tightening of that one case, **not** a master
+    switch: with a repo allowlisted, dispatches inside it still run. To close a third-party
+    lane entirely, empty its allowlist and set this flag, or remove the lane from routing.
+  - Every dispatch records its gate decision and basis on the receipt (`egress_gate`) —
+    including quota deferrals and paced deferrals, which are decided after the gate has
+    already ruled — so an export is always countable after the fact.
 - **Credentials are never handed to a child by accident.** Lane children get a **scrubbed**
   environment: API keys, auth tokens, base-URL and cloud-routing overrides, OAuth token file
   descriptors and model pins are removed from the ambient environment before each lane appends

@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/admission"
@@ -405,9 +407,21 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	if !ed.Allowed {
 		return denyEgress(ed.Reason)
 	}
-	for _, extraDir := range egress.AddDirs(extra) {
-		if d := egress.Check("glm", extraDir, egressOpt); !d.Allowed {
-			return denyEgress("--extra --add-dir " + extraDir + ": " + d.Reason)
+	// --extra is forwarded VERBATIM to the child, so it is a second export
+	// channel with the same reach as cwd. Gate every path it carries, and refuse
+	// anything the gate cannot account for: --add-dir is variadic in the shipped
+	// binary, so a token the extractor does not model is a token that reaches the
+	// provider ungated (review 2026-07-25).
+	extraPaths, unaccounted := egress.Extras(extra)
+	if len(unaccounted) > 0 {
+		return denyEgress("third-party lane glm denied: --extra contains " +
+			strconv.Itoa(len(unaccounted)) + " token(s) this data-boundary gate cannot account for: " +
+			strings.Join(unaccounted, " ") +
+			" — they are forwarded verbatim to the provider, and an unmodelled flag may carry a filesystem path. Add the flag to egress.pathFree (cannot carry a path) or egress.pathBearing (its values get gated).")
+	}
+	for _, p := range extraPaths {
+		if d := egress.Check("glm", p, egressOpt); !d.Allowed {
+			return denyEgress("--extra path " + p + ": " + d.Reason)
 		}
 	}
 	cwd = planDir // ALWAYS explicit: never let the child inherit our cwd
@@ -423,6 +437,9 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 			Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: desc,
+			// The gate already ruled before quota was consulted; omitting it here
+			// made "every decision lands on the receipt" false for every deferral.
+			EgressGate: egressReason,
 		}
 		sf.stamp(&rec)
 		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (deferral)")
@@ -466,6 +483,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 				Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 				RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
 				Admit: false, AdmitState: g.State, AdmitReason: g.Reason, Desc: desc,
+				EgressGate: egressReason,
 			}
 			sf.stamp(&rec)
 			warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (deferral)")

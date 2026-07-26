@@ -48,17 +48,26 @@ A concept change that arrives as a quiet test edit is a review-blocking defect.
   independently by design. verify: `TestCanaryB11VersionParity`
 - **B12 — Complexity ratchet.** Non-test Go LOC stays under the committed
   budget; raising it is a conscious, reviewed act. verify: `TestCanaryB12ComplexityRatchet`
-- **B13 — Every spawn gets a scrubbed environment.** No process this system
-  starts inherits the ambient env unfiltered: an ambient `ANTHROPIC_API_KEY` is
-  honoured unconditionally by headless Claude Code, ahead of OAuth, which turns
-  a "subscription" dispatch into metered spend while the receipt still reads
-  `cash_usd: 0` (R10). Exemptions are an explicit allowlist with a stated
-  reason, never a content heuristic. verify: `TestCanaryB13EverySpawnScrubsEnv`
-- **B14 — Every third-party lane adapter reaches the egress gate.** The gate's
-  predicate is lane-generic but enforcement is NOT inherited — an adapter that
-  never calls `egress.Plan` is ungated and exports whatever cwd it runs in.
-  Seating a new free lane means wiring the gate, not trusting it.
-  verify: `TestCanaryB14ThirdPartyLanesAreGated`
+- **B13 — Every spawn that could be a model lane gets a scrubbed environment.**
+  An ambient `ANTHROPIC_API_KEY` is honoured unconditionally by headless Claude
+  Code, ahead of OAuth, which turns a "subscription" dispatch into metered spend
+  while the receipt still reads `cash_usd: 0` (R10). Checked PER SITE and
+  structurally: one scrub in a file does not cover a second spawn in it, and a
+  later `cmd.Env` assignment that does not re-derive from the scrub undoes it.
+  The only exemption is a spawn whose argv[0] is a string literal naming a
+  non-lane program (`git`, `taskkill`, …) — a VARIABLE command could resolve to
+  a model binary and is never exempt. Scope is deliberately "could be a model
+  lane", not "every process": `git` inheriting `PATH` is not a billing risk, and
+  an invariant stated wider than it is enforced is a false invariant.
+  verify: `TestCanaryB13EverySpawnScrubsEnv`
+- **B14 — Every selectable third-party lane has a dispatcher that reaches the
+  egress gate.** The gate's predicate is lane-generic but enforcement is NOT
+  inherited — an adapter that never calls `egress.Plan` is ungated and exports
+  whatever cwd it runs in. Seating a new free lane means wiring the gate, not
+  trusting it. B14 is a TRIPWIRE for lanes not yet written; it asserts the call
+  exists, which a mutation can satisfy while still leaking. Obedience is proved
+  behaviourally on `effective_cwd` and the exit code.
+  verify: `TestCanaryB14ThirdPartyLanesAreGated`, `cmd/mr-orchestrate/egress_dispatch_test.go`
 <!-- invariants:end -->
 
 ## Review protocol (W8)

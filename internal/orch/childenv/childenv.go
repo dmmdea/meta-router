@@ -22,7 +22,10 @@
 package childenv
 
 import (
+	"fmt"
+	"io"
 	"strings"
+	"sync"
 )
 
 // denied are exact environment names removed before any lane binary is spawned.
@@ -114,9 +117,8 @@ func Scrub(env []string) []string {
 	return out
 }
 
-// Removed reports which denied names were present, for a one-time warning: an
-// operator who set one deserves to know it was ignored rather than wonder why
-// their key had no effect.
+// Removed reports which denied names were present: an operator who set one
+// deserves to know it was ignored rather than wonder why their key had no effect.
 func Removed(env []string) []string {
 	var hit []string
 	for _, kv := range env {
@@ -130,3 +132,22 @@ func Removed(env []string) []string {
 	}
 	return hit
 }
+
+// WarnOnce prints the names Scrub will drop, at most once per process, to w.
+//
+// Both halves matter. ONCE: the claude lane called Removed inline and re-printed
+// on every dispatch, so a batch run emitted the same warning dozens of times —
+// the doc comment said "one-time" while the code said per-call. AT ALL: the other
+// eight spawn sites scrubbed silently, so an operator with an ambient key learned
+// about it only if their dispatch happened to take the claude path. Warning is a
+// property of the scrub, not of one lane, so it lives here.
+func WarnOnce(w io.Writer, env []string) {
+	warnOnce.Do(func() {
+		if dropped := Removed(env); len(dropped) > 0 {
+			fmt.Fprintln(w, "WARN: ignoring credential/routing env for child processes:",
+				strings.Join(dropped, ", "), "(R10: subscription auth only)")
+		}
+	})
+}
+
+var warnOnce sync.Once

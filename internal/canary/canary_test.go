@@ -272,69 +272,77 @@ func TestCanaryAdjudicationLedger(t *testing.T) {
 	}
 }
 
-// B13 — every process this system spawns gets a SCRUBBED environment. R4 was
-// first "fixed" at two of five spawn sites; probe/verify/locallane still handed
-// children the ambient env, and probe+verify make LIVE billable calls that
-// write no receipt, so unscrubbed spend there is invisible (review 2026-07-25).
-// A grep-level canary is crude, but the alternative — remembering — already
-// failed once.
+// B13 — every process this system spawns gets a SCRUBBED environment.
+//
+// PER-SITE, via the AST (canary.Spawns). Three earlier shapes of this canary all
+// passed while the invariant was broken, each mutation-proven:
+//  1. strings.Contains(src, "childenv.Scrub") was satisfied by a COMMENT, so
+//     deleting the call still passed.
+//  2. It then matched per FILE, so ONE scrub covered every exec.Command in that
+//     file — codexlane has 3 spawns and 1 scrub, locallane 2 and 1, claudelane
+//     2 and 1. Adding a fresh unscrubbed `claude -p` spawn to any of them was
+//     green.
+//  3. A later `cmd.Env = os.Environ()` silently undid an earlier scrubbed
+//     assignment; only the LAST assignment to X.Env decides, so that is what is
+//     checked now.
+//
+// Exemption is decided by the SPAWN's own literal argv[0], never by the
+// containing file's text: the old "process-control helper" escape hatch keyed on
+// "taskkill", which all three lane files contain to kill a timed-out child.
 func TestCanaryB13EverySpawnScrubsEnv(t *testing.T) {
 	root, err := RepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := GoSourceFiles(root, false)
+	spawns, err := Spawns(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	spawn := regexp.MustCompile(`exec\.Command(Context)?\(`)
-	scrubCall := regexp.MustCompile(`childenv\.Scrub\(`)
-	// Exemptions are an explicit ALLOWLIST, not a content heuristic. The first
-	// version excused any file mentioning "taskkill"/"git"/"go" as a
-	// "process-control helper" — and claudelane, codexlane and locallane all kill
-	// their child on timeout, so the three most important lane spawn sites were
-	// silently exempt: deleting their scrub still PASSED (mutation-tested
-	// 2026-07-25). An escape hatch keyed on the condition under test is not an
-	// escape hatch, it is a hole. Adding a file here must be a conscious act with
-	// a stated reason.
-	exempt := map[string]string{
-		"cmd/mr-goldverify/main.go": "spawns only git, go and the gold task's own verify command — no model lane, so R10 does not apply",
+	if len(spawns) < 12 {
+		t.Fatalf("B13 resolved only %d spawn sites; the AST walk has gone blind (a naming or import change?) and would pass vacuously", len(spawns))
 	}
-	for _, f := range files {
-		rel := filepath.ToSlash(strings.TrimPrefix(filepath.ToSlash(f), filepath.ToSlash(root)+"/"))
-		if strings.Contains(rel, "internal/canary/") {
-			continue // this file's own regexes
-		}
-		if _, ok := exempt[rel]; ok {
+	gated := 0
+	for _, s := range spawns {
+		exempt, why := s.Exempt()
+		if exempt {
 			continue
 		}
-		b, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Comments stripped: a comment MENTIONING childenv.Scrub used to satisfy
-		// this check, so deleting the call still passed (mutation-tested).
-		src := StripGoComments(string(b))
-		if !spawn.MatchString(src) {
+		gated++
+		if s.Var == "" {
+			t.Errorf("B13 violated — %s:%d (%s) spawns %q with no handle, so no environment can be set on it; %s. Assign the Cmd and scrub its Env.",
+				s.File, s.Line, s.Func, s.Command, why)
 			continue
 		}
-		if !scrubCall.MatchString(src) {
-			t.Errorf("B13 violated — %s spawns a process but never calls childenv.Scrub; an ambient ANTHROPIC_API_KEY would redirect it to metered spend (R10). If this file genuinely spawns no model lane, add it to the exempt map with a reason.", rel)
+		if !s.Scrubbed {
+			t.Errorf("B13 violated — %s:%d (%s) spawns %q but %s.Env is not the result of childenv.Scrub (%s); an ambient ANTHROPIC_API_KEY would redirect it to metered spend (R10)",
+				s.File, s.Line, s.Func, s.Command, s.Var, why)
 		}
+	}
+	if gated == 0 {
+		t.Fatal("B13 gated ZERO spawn sites — every site was treated as exempt, so this canary is asserting nothing")
 	}
 }
 
-// B14 — every third-party lane adapter reaches the egress gate.
+// B14 — every reachable third-party lane has a dispatcher that reaches the gate.
 //
-// The gate's PREDICATE is lane-generic, but enforcement is not inherited: an
-// adapter that never calls egress.Plan is simply ungated, and the CHANGELOG for
-// v0.15.0 originally claimed the approved free lanes "inherit" the gate when
-// exactly one adapter (glm) called it. This canary turns that claim into a
-// mechanical one — seating groq/cloudflare/gemini as a run<Lane>Lane dispatcher
-// without wiring the gate fails here rather than exporting a client checkout.
+// SCOPE, stated plainly because the earlier version of this canary was mistaken
+// for enforcement: B14 is a TRIPWIRE for lanes that do not exist yet. It cannot
+// prove the gate is obeyed — its assertion is that egress.Plan is CALLED, and
+// review demonstrated two compiling mutations (`_ = planDir`, and discarding the
+// returned dir at the call site) that keep this canary green while exporting the
+// caller's repository. Actual enforcement is behavioural and lives in
+// cmd/mr-orchestrate/egress_dispatch_test.go, which asserts on effective_cwd and
+// the exit code; those tests DO catch both mutations (verified). Keep both: this
+// one fires when a NEW free lane is seated, that one fires when the existing
+// wiring rots.
 //
-// The lane set comes from egress.ThirdPartyLanes, so the canary cannot drift
-// from the gate it polices.
+// Two holes the first version had, closed here:
+//   - it only inspected functions named run<Lane>Lane, so a differently-named
+//     dispatcher was invisible. Reachability now comes from the `run` command's
+//     own lane switch: a lane you cannot select cannot leak, and a lane you CAN
+//     select must have a dispatcher this canary can find.
+//   - its len(bodies)==0 tripwire was permanently satisfied by glm, so it could
+//     never fire.
 func TestCanaryB14ThirdPartyLanesAreGated(t *testing.T) {
 	root, err := RepoRoot()
 	if err != nil {
@@ -344,9 +352,8 @@ func TestCanaryB14ThirdPartyLanesAreGated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Collect each lane's dispatcher body: `func run<Lane>Lane(` up to the next
-	// top-level func. fn keeps the SOURCE spelling (runGLMLane, not runglmLane)
-	// so a failure names something greppable.
+	// Lanes selectable through `run --lane <x>`: `case "<lane>":` in the switch.
+	selectable := map[string]bool{}
 	bodies, fn := map[string]string{}, map[string]string{}
 	for _, f := range files {
 		if strings.Contains(filepath.ToSlash(f), "/internal/canary/") {
@@ -356,26 +363,30 @@ func TestCanaryB14ThirdPartyLanesAreGated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// StripGoComments also normalizes CRLF→LF, which the `\n}\n` body
-		// terminator below needs: a fresh `git clone` on Windows checks these
-		// files out with CRLF and the match would silently never fire. Both this
-		// and the comment stripping are mutation-tested, not assumed.
+		// StripGoComments normalizes CRLF→LF, which the body terminator below
+		// needs: a fresh `git clone` on Windows checks these files out with CRLF
+		// and the match would silently never fire. Mutation-tested in both shapes.
 		src := StripGoComments(string(b))
 		for _, lane := range egress.ThirdPartyLanes {
-			re := regexp.MustCompile(`(?is)\nfunc (run` + regexp.QuoteMeta(lane) + `Lane)\(.*?(\n}\n)`)
+			if strings.Contains(src, `case "`+lane+`":`) {
+				selectable[lane] = true
+			}
+			re := regexp.MustCompile("(?is)\nfunc (run" + regexp.QuoteMeta(lane) + "Lane)\\(.*?(\n}\n)")
 			if m := re.FindStringSubmatch(src); m != nil {
 				bodies[lane], fn[lane] = m[0], m[1]
 			}
 		}
 	}
-	if len(bodies) == 0 {
-		t.Fatal("B14 found NO run<Lane>Lane dispatcher for any third-party lane — either the naming convention changed (fix this canary) or the gate now polices nothing")
-	}
-	if _, ok := bodies["glm"]; !ok {
-		t.Error("B14: glm is the shipped third-party lane and its dispatcher was not found — the convention this canary keys on has changed and the check has gone inert")
+	if !selectable["glm"] {
+		t.Fatal("B14: glm is a shipped third-party lane but no `case \"glm\":` was found — the lane switch this canary keys on has changed and the check has gone inert")
 	}
 	planCall := regexp.MustCompile(`egress\.Plan\(`)
-	for lane, body := range bodies {
+	for lane := range selectable {
+		body, ok := bodies[lane]
+		if !ok {
+			t.Errorf("B14 violated — lane %q is selectable via `run --lane %s` but has no run%sLane dispatcher this canary can inspect; a third-party lane must not be reachable without a gate the canary can see (rename it to the convention, or wire the gate and update this canary deliberately)", lane, lane, strings.ToUpper(lane))
+			continue
+		}
 		if !planCall.MatchString(body) {
 			t.Errorf("B14 violated — %s (lane %q) dispatches a THIRD-PARTY lane but never calls egress.Plan; prompt and repo context would leave with no data-boundary decision and no receipt entry", fn[lane], lane)
 		}

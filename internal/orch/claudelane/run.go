@@ -3,13 +3,11 @@ package claudelane
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -35,10 +33,7 @@ func Run(ctx context.Context, req RunReq) (Outcome, []byte, error) {
 	}
 	// R10 data/billing boundary — see childEnv.
 	cmd.Env = childEnv(os.Environ(), req.Env)
-	if dropped := childenv.Removed(os.Environ()); len(dropped) > 0 {
-		fmt.Fprintln(os.Stderr, "WARN: ignoring credential/routing env for the child:",
-			strings.Join(dropped, ", "), "(R10: subscription auth only)")
-	}
+	childenv.WarnOnce(os.Stderr, os.Environ())
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	// Timeout discipline: with non-*os.File writers, Wait blocks on pipe-copy

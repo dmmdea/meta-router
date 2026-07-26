@@ -5,9 +5,14 @@ import (
 	"testing"
 )
 
-// Exercises the SAME composition Run performs (childEnv), not a copy of it —
-// a test that rebuilt the logic locally would pass even if Run stopped calling
-// it (the weak-self-test failure the W8 review caught in the B1 canary).
+// Exercises the SAME helper Run composes its environment with (childEnv), rather
+// than a local reimplementation of the logic — so the scrub-then-pin ORDER is
+// pinned where it is defined.
+//
+// What this does NOT prove, stated so the claim is not read as wider than it is:
+// it calls childEnv directly, so it cannot detect Run ceasing to call childEnv,
+// or a later cmd.Env assignment overwriting the result. Those are structural
+// facts about the call site, and the B13 canary is what checks them.
 func TestChildEnvScrubsAmbientButKeepsLanePins(t *testing.T) {
 	ambient := []string{
 		"PATH=C:/Windows",
