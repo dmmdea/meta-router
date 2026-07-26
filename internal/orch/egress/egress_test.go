@@ -308,18 +308,24 @@ func TestLinkToAnAllowlistedTargetStillPasses(t *testing.T) {
 // depend on where the orchestrator was launched and must be refused; a UNC path
 // is fully qualified and must not be mistaken for relative.
 func TestFullyQualifiedPathShapes(t *testing.T) {
+	win := runtime.GOOS == "windows"
 	for _, c := range []struct {
 		p    string
 		want bool
 	}{
-		{`C:\Dev\repo`, true},
-		{`\\server\share\repo`, true}, // UNC: IsAbs reports false for this
+		// Drive letters and backslash-UNC are WINDOWS shapes. On POSIX they are
+		// ordinary filenames that happen to contain ':' and '\', so they are NOT
+		// fully qualified there — and saying otherwise is how this test failed on
+		// the Linux runner while passing locally. Each expectation is stated per
+		// platform rather than assuming the author's.
+		{`C:\Dev\repo`, win},
+		{`\\server\share\repo`, win}, // UNC: filepath.IsAbs reports false even on Windows
 		{`//server/share/repo`, true},
-		{"/tmp/repo", runtime.GOOS != "windows"}, // absolute on POSIX, drive-dependent on Windows
+		{"/tmp/repo", !win}, // absolute on POSIX, drive-dependent on Windows
 		{".", false},
 		{"..", false},
 		{"relative/path", false},
-		{`C:repo`, false}, // drive-RELATIVE, despite carrying a volume name
+		{`C:repo`, false}, // drive-RELATIVE on Windows, a plain filename on POSIX
 	} {
 		if got := fullyQualified(c.p); got != c.want {
 			t.Errorf("fullyQualified(%q) = %v, want %v", c.p, got, c.want)
