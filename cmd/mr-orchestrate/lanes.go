@@ -412,17 +412,11 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	// anything the gate cannot account for: --add-dir is variadic in the shipped
 	// binary, so a token the extractor does not model is a token that reaches the
 	// provider ungated (review 2026-07-25).
-	extraPaths, unaccounted := egress.Extras(extra)
-	if len(unaccounted) > 0 {
+	if bad := egress.RefuseExtras(extra); len(bad) > 0 {
 		return denyEgress("third-party lane glm denied: --extra contains " +
-			strconv.Itoa(len(unaccounted)) + " token(s) this data-boundary gate cannot account for: " +
-			strings.Join(unaccounted, " ") +
-			" — they are forwarded verbatim to the provider, and an unmodelled flag may carry a filesystem path. Add the flag to egress.pathFree (cannot carry a path) or egress.pathBearing (its values get gated).")
-	}
-	for _, p := range extraPaths {
-		if d := egress.Check("glm", p, egressOpt); !d.Allowed {
-			return denyEgress("--extra path " + p + ": " + d.Reason)
-		}
+			strconv.Itoa(len(bad)) + " token(s) that may name a filesystem path: " +
+			strings.Join(bad, " ") +
+			" — they are forwarded VERBATIM to the provider and resolved by the child against ITS working directory, so this gate cannot judge what they point at. Repository context reaches a third-party lane through -cwd plus glm_allow_repos, which is gated in one place with one rule.")
 	}
 	cwd = planDir // ALWAYS explicit: never let the child inherit our cwd
 	egressReason = ed.Reason

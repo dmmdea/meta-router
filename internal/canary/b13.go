@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -110,11 +111,22 @@ func relTo(root, f string) string {
 	return strings.TrimPrefix(filepath.ToSlash(f), filepath.ToSlash(root)+"/")
 }
 
+// countSpawns is the independent tally the accounting tripwire compares against,
+// so it must recognize exactly the same construction forms spawnsInScope does —
+// otherwise a form one sees and the other does not produces a mismatch reported as
+// "outside a function body", which is a true failure with a false diagnosis.
 func countSpawns(n ast.Node) int {
 	c := 0
 	ast.Inspect(n, func(m ast.Node) bool {
-		if call, ok := m.(*ast.CallExpr); ok && isSpawn(call) != "" {
-			c++
+		switch x := m.(type) {
+		case *ast.CallExpr:
+			if isSpawn(x) != "" {
+				c++
+			}
+		case *ast.CompositeLit:
+			if isCmdLit(x) {
+				c++
+			}
 		}
 		return true
 	})
@@ -156,82 +168,165 @@ func commandLiteral(call *ast.CallExpr, kind string) string {
 	return strings.TrimSuffix(filepath.Base(filepath.ToSlash(s)), ".exe")
 }
 
-// spawnsInScope resolves every spawn inside one function body, together with
-// whether the *exec.Cmd it produced ends up with a scrubbed environment.
+// spawnsInScope resolves every spawn inside one function body.
+//
+// ORDERED, per SITE — not per variable name. The previous version kept one
+// verdict per identifier and stamped it onto every spawn bound to that name, so
+// four ordinary refactors defeated it while the whole suite stayed green
+// (review round 3): reassigning the variable after the scrub; an unscrubbed spawn
+// BEFORE the scrub being back-credited by it; a lexically distinct `cmd` in a
+// sibling block; and a retry spawn on the production claude dispatch path. A
+// `claude` child then ran with Env == nil — full ambient inheritance — with B13
+// green.
+//
+// The rule now: a spawn is scrubbed iff, AFTER its own statement and BEFORE the
+// next spawn bound to the same name, there is an assignment to <name>.Env that
+// derives from childenv.Scrub. An assignment that reads <name>.Env (append) keeps
+// whatever the previous verdict was, because extending an environment cannot
+// unscrub it.
 func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, scrubbers map[string]bool) []Spawn {
-	// Pass 1, in source order: the LAST assignment to each X.Env decides.
-	scrubbed := map[string]bool{}
-	ast.Inspect(body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for i, lhs := range as.Lhs {
-			sel, ok := lhs.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Env" {
-				continue
-			}
-			id, ok := sel.X.(*ast.Ident)
-			if !ok || i >= len(as.Rhs) {
-				continue
-			}
-			// `cmd.Env = append(cmd.Env, ...)` EXTENDS the existing environment,
-			// so whatever it already was it still is. Only a wholesale
-			// replacement can undo a scrub, and that is what must be re-proven.
-			if referencesEnvOf(as.Rhs[i], id.Name) {
-				continue
-			}
-			scrubbed[id.Name] = containsScrub(as.Rhs[i], scrubbers)
-		}
-		return true
-	})
-
-	// Pass 2: spawns assigned to a variable.
+	type event struct {
+		pos     token.Pos
+		kind    int // 0 = spawn, 1 = env assignment
+		name    string
+		cmd     string
+		scrub   bool // env assignment: derives from Scrub
+		extends bool // env assignment: reads <name>.Env, so it preserves
+		hasVar  bool
+	}
+	var events []event
 	claimed := map[ast.Node]bool{}
-	var out []Spawn
-	ast.Inspect(body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for i, rhs := range as.Rhs {
-			call, ok := rhs.(*ast.CallExpr)
-			if !ok {
-				continue
-			}
-			kind := isSpawn(call)
-			if kind == "" {
-				continue
-			}
-			claimed[call] = true
-			name := ""
-			if i < len(as.Lhs) {
-				if id, ok := as.Lhs[i].(*ast.Ident); ok {
-					name = id.Name
+
+	record := func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range x.Lhs {
+				sel, ok := lhs.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Env" || i >= len(x.Rhs) {
+					continue
 				}
+				id, ok := sel.X.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				events = append(events, event{pos: x.Pos(), kind: 1, name: id.Name,
+					scrub:   containsScrub(x.Rhs[i], scrubbers),
+					extends: referencesEnvOf(x.Rhs[i], id.Name)})
 			}
-			out = append(out, Spawn{File: rel, Line: fset.Position(call.Pos()).Line,
-				Command: commandLiteral(call, kind), Var: name,
-				Scrubbed: name != "" && scrubbed[name], Func: fname})
+			for i, rhs := range x.Rhs {
+				call, ok := rhs.(*ast.CallExpr)
+				if !ok || isSpawn(call) == "" {
+					continue
+				}
+				claimed[call] = true
+				name := ""
+				if i < len(x.Lhs) {
+					if id, ok := x.Lhs[i].(*ast.Ident); ok {
+						name = id.Name
+					}
+				}
+				events = append(events, event{pos: call.Pos(), kind: 0, name: name,
+					cmd: commandLiteral(call, isSpawn(call)), hasVar: name != ""})
+			}
+		case *ast.ValueSpec:
+			// `var cmd = exec.Command(...)` — a DeclStmt, not an AssignStmt. The
+			// previous walk reported these as "spawns with no handle", which was a
+			// loud but wrong diagnosis.
+			for i, v := range x.Values {
+				call, ok := v.(*ast.CallExpr)
+				if !ok || isSpawn(call) == "" {
+					continue
+				}
+				claimed[call] = true
+				name := ""
+				if i < len(x.Names) {
+					name = x.Names[i].Name
+				}
+				events = append(events, event{pos: call.Pos(), kind: 0, name: name,
+					cmd: commandLiteral(call, isSpawn(call)), hasVar: name != ""})
+			}
 		}
 		return true
-	})
+	}
+	ast.Inspect(body, record)
 
-	// Pass 3: spawns that keep no handle (chained .Run(), passed inline).
+	// Unclaimed spawns keep no handle at all (chained .Run(), passed inline).
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || claimed[call] {
 			return true
 		}
-		kind := isSpawn(call)
-		if kind == "" {
-			return true
+		if kind := isSpawn(call); kind != "" {
+			events = append(events, event{pos: call.Pos(), kind: 0, cmd: commandLiteral(call, kind)})
 		}
-		out = append(out, Spawn{File: rel, Line: fset.Position(call.Pos()).Line,
-			Command: commandLiteral(call, kind), Func: fname})
 		return true
 	})
+	// Composite-literal construction: &exec.Cmd{Path: ..., Env: ...}. Invisible to
+	// isSpawn, so an unscrubbed spawn written this way shipped with zero signal.
+	ast.Inspect(body, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok || !isCmdLit(cl) {
+			return true
+		}
+		scrubbed := false
+		for _, el := range cl.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Env" && containsScrub(kv.Value, scrubbers) {
+				scrubbed = true
+			}
+		}
+		events = append(events, event{pos: cl.Pos(), kind: 0, name: "<exec.Cmd literal>",
+			hasVar: true, scrub: scrubbed})
+		return true
+	})
+
+	sort.Slice(events, func(i, j int) bool { return events[i].pos < events[j].pos })
+
+	var out []Spawn
+	for i, e := range events {
+		if e.kind != 0 {
+			continue
+		}
+		s := Spawn{File: rel, Line: fset.Position(e.pos).Line, Command: e.cmd,
+			Var: e.name, Func: fname}
+		if e.name == "<exec.Cmd literal>" {
+			// A composite literal carries its own Env field; there is no later
+			// assignment to look for.
+			s.Scrubbed = e.scrub
+			out = append(out, s)
+			continue
+		}
+		if e.hasVar {
+			for _, later := range events[i+1:] {
+				if later.name != e.name {
+					continue
+				}
+				if later.kind == 0 {
+					break // the variable is rebound; anything after belongs to that spawn
+				}
+				if later.extends {
+					continue // append preserves whatever it already was
+				}
+				s.Scrubbed = later.scrub
+				break
+			}
+		}
+		out = append(out, s)
+	}
 	return out
+}
+
+// isCmdLit reports whether a composite literal constructs an exec.Cmd.
+func isCmdLit(cl *ast.CompositeLit) bool {
+	sel, ok := cl.Type.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Cmd" {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == "exec"
 }
 
 // containsScrub reports whether an expression passes through childenv.Scrub —
@@ -304,7 +399,7 @@ func scrubberFuncs(root string, files []string, fset *token.FileSet) (map[string
 			if !ok || fn.Body == nil {
 				continue
 			}
-			if bodyCallsScrub(fn.Body) {
+			if bodyReturnsScrub(fn.Body) {
 				out[dir][fn.Name.Name] = true
 			}
 		}
@@ -312,9 +407,81 @@ func scrubberFuncs(root string, files []string, fset *token.FileSet) (map[string
 	return out, nil
 }
 
-func bodyCallsScrub(body *ast.BlockStmt) bool {
+// bodyReturnsScrub reports whether a function RETURNS a value derived from
+// childenv.Scrub.
+//
+// Returning, not merely mentioning: the first version credited any helper whose
+// body contained the call anywhere, so a helper that scrubbed a throwaway value
+// and returned os.Environ() would have laundered every call site that used it
+// (review round 3). The credit has to follow the value that actually reaches
+// cmd.Env, and the return expression is the closest structural proxy available
+// without full type-checked dataflow.
+func bodyReturnsScrub(body *ast.BlockStmt) bool {
+	// Minimal local dataflow: which locals hold a Scrub-derived value. The real
+	// helper is `env := childenv.Scrub(ambient); env = append(env, pins...);
+	// return env`, so a check that demanded the literal call IN the return
+	// expression would reject it — while a check that accepted a mere mention
+	// anywhere would accept `_ = childenv.Scrub(x); return os.Environ()`.
+	// Tracking assignment-to-local is the smallest rule that separates those two.
+	derived := map[string]bool{}
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range x.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || i >= len(x.Rhs) {
+					continue
+				}
+				if directScrub(x.Rhs[i]) {
+					derived[id.Name] = true
+					continue
+				}
+				// `env = append(env, …)` keeps whatever env already was.
+				if referencesIdent(x.Rhs[i], id.Name) && derived[id.Name] {
+					continue
+				}
+				derived[id.Name] = false
+			}
+		case *ast.ReturnStmt:
+			for _, r := range x.Results {
+				if directScrub(r) {
+					found = true
+					return false
+				}
+				if id, ok := r.(*ast.Ident); ok && derived[id.Name] {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// referencesIdent reports whether an expression reads the named identifier.
+func referencesIdent(e ast.Expr, name string) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// directScrub reports whether an expression contains a literal childenv.Scrub
+// call. No indirection is followed: this is the base case the one admitted level
+// of helper indirection is measured against.
+func directScrub(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
 			return true

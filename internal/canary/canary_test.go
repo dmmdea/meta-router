@@ -61,10 +61,21 @@ func TestCanaryBibleVerifyPointers(t *testing.T) {
 		t.Fatal(err)
 	}
 	inv := readBibleInvariants(t, root)
-	re := regexp.MustCompile("verify: `([^`]+)`")
-	ms := re.FindAllStringSubmatch(inv, -1)
-	if len(ms) < 12 {
-		t.Fatalf("expected >=12 verify pointers, found %d", len(ms))
+	// An invariant may cite SEVERAL verify pointers — B14 is checked structurally
+	// AND behaviourally, and the behavioural one is the load-bearing half. Matching
+	// only the first backticked item per `verify:` left the second unenforced, so
+	// it could rot or be deleted silently: collect every backticked pointer that
+	// follows a `verify:` up to the end of that line.
+	line := regexp.MustCompile("verify: (.+)")
+	tick := regexp.MustCompile("`([^`]+)`")
+	var ptrs []string
+	for _, lm := range line.FindAllStringSubmatch(inv, -1) {
+		for _, tm := range tick.FindAllStringSubmatch(lm[1], -1) {
+			ptrs = append(ptrs, tm[1])
+		}
+	}
+	if len(ptrs) < 14 {
+		t.Fatalf("expected >=14 verify pointers (B1-B14, some with two), found %d", len(ptrs))
 	}
 	tests, err := GoSourceFiles(root, true)
 	if err != nil {
@@ -80,8 +91,7 @@ func TestCanaryBibleVerifyPointers(t *testing.T) {
 			testSrc.Write(b)
 		}
 	}
-	for _, m := range ms {
-		ptr := m[1]
+	for _, ptr := range ptrs {
 		switch {
 		case ptr == "process":
 		case strings.HasPrefix(ptr, "Test"):

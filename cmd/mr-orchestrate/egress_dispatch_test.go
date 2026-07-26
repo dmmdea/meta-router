@@ -105,41 +105,45 @@ func TestGLMDispatchUsesAnAllowlistedCwd(t *testing.T) {
 	}
 }
 
-// BLOCKER 1, end to end at the dispatcher: --add-dir is VARIADIC in the shipped
-// binary, so `--add-dir <allowed> <client>` handed the client checkout to a
-// third-party provider while the receipt certified "repository context
-// allowlisted". A plain typo produced it.
-func TestGLMDispatchRefusesASecondVariadicAddDir(t *testing.T) {
-	base := t.TempDir()
-	allowed := filepath.Join(base, "allowed")
-	client := filepath.Join(base, "client-secret")
-	for _, d := range []string{allowed, client} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
+// --extra at the dispatcher: a third-party lane refuses every path-bearing flag.
+//
+// Two rounds of review defeated the two designs that tried to GATE those paths
+// instead (variadic arity, then a variadic collector left open across a
+// skip-counted flag, plus a relative value the gate and the child resolve against
+// different base directories). This asserts the posture that replaced them.
+func TestGLMDispatchRefusesPathBearingExtras(t *testing.T) {
+	repo := t.TempDir()
+	client := filepath.Join(t.TempDir(), "client-secret")
+	if err := os.MkdirAll(client, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, extra := range [][]string{
+		{"--add-dir", repo},                             // even the ALLOWLISTED dir
+		{"--add-dir", repo, client},                     // round-2 variadic bypass
+		{"--add-dir", "--output-format", client},        // round-3 skip-counter bypass
+		{"--add-dir", "../client-secret"},               // round-3 relative-base bypass
+		{"--mcp-config", filepath.Join(repo, "m.json")}, // never gated at all before
+		{"--some-future-flag", "value"},                 // deny-by-default
+	} {
+		got, code := glmDryRun(t, repo, extra, []string{repo})
+		if code != exitEgressDenied {
+			t.Errorf("--extra %v must be refused: got exit %d, %v", extra, code, got)
 		}
-	}
-	// Control: the single-directory form is allowed, so the test below is
-	// measuring the arity and not just a blanket refusal of --add-dir.
-	if _, code := glmDryRun(t, allowed, []string{"--add-dir", allowed}, []string{allowed}); code != 0 {
-		t.Fatalf("control: an allowlisted --add-dir must pass, got exit %d", code)
-	}
-	got, code := glmDryRun(t, allowed, []string{"--add-dir", allowed, client}, []string{allowed})
-	if code != exitEgressDenied {
-		t.Fatalf("the SECOND variadic --add-dir value must be gated: got exit %d (want %d)\n%v", code, exitEgressDenied, got)
-	}
-	if b, _ := json.Marshal(got); !strings.Contains(string(b), "client-secret") {
-		t.Fatalf("the denial must name the path it refused: %s", b)
 	}
 }
 
-// Deny-by-default on the same channel: a flag the gate does not model is
-// forwarded verbatim to the provider and may carry a path, so it is refused
-// rather than assumed harmless.
-func TestGLMDispatchRefusesAnUnmodelledExtraFlag(t *testing.T) {
+// …while path-free flags still dispatch, or the lane is unusable for real calls.
+func TestGLMDispatchAllowsPathFreeExtras(t *testing.T) {
 	repo := t.TempDir()
-	got, code := glmDryRun(t, repo, []string{"--some-future-flag", "value"}, []string{repo})
-	if code != exitEgressDenied {
-		t.Fatalf("an unmodelled --extra flag must be refused: got exit %d\n%v", code, got)
+	for _, extra := range [][]string{
+		{"--dangerously-skip-permissions"},
+		{"--verbose"},
+		{"--effort", "high"},
+	} {
+		got, code := glmDryRun(t, repo, extra, []string{repo})
+		if code != 0 {
+			t.Errorf("--extra %v carries no path and must dispatch: got exit %d, %v", extra, code, got)
+		}
 	}
 }
 

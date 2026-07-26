@@ -152,69 +152,85 @@ func TestPlanRefusesExplicitNonAllowlistedCwd(t *testing.T) {
 	}
 }
 
-// --extra is a second export channel with the same reach as cwd.
+// --extra is a second export channel with the same reach as cwd, and this gate
+// no longer tries to parse it — it refuses anything not provably path-free.
 //
-// The FIRST version of this extractor modelled --add-dir as arity-1. The shipped
-// claude binary declares `--add-dir <directories...>` — variadic — so
-// `--add-dir <allowed> <client>` passed the gate with only <allowed> inspected,
-// handed <client> to a PRC-hosted provider, and the receipt certified the
-// dispatch as "repository context allowlisted". A plain typo
-// (`--add-dir ../lib ../shared`) was enough. These pin the real arity.
-func TestExtrasConsumesTheWholeVariadicRun(t *testing.T) {
-	paths, un := Extras([]string{"--add-dir", "D:/a", "D:/b", "D:/c", "--verbose"})
-	if len(paths) != 3 || paths[0] != "D:/a" || paths[1] != "D:/b" || paths[2] != "D:/c" {
-		t.Fatalf("a variadic flag consumes every following non-flag token, got %v", paths)
-	}
-	if len(un) != 0 {
-		t.Fatalf("--verbose cannot carry a path and must not be unaccounted: %v", un)
-	}
-}
-
-func TestExtrasBothAttachedForms(t *testing.T) {
-	paths, un := Extras([]string{"--add-dir=D:/a", "--plugin-dir", "D:/b"})
-	if len(paths) != 2 || paths[0] != "D:/a" || paths[1] != "D:/b" {
-		t.Fatalf("both = and space forms must be extracted, got %v", paths)
-	}
-	if len(un) != 0 {
-		t.Fatalf("unexpected unaccounted: %v", un)
-	}
-	if p, _ := Extras([]string{"--add-dir"}); len(p) != 0 {
-		t.Fatalf("a dangling --add-dir must not panic or invent a path, got %v", p)
-	}
-}
-
-// A non-variadic path flag must NOT swallow the token after its value.
-func TestExtrasNonVariadicTakesExactlyOne(t *testing.T) {
-	paths, un := Extras([]string{"--plugin-dir", "D:/a", "stray"})
-	if len(paths) != 1 || paths[0] != "D:/a" {
-		t.Fatalf("--plugin-dir takes one value, got %v", paths)
-	}
-	if len(un) != 1 || un[0] != "stray" {
-		t.Fatalf("the stray positional must be reported as unaccounted, got %v", un)
-	}
-}
-
-// The other variadic path-bearing flags the shipped binary declares. Each was
-// invisible to the old extractor, which knew only --add-dir.
-func TestExtrasCoversTheOtherVariadicPathFlags(t *testing.T) {
-	for _, flag := range []string{"--mcp-config", "--file", "--sparse"} {
-		paths, un := Extras([]string{flag, "D:/one", "D:/two"})
-		if len(paths) != 2 {
-			t.Errorf("%s is variadic and path-bearing; got paths=%v un=%v", flag, paths, un)
+// Two earlier designs tried to GATE the paths and both were defeated:
+//
+//	round 2: --add-dir modelled as arity-1 while the binary declares
+//	         `<directories...>`, so extra directories went ungated.
+//	round 3: `--add-dir --output-format <dir>` slipped through BOTH lists —
+//	         variadic collection stopped at the "-", then --output-format's skip
+//	         counter ate the directory. And a RELATIVE value was resolved against
+//	         the ORCHESTRATOR's cwd while the child resolves it against its own,
+//	         so gate and child could disagree about which directory it names.
+func TestRefuseExtrasRejectsEveryPathBearingFlag(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--add-dir", "D:/a"},
+		{"--add-dir=D:/a"},
+		{"--add-dir", "D:/a", "D:/b", "D:/c"},
+		{"--mcp-config", "D:/a.json"},
+		{"--settings", `{"permissions":{"additionalDirectories":["D:/x"]}}`},
+		{"--plugin-dir", "D:/a"},
+		{"--file", "id:rel/path"},
+	} {
+		if bad := RefuseExtras(extra); len(bad) == 0 {
+			t.Errorf("%v must be refused: a path-bearing flag reaches the child verbatim and this gate cannot judge what it names", extra)
 		}
 	}
 }
 
-// Deny-by-default: a flag this gate does not model must be REPORTED, not
-// assumed harmless. The CLI ships 82 options and grows; a gate that knows only
-// the dangerous ones fails silently the first time a new one appears.
-func TestExtrasReportsUnmodelledFlags(t *testing.T) {
-	_, un := Extras([]string{"--some-future-flag", "value"})
-	if len(un) == 0 {
-		t.Fatal("an unmodelled flag must be unaccounted so the caller can refuse it")
+// Round 3's exact bypass: a variadic collector left open across a skip-counted
+// flag, so the directory was neither gated nor reported.
+func TestRefuseExtrasCatchesTheVariadicSkipCounterHole(t *testing.T) {
+	bad := RefuseExtras([]string{"--add-dir", "--output-format", "D:/client-secret"})
+	if len(bad) == 0 {
+		t.Fatal("the round-3 hole must be closed: --add-dir followed by a skip-counted flag left the directory unreported")
 	}
-	if _, un := Extras([]string{"--dangerously-skip-permissions"}); len(un) != 0 {
-		t.Fatalf("a known path-free flag must not be flagged: %v", un)
+}
+
+// Round 3's other bypass: a RELATIVE value the gate and the child resolve
+// against different base directories.
+func TestRefuseExtrasRejectsRelativeValues(t *testing.T) {
+	if bad := RefuseExtras([]string{"--add-dir", "../client-secret"}); len(bad) == 0 {
+		t.Fatal("a relative --extra value must be refused: the gate resolves it against the orchestrator's cwd, the child against its own")
+	}
+}
+
+// Harmless flags still work, or the lane becomes unusable for legitimate calls.
+func TestRefuseExtrasAllowsPathFreeFlags(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--dangerously-skip-permissions"},
+		{"--verbose"},
+		{"--output-format", "json"},
+		{"--model=glm-5.2"},
+		{"--effort", "high", "--verbose"},
+		{"--debug", "api"}, // optional-value flag, value consumed
+		{"--debug"},        // …and without one
+		{},
+	} {
+		if bad := RefuseExtras(extra); len(bad) != 0 {
+			t.Errorf("%v carries no path and must be allowed, refused %v", extra, bad)
+		}
+	}
+}
+
+// Shapes that must never be mistaken for harmless.
+func TestRefuseExtrasRefusesTheAmbiguous(t *testing.T) {
+	for _, extra := range [][]string{
+		{"bare-positional"},
+		{"--", "anything", "after"},
+		{"-"},
+		{"--some-future-flag", "value"},
+		// The skip counter must not swallow a following FLAG: if it did, the
+		// --add-dir here would never be judged. (A dangling `--model` with no
+		// value is deliberately NOT refused — it carries no path, and the child
+		// rejects it on its own.)
+		{"--model", "--add-dir", "D:/a"},
+	} {
+		if bad := RefuseExtras(extra); len(bad) == 0 {
+			t.Errorf("%v must be refused", extra)
+		}
 	}
 }
 

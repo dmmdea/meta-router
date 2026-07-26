@@ -58,7 +58,9 @@ A concept change that arrives as a quiet test edit is a review-blocking defect.
   non-lane program (`git`, `taskkill`, …) — a VARIABLE command could resolve to
   a model binary and is never exempt. Scope is deliberately "could be a model
   lane", not "every process": `git` inheriting `PATH` is not a billing risk, and
-  an invariant stated wider than it is enforced is a false invariant.
+  an invariant stated wider than it is enforced is a false invariant. Checked per
+  SITE in statement order, so a later rebind of the variable, an earlier spawn,
+  and a sibling block each get their own verdict rather than sharing one.
   verify: `TestCanaryB13EverySpawnScrubsEnv`
 - **B14 — Every selectable third-party lane has a dispatcher that reaches the
   egress gate.** The gate's predicate is lane-generic but enforcement is NOT

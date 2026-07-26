@@ -48,12 +48,16 @@ send data off the machine. Being explicit about that is the point of this sectio
   - Because `os/exec` runs a child in the parent's directory, "no working directory" is not
     the same as "no repository context". When the inherited directory is not allowlisted, the
     dispatch is run in a **neutral empty directory** so prompt-only is enforced, not assumed.
-  - **`--extra` is gated on the same footing as the working directory**, because it is
-    forwarded verbatim to the child. Values of path-bearing flags are checked against the
-    allowlist, including the *whole* value list of a variadic flag such as
-    `--add-dir <directories...>` or `--mcp-config <configs...>`. Any token the gate cannot
-    account for — an unrecognized flag, a bare positional — is **refused**, on the reasoning
-    that an unmodelled flag may carry a path and the CLI's flag set grows over time.
+  - **`--extra` may not carry a filesystem path to a third-party lane at all.** Those tokens
+    are forwarded verbatim and resolved by the *child* against *its* working directory, so
+    this gate cannot reliably judge what they point at — and it deliberately does not try to
+    reimplement another program's argument parser, whose handling of variadic options and
+    optional values is subtle and free to change upstream. Only flags provably incapable of
+    naming a path are accepted (`--model`, `--output-format`, `--verbose`,
+    `--dangerously-skip-permissions`, …); everything else — `--add-dir`, `--mcp-config`,
+    `--settings`, an unrecognized flag, a bare positional, anything after `--` — is
+    **refused**. Repository context reaches a third-party lane through `-cwd` plus the
+    allowlist, which is gated in one place with one rule.
   - `egress_prompt_only_denied: true` closes the **prompt-only** path, i.e. dispatches that
     carry no repository context at all. It is a tightening of that one case, **not** a master
     switch: with a repo allowlisted, dispatches inside it still run. To close a third-party

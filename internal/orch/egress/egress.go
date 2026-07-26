@@ -266,89 +266,93 @@ func within(p, root string) bool {
 	return true
 }
 
-// pathBearing are the flags whose values are filesystem paths; the bool is
-// whether the flag is VARIADIC (commander's `<x...>` form, which greedily
-// consumes every following token until the next one starting with '-').
+// extraFree are the ONLY --extra tokens a third-party dispatch may carry: flags
+// that cannot name a filesystem path. The int is how many following tokens the
+// flag consumes as its value.
 //
-// Read out of the shipped `claude` executable's own commander registrations
-// rather than from documentation — the first version of this extractor modelled
-// --add-dir as arity-1 and the binary declares `--add-dir <directories...>`, so
-// `--add-dir <allowed> <client>` sent the client checkout to a PRC-hosted
-// provider with the receipt certifying it as allowlisted. A plain typo
-// (`--add-dir ../lib ../shared`) was enough; no adversary required
-// (review 2026-07-25).
-var pathBearing = map[string]bool{
-	"--add-dir":    true,  // <directories...>
-	"--mcp-config": true,  // <configs...> — a config file can name any path
-	"--file":       true,  // <specs...>
-	"--sparse":     true,  // <paths...>
-	"--plugin-dir": false, // <path>
-	"--settings":   false, // <file-or-json>
-	"--debug-file": false, // <path>
-	"--output-dir": false, // <dir>
-	"--report":     false, // <path>
-}
-
-// pathFree are flags that cannot carry a filesystem path; the int is how many
-// following tokens the flag consumes.
+// Why an allow-list of harmless flags rather than a gate on path-bearing ones —
+// this is the third design of this function, and the two that tried to gate paths
+// were both defeated:
 //
-// Everything in neither table is UNACCOUNTED and therefore denied for a
-// third-party lane. That asymmetry is deliberate: the shipped CLI has 82
-// options and seven variadic ones, and it grows. A gate that enumerates only
-// the dangerous flags fails SILENTLY the first time a new path-bearing flag
-// ships, which is exactly how the --add-dir arity bug stayed invisible. A gate
-// that enumerates the safe ones fails LOUDLY, and a loud failure gets fixed.
-var pathFree = map[string]int{
+//	round 2: --add-dir was modelled as arity-1; the shipped binary declares it
+//	         `<directories...>`, so every directory after the first was forwarded
+//	         ungated while the receipt certified "allowlisted".
+//	round 3: even with variadic arity modelled, `--add-dir --output-format <dir>`
+//	         slipped through BOTH lists — variadic collection stopped at the
+//	         "-" prefix, then --output-format's skip counter ate the directory, so
+//	         it was neither gated nor reported. And a RELATIVE --extra value was
+//	         resolved against the ORCHESTRATOR's cwd while the child resolves it
+//	         against its own, so the gate and the child could disagree about which
+//	         directory the token names.
+//
+// The lesson is not "model the parser more carefully". It is that this gate cannot
+// be a second, independent implementation of another program's argument parser:
+// commander's real behaviour around variadic options, optional values and
+// end-of-flags is subtle, undocumented in places, and free to change in any
+// upstream release. So a third-party dispatch may not pass a path-bearing flag AT
+// ALL. Repository context reaches a third-party lane through -cwd and the
+// allowlist, which is gated at one place with one rule.
+//
+// Nothing in this repository passes --extra to a third-party lane (mr-goldreplay
+// gates its -claude-extra on lane == "claude"), so this closes a hole rather than
+// removing a capability. If a path-bearing flag is ever genuinely needed here, the
+// honest way to add it is to have the ADAPTER construct the argument from an
+// already-gated absolute path, not to re-parse operator text.
+var extraFree = map[string]int{
 	"--model": 1, "--output-format": 1, "--input-format": 1, "--effort": 1,
 	"--permission-mode": 1, "--session-id": 1, "--agents": 1,
-	"-p": 0, "--print": 0, "--verbose": 0, "--debug": 0,
+	"-p": 0, "--print": 0, "--verbose": 0,
 	"--dangerously-skip-permissions": 0, "--strict-mcp-config": 0,
 	"--include-partial-messages": 0, "--replay-user-messages": 0, "--safe-mode": 0,
 }
 
-// Extras returns every filesystem path a lane's --extra arguments would grant
-// the child beyond its working directory, plus the tokens this gate could not
-// account for. A third-party dispatch must gate each path AND refuse outright
-// when unaccounted is non-empty — see Options and the tables above.
+// extraOptionalValue are flags whose value is OPTIONAL (`[filter]`), so the token
+// after them may or may not belong to them. They are listed separately because a
+// fixed skip count is wrong for them in both directions.
+var extraOptionalValue = map[string]bool{"--debug": true, "-d": true}
+
+// RefuseExtras returns the --extra tokens that a THIRD-PARTY dispatch must be
+// refused for: anything not provably incapable of naming a filesystem path.
+// An empty result means every token is on the harmless list.
 //
-// Values attached with '=' are handled too, and a variadic flag keeps
-// collecting after its '=' value: over-collecting only gates MORE paths, which
-// is the safe direction to be wrong in.
-func Extras(extra []string) (paths []string, unaccounted []string) {
+// Deliberately conservative in one direction only: a token this function does not
+// recognize is refused, never assumed safe. A false refusal costs the operator an
+// error message that names the token; a false accept ships a client's code.
+func RefuseExtras(extra []string) []string {
+	var bad []string
 	for i := 0; i < len(extra); i++ {
 		tok := extra[i]
+		if tok == "--" {
+			// End of flags: everything after it is a positional the child may
+			// interpret however it likes. Refuse the lot rather than guess.
+			bad = append(bad, extra[i:]...)
+			return bad
+		}
 		if !strings.HasPrefix(tok, "-") || tok == "-" {
-			// A bare positional forwarded to the child: the prompt is already
-			// passed explicitly, so this is something the gate does not model.
-			unaccounted = append(unaccounted, tok)
+			bad = append(bad, tok) // a bare positional; the prompt is passed separately
 			continue
 		}
-		name, val, hasVal := strings.Cut(tok, "=")
-		variadic, isPath := pathBearing[name]
-		if isPath {
-			if hasVal {
-				paths = append(paths, val)
-			}
-			if !hasVal || variadic {
-				// Mirror commander: consume following tokens until the next flag.
-				// Non-variadic flags take exactly one.
-				for i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
-					paths = append(paths, extra[i+1])
-					i++
-					if !variadic {
-						break
-					}
-				}
+		name, _, hasVal := strings.Cut(tok, "=")
+		if extraOptionalValue[name] {
+			// Consume a following value only when it cannot be a flag itself.
+			if !hasVal && i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
+				i++
 			}
 			continue
 		}
-		if skip, ok := pathFree[name]; ok {
-			if !hasVal {
-				i += skip
-			}
+		skip, ok := extraFree[name]
+		if !ok {
+			bad = append(bad, tok)
 			continue
 		}
-		unaccounted = append(unaccounted, tok)
+		if !hasVal {
+			// Do not skip past a token that looks like a flag: if the operator
+			// wrote `--model --verbose`, the second token is its own flag and
+			// must still be judged.
+			for n := 0; n < skip && i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-"); n++ {
+				i++
+			}
+		}
 	}
-	return paths, unaccounted
+	return bad
 }
