@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"os"
 	"os/exec"
 	"time"
@@ -31,6 +32,9 @@ var spawnSupervisor = func(id string) error {
 		return fmt.Errorf("resolve self: %w", err)
 	}
 	cmd := exec.Command(self, "strategy-run", id)
+	// R10 (canary B13): the detached supervisor goes on to dispatch LANES, so it
+	// must not carry an ambient credential/routing override into them.
+	cmd.Env = childenv.Scrub(os.Environ())
 	// The child owns its own stdio — the MCP channel is untouched (S3R-14b). We
 	// deliberately do NOT inherit the parent's stdout (the transport).
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil

@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -90,5 +91,73 @@ func TestFutureFreeLanesInheritTheGate(t *testing.T) {
 		if d := Check(lane, "D:/dev/anything", Options{}); d.Allowed {
 			t.Fatalf("%s must deny repo context by default: %+v", lane, d)
 		}
+	}
+}
+
+// CRITICAL (review 2026-07-25): an empty CWD does NOT mean "no repo context".
+// os/exec runs the child in the PARENT's cwd when Cmd.Dir is empty, so running
+// `mr-orchestrate run --lane glm` from inside a client checkout exported that
+// checkout while the receipt recorded "prompt-only". Plan must resolve the
+// INHERITED cwd and, when it is not allowlisted, make prompt-only TRUE by
+// substituting a neutral directory rather than trusting the assumption.
+func TestPlanNeutralisesAnUnallowlistedInheritedCwd(t *testing.T) {
+	dir, cleanup, d := Plan("glm", "", Options{}) // no allowlist at all
+	defer cleanup()
+	if !d.Allowed {
+		t.Fatalf("prompt-only must remain usable: %+v", d)
+	}
+	if dir == "" {
+		t.Fatal("Plan must return an EXPLICIT directory; an empty one silently inherits the caller's cwd")
+	}
+	wd, _ := os.Getwd()
+	if dir == wd {
+		t.Fatalf("the inherited cwd must not be used when it is not allowlisted (got %s)", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("the neutral directory must exist and be EMPTY (err=%v, %d entries)", err, len(entries))
+	}
+	if !strings.Contains(d.Reason, "ENFORCED") {
+		t.Fatalf("the receipt reason must say the guarantee was enforced, not assumed: %s", d.Reason)
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("cleanup must remove the neutral directory")
+	}
+}
+
+// When the inherited cwd IS allowlisted, Plan uses it (no pointless temp dir).
+func TestPlanUsesAnAllowlistedInheritedCwd(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, cleanup, d := Plan("glm", "", Options{AllowRepos: []string{wd}})
+	defer cleanup()
+	if !d.Allowed || dir != wd {
+		t.Fatalf("an allowlisted inherited cwd must be used as-is: dir=%s %+v", dir, d)
+	}
+}
+
+// An EXPLICIT non-allowlisted cwd is a deliberate request for that repo's
+// context and must be refused outright — never silently neutralised.
+func TestPlanRefusesExplicitNonAllowlistedCwd(t *testing.T) {
+	_, cleanup, d := Plan("glm", filepath.FromSlash("D:/dev/pepsdubai/client"), Options{
+		AllowRepos: []string{filepath.FromSlash("D:/Dev/dmmdea/meta-router")},
+	})
+	defer cleanup()
+	if d.Allowed {
+		t.Fatalf("an explicitly requested non-allowlisted repo must be refused: %+v", d)
+	}
+}
+
+// --extra --add-dir is a second export channel the cwd gate never saw.
+func TestAddDirsExtractsBothForms(t *testing.T) {
+	got := AddDirs([]string{"--add-dir", "D:/a", "--verbose", "--add-dir=D:/b"})
+	if len(got) != 2 || got[0] != "D:/a" || got[1] != "D:/b" {
+		t.Fatalf("both --add-dir forms must be extracted, got %v", got)
+	}
+	if len(AddDirs([]string{"--add-dir"})) != 0 {
+		t.Fatal("a dangling --add-dir must not panic or invent a path")
 	}
 }

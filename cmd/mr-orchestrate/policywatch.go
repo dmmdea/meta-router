@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"io"
 	"net/http"
 	"os"
@@ -89,7 +90,11 @@ func hashText(s string) string {
 }
 
 func cliVersion(bin string) string {
-	out, err := exec.Command(bin, "--version").Output()
+	// R10 (canary B13): a --version probe cannot spend, but every spawn in this
+	// system gets the same scrubbed environment — no exceptions to remember.
+	vc := exec.Command(bin, "--version")
+	vc.Env = childenv.Scrub(os.Environ())
+	out, err := vc.Output()
 	if err != nil {
 		return "unknown (" + err.Error() + ")"
 	}

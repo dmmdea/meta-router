@@ -13,7 +13,9 @@ We will acknowledge your report and work with you on a fix and coordinated discl
 
 ## Security model
 
-meta-router is designed to be safe by default:
+This repo ships **two** tools with different data boundaries. Read the one you run.
+
+### The skill surfacer (`mr-index` / `mr-hook`)
 
 - **It runs entirely on your machine.** Prompt text is sent only to the local embedding
   endpoint you configure — never to any third-party or cloud service.
@@ -24,4 +26,34 @@ meta-router is designed to be safe by default:
 - **It does not edit your `settings.json`.** Registering and removing the hooks is always your
   explicit action.
 
-The only network call meta-router makes is to the local embedding endpoint you point it at.
+The only network call the surfacer makes is to the local embedding endpoint you point it at.
+
+### The orchestrator (`mr-orchestrate`)
+
+The orchestrator's whole job is to **dispatch your prompt to another agent CLI**, so it does
+send data off the machine. Being explicit about that is the point of this section.
+
+- **Where prompts go.** A dispatch runs the lane's own CLI as a child process: `claude`
+  (Anthropic), `codex` (OpenAI), `glm` (Z.ai — PRC-hosted), or a local model, chosen by the
+  router. Your prompt goes wherever that lane's provider is.
+- **Repository context is gated for third-party lanes.** Any lane outside your own
+  Anthropic/OpenAI subscriptions (currently `glm`, and the seated-but-unshipped
+  `groq`/`cloudflare`/`gemini`/`nim`) is **deny-by-default** for repository context: a
+  dispatch may only run inside a directory you have explicitly allowlisted in
+  `glm_allow_repos`. An unresolvable path, a symlink out of the tree, a `--add-dir` outside
+  the allowlist, and an empty allowlist all **fail closed**, and `--force` does not bypass it
+  — `--force` overrides quota judgement, never a data export.
+  - Because `os/exec` runs a child in the parent's directory, "no working directory" is not
+    the same as "no repository context". When the inherited directory is not allowlisted, the
+    dispatch is run in a **neutral empty directory** so prompt-only is enforced, not assumed.
+  - Set `egress_prompt_only_denied: true` to close third-party lanes entirely.
+  - Every dispatch records its gate decision and basis on the receipt (`egress_gate`), so an
+    export is always countable after the fact.
+- **Credentials are never handed to a child by accident.** Lane children get a **scrubbed**
+  environment: API keys, auth tokens, base-URL and cloud-routing overrides, OAuth token file
+  descriptors and model pins are removed from the ambient environment before each lane appends
+  the credentials it deliberately uses. An ambient `ANTHROPIC_API_KEY` is otherwise honoured by
+  headless Claude Code ahead of OAuth, silently converting a subscription dispatch into metered
+  API spend.
+- **Receipts, not prompts.** `~/.meta-router/orchestrate/dispatch.jsonl` records routing
+  decisions, quota accounting and gate verdicts. Nothing operator-specific lives in the repo.

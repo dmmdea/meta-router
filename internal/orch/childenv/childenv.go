@@ -31,6 +31,28 @@ var denied = map[string]bool{
 	"ANTHROPIC_API_KEY":    true,
 	"ANTHROPIC_AUTH_TOKEN": true,
 	"ANTHROPIC_BASE_URL":   true,
+	// Arbitrary header injection is a complete end-run around the key deny.
+	"ANTHROPIC_CUSTOM_HEADERS":      true,
+	"ANTHROPIC_IDENTITY_TOKEN":      true,
+	"ANTHROPIC_IDENTITY_TOKEN_FILE": true,
+	// Config/account redirect. The lane PINS CLAUDE_CONFIG_DIR for W2 subject
+	// rotation, so an ambient value would silently bill a different account
+	// while the receipt recorded the default subject — an accounting lie.
+	"CLAUDE_CONFIG_DIR":    true,
+	"ANTHROPIC_CONFIG_DIR": true,
+	// Alternative base URLs / proxies.
+	"CLAUDE_CODE_API_BASE_URL": true,
+	"CLAUDE_CODE_PROXY_URL":    true,
+	"CLAUDE_CODE_HTTP_PROXY":   true,
+	"CLAUDE_CODE_HTTPS_PROXY":  true,
+	"CLAUDE_CODE_USE_GATEWAY":  true,
+	// Model overrides outside the ANTHROPIC_DEFAULT_ family.
+	"ANTHROPIC_MODEL":                 true,
+	"ANTHROPIC_SMALL_FAST_MODEL":      true,
+	"CLAUDE_CODE_SUBAGENT_MODEL":      true,
+	"CLAUDE_CODE_BG_CLASSIFIER_MODEL": true,
+	// Sibling of the --bare-equivalent.
+	"CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT": true,
 	// Alternative credential channels that bypass the approval gate.
 	"CLAUDE_CODE_OAUTH_TOKEN":                 true,
 	"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR": true,
@@ -53,7 +75,9 @@ var denied = map[string]bool{
 // ANTHROPIC_DEFAULT_SONNET_MODEL / _OPUS_MODEL / _HAIKU_MODEL — the router pins
 // models deliberately per dispatch, and an ambient default would silently
 // override that pin.
-var deniedPrefixes = []string{"ANTHROPIC_DEFAULT_"}
+// CLAUDE_CODE_OAUTH_ covers the token, its refresh token, session/HFI bearers
+// and the file-descriptor variants in one rule.
+var deniedPrefixes = []string{"ANTHROPIC_DEFAULT_", "CLAUDE_CODE_OAUTH_"}
 
 // Denied reports whether an environment variable name is scrubbed.
 func Denied(name string) bool {

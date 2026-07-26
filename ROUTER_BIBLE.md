@@ -48,6 +48,17 @@ A concept change that arrives as a quiet test edit is a review-blocking defect.
   independently by design. verify: `TestCanaryB11VersionParity`
 - **B12 — Complexity ratchet.** Non-test Go LOC stays under the committed
   budget; raising it is a conscious, reviewed act. verify: `TestCanaryB12ComplexityRatchet`
+- **B13 — Every spawn gets a scrubbed environment.** No process this system
+  starts inherits the ambient env unfiltered: an ambient `ANTHROPIC_API_KEY` is
+  honoured unconditionally by headless Claude Code, ahead of OAuth, which turns
+  a "subscription" dispatch into metered spend while the receipt still reads
+  `cash_usd: 0` (R10). Exemptions are an explicit allowlist with a stated
+  reason, never a content heuristic. verify: `TestCanaryB13EverySpawnScrubsEnv`
+- **B14 — Every third-party lane adapter reaches the egress gate.** The gate's
+  predicate is lane-generic but enforcement is NOT inherited — an adapter that
+  never calls `egress.Plan` is ungated and exports whatever cwd it runs in.
+  Seating a new free lane means wiring the gate, not trusting it.
+  verify: `TestCanaryB14ThirdPartyLanesAreGated`
 <!-- invariants:end -->
 
 ## Review protocol (W8)

@@ -60,6 +60,10 @@ func nodeClassFromExit(code int, receiptClass string) string {
 		return "deferred"
 	case exitNotional:
 		return "ok_notional" // S3R-8: exit-4 = ok-with-warning, NOT a failure
+	case exitEgressDenied:
+		// A data-boundary refusal, not a config error: the journal, artifact and
+		// finalize summary all read this string (review 2026-07-25).
+		return "egress_denied"
 	case exitNotOK:
 		if receiptClass != "" {
 			return receiptClass // S3R-8: keep the real class, never flatten

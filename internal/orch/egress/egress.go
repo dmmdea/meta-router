@@ -25,23 +25,34 @@
 //   - Fail CLOSED on anything unrecognized: an unreadable path, a relative path
 //     that cannot be resolved, or an empty allowlist all deny.
 //
-// The gate is lane-generic so the approved free lanes (Groq, Cloudflare, and
-// the gated Gemini tier) inherit it rather than each re-deciding.
+// The PREDICATE is lane-generic — ThirdPartyLanes already covers the approved
+// free lanes (Groq, Cloudflare, the gated Gemini tier, NIM) so none of them
+// re-decides what "third-party" means. ENFORCEMENT is not inherited, though:
+// every lane adapter must call Plan itself, and an adapter that forgets is
+// simply ungated. That is exactly why the B14 canary fails any run<Lane>Lane
+// dispatcher for a lane in this set that does not reach the gate.
 package egress
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
+
+// ThirdPartyLanes is the gated set. It is EXPORTED so the B14 canary and the
+// gate share one definition: seating a new free lane here without wiring its
+// adapter to Plan then fails a test instead of opening a silent hole.
+var ThirdPartyLanes = []string{"glm", "groq", "cloudflare", "gemini", "nim"}
 
 // ThirdParty reports whether a lane sends data outside the operator's
 // subscription providers. claude and codex are the operator's own subscription
 // relationships; local never leaves the machine.
 func ThirdParty(lane string) bool {
-	switch lane {
-	case "glm", "groq", "cloudflare", "gemini", "nim":
-		return true
+	for _, l := range ThirdPartyLanes {
+		if l == lane {
+			return true
+		}
 	}
 	return false
 }
@@ -65,8 +76,58 @@ type Options struct {
 	PromptOnlyDenied bool
 }
 
-// Check decides whether a dispatch may run on the given lane.
-// cwd is the working directory the lane adapter would set ("" = prompt-only).
+// Plan resolves the directory a third-party dispatch must actually run in and
+// decides whether it may run at all. Callers MUST use the returned dir.
+//
+// The subtlety that makes this function necessary: an empty CWD does NOT mean
+// "no repository context". os/exec runs a child in the PARENT's current
+// directory when Cmd.Dir is empty, so a dispatch launched from inside a client
+// checkout would hand that checkout to the lane while the gate cheerfully
+// recorded "prompt-only" on the receipt (found in review, 2026-07-25 — it
+// defeated the entire gate on the most common invocation).
+//
+// So: when no CWD was requested we resolve the INHERITED one and gate on that.
+// If it is not allowlisted we do not refuse — we make prompt-only TRUE by
+// running in a neutral empty directory. The promise becomes enforced instead of
+// assumed. cleanup is never nil; call it when the dispatch completes.
+func Plan(lane, requestedCWD string, opt Options) (dir string, cleanup func(), d Decision) {
+	noop := func() {}
+	if !ThirdParty(lane) {
+		return requestedCWD, noop, Decision{Allowed: true, Reason: "lane is not third-party"}
+	}
+	effective := requestedCWD
+	if effective == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", noop, Decision{Allowed: false,
+				Reason: "third-party lane " + lane + " denied: the inherited working directory cannot be resolved (fail closed)"}
+		}
+		effective = wd
+	}
+	if d := Check(lane, effective, opt); d.Allowed {
+		return effective, noop, d
+	} else if requestedCWD != "" {
+		// The operator explicitly asked for this repo's context. Refuse.
+		return "", noop, d
+	}
+	// No repo context was requested; the inherited cwd merely happens to be
+	// somewhere unallowlisted. Enforce genuine prompt-only.
+	if opt.PromptOnlyDenied {
+		return "", noop, Decision{Allowed: false,
+			Reason: "third-party lane " + lane + " denied: prompt-only egress is closed by policy"}
+	}
+	tmp, err := os.MkdirTemp("", "mr-neutral-*")
+	if err != nil {
+		return "", noop, Decision{Allowed: false,
+			Reason: "third-party lane " + lane + " denied: cannot create a neutral working directory (fail closed): " + err.Error()}
+	}
+	return tmp, func() { _ = os.RemoveAll(tmp) }, Decision{Allowed: true,
+		Reason: "prompt-only ENFORCED in a neutral directory (the inherited cwd " + effective + " is not allowlisted, so it is not used)"}
+}
+
+// Check decides whether a dispatch may run on the given lane with an EFFECTIVE
+// working directory. Prefer Plan, which resolves an inherited cwd and can
+// enforce prompt-only; Check alone trusts the cwd it is handed.
 func Check(lane, cwd string, opt Options) Decision {
 	if !ThirdParty(lane) {
 		return Decision{Allowed: true, Reason: "lane is not third-party"}
@@ -87,6 +148,15 @@ func Check(lane, cwd string, opt Options) Decision {
 		return Decision{Allowed: false,
 			Reason: fmt.Sprintf("third-party lane %s denied: dispatch carries repository context (%s) and no repo is allowlisted. Add the repo to glm_allow_repos in config.json, or dispatch without a working directory.", lane, abs)}
 	}
+	// Resolve links on the cwd side: filepath.Abs is LEXICAL, so a junction
+	// inside an allowlisted repo would otherwise re-export its target.
+	// Fail closed if the path cannot be resolved at all.
+	if real, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+		abs = real
+	} else if !os.IsNotExist(rerr) {
+		return Decision{Allowed: false,
+			Reason: fmt.Sprintf("third-party lane %s denied: %s cannot be resolved through links (fail closed)", lane, abs)}
+	}
 	for _, root := range opt.AllowRepos {
 		if root == "" {
 			continue
@@ -94,6 +164,9 @@ func Check(lane, cwd string, opt Options) Decision {
 		rabs, rerr := filepath.Abs(root)
 		if rerr != nil {
 			continue // an unresolvable allowlist entry allows nothing
+		}
+		if real, lerr := filepath.EvalSymlinks(rabs); lerr == nil {
+			rabs = real
 		}
 		if within(abs, rabs) {
 			return Decision{Allowed: true,
@@ -119,9 +192,32 @@ func within(p, root string) bool {
 	if strings.HasPrefix(rel, "../") || rel == ".." {
 		return false
 	}
-	// filepath.Rel is case-sensitive on Windows; re-check the anchor.
+	// filepath.Rel already folds case per-element on Windows and errors across
+	// volumes; this anchor re-check is belt-and-braces (verified: Rel("D:/Dev",
+	// "d:/dev/repo") = "repo").
 	if !strings.EqualFold(filepath.VolumeName(p), filepath.VolumeName(root)) {
 		return false
 	}
 	return true
+}
+
+// AddDirs extracts directories a lane's --extra arguments would grant the child
+// beyond its working directory. Claude Code's --add-dir widens file access, so
+// gating only cwd would leave a second, unmeasured export channel open (found
+// in review, 2026-07-25). Accepts both "--add-dir X" and "--add-dir=X".
+func AddDirs(extra []string) []string {
+	var out []string
+	for i := 0; i < len(extra); i++ {
+		a := extra[i]
+		switch {
+		case a == "--add-dir":
+			if i+1 < len(extra) {
+				out = append(out, extra[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "--add-dir="):
+			out = append(out, strings.TrimPrefix(a, "--add-dir="))
+		}
+	}
+	return out
 }

@@ -338,12 +338,12 @@ func toolRoute(args json.RawMessage) toolResult {
 // a buffer — the ONLY thing that reaches the transport is this tool result.
 func toolRun(args json.RawMessage) toolResult {
 	var a struct {
-		Prompt     string `json:"prompt"`
-		Lane       string `json:"lane"`
-		Model      string `json:"model"`
-		Effort     string `json:"effort"`
-		Class      string `json:"class"`
-		CWD        string `json:"cwd"`
+		Prompt     string  `json:"prompt"`
+		Lane       string  `json:"lane"`
+		Model      string  `json:"model"`
+		Effort     string  `json:"effort"`
+		Class      string  `json:"class"`
+		CWD        string  `json:"cwd"`
 		TimeoutSec int     `json:"timeout_sec"`
 		DryRun     bool    `json:"dry_run"`
 		Batch      bool    `json:"batch"`
@@ -395,7 +395,7 @@ func runToolEnvelope(code int, out string) toolResult {
 	// isError for 1/4/5; a deferral (3) is isError:false (relegation is an answer).
 	return toolResult{
 		Content: []toolContent{{Type: "text", Text: string(b)}},
-		IsError: code == 1 || code == exitNotional || code == exitNotOK,
+		IsError: code == 1 || code == exitNotional || code == exitNotOK || code == exitEgressDenied,
 	}
 }
 

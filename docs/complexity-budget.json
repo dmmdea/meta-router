@@ -1,4 +1,4 @@
 {
-  "_note": "B12 ratchet: total non-test Go LOC ceiling. Raising this is a conscious act reviewed in the PR that needs it. Measured 16509 at 2026-07-25 (audit-remediation PR: fleet build-revision check + ledger quarantine + expiry guards). Keep this number in sync with the measurement — a stale _note was itself an audit finding (it read 15740 while the tree held 16137).",
+  "_note": "B12 ratchet: total non-test Go LOC ceiling. Raising this is a conscious act reviewed in the PR that needs it. Measured 17385 at 2026-07-25 (v0.15.0: egress gate + childenv scrub + B13/B14 canaries + a2 staleness guard). Ceiling deliberately NOT raised — only 115 lines of headroom remain, so the next feature-bearing PR must raise it consciously rather than discover it. Keep this number in sync with the measurement — a stale _note was itself an audit finding (it read 15740 while the tree held 16137).",
   "max_go_loc": 17500
 }

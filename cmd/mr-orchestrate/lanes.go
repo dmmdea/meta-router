@@ -373,34 +373,45 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	if warn != "" {
 		fmt.Fprintln(os.Stderr, "warn:", warn)
 	}
-	// DATA BOUNDARY, checked before anything is sent and BEFORE the quota gate:
-	// glm is a third-party lane, and a refusal here is not a quota judgement, so
-	// --force must not bypass it (same force-proof class as the R10 billing
-	// hard-stop). Denials are terminal for this dispatch: the caller re-routes
-	// or runs it on a subscription lane.
-	if d := egress.Check("glm", cwd, egress.Options{
-		AllowRepos:       cfg.GLMAllowRepos,
-		PromptOnlyDenied: cfg.EgressPromptOnlyDenied,
-	}); !d.Allowed {
+	// DATA BOUNDARY, resolved before anything is sent and BEFORE the quota gate.
+	// egress.Plan resolves the EFFECTIVE working directory — an empty CWD means
+	// the child inherits the orchestrator's cwd, not "no context" — and either
+	// allowlists it, enforces genuine prompt-only in a neutral directory, or
+	// refuses. --force must not bypass it: a data export is not a quota
+	// judgement (same force-proof class as the R10 billing hard-stop).
+	// --extra can widen the child's reach past cwd (--add-dir), so every such
+	// directory is gated too.
+	egressOpt := egress.Options{AllowRepos: cfg.GLMAllowRepos, PromptOnlyDenied: cfg.EgressPromptOnlyDenied}
+	denyEgress := func(reason string) (int, error) {
 		rec := dispatch.Record{
 			TS: now, Lane: "glm", Model: model, OutcomeClass: "egress_denied",
 			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason,
 			Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
-			Admit: false, AdmitState: "egress_denied", AdmitReason: d.Reason, Desc: desc,
-			EgressGate: d.Reason,
+			Admit: false, AdmitState: "egress_denied", AdmitReason: reason, Desc: desc,
+			EgressGate: reason,
 		}
 		sf.stamp(&rec)
 		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (egress denial)")
-		fmt.Fprintln(os.Stderr, "BLOCKED:", d.Reason)
+		fmt.Fprintln(os.Stderr, "BLOCKED:", reason)
 		b, _ := json.MarshalIndent(map[string]any{
-			"egress_denied": true, "lane": "glm", "reason": d.Reason,
+			"egress_denied": true, "lane": "glm", "reason": reason,
 		}, "", "  ")
 		fmt.Fprintln(out, string(b))
 		return exitEgressDenied, nil
-	} else {
-		egressReason = d.Reason
 	}
+	planDir, planCleanup, ed := egress.Plan("glm", cwd, egressOpt)
+	defer planCleanup()
+	if !ed.Allowed {
+		return denyEgress(ed.Reason)
+	}
+	for _, extraDir := range egress.AddDirs(extra) {
+		if d := egress.Check("glm", extraDir, egressOpt); !d.Allowed {
+			return denyEgress("--extra --add-dir " + extraDir + ": " + d.Reason)
+		}
+	}
+	cwd = planDir // ALWAYS explicit: never let the child inherit our cwd
+	egressReason = ed.Reason
 
 	g := glmGate(l.Snapshot(), glmAlertPath(), now, defaultThresholds, force)
 	req := claudelane.RunReq{Prompt: prompt, Model: model, Effort: effort, CWD: cwd,
@@ -432,6 +443,10 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 		b, _ := json.MarshalIndent(map[string]any{
 			"dry_run": true, "admit": true, "admit_state": g.State, "admit_reason": g.Reason,
 			"forced": g.Forced, "args": argv, "base_url": glmlane.BaseURL,
+			// The data-boundary decision and the directory the child would
+			// ACTUALLY run in — without these a dry-run cannot show what would
+			// leave the machine, which is the whole question for this lane.
+			"egress_gate": egressReason, "effective_cwd": cwd,
 		}, "", "  ")
 		fmt.Fprintln(out, string(b))
 		return 0, nil

@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/meta-router/internal/orch/egress"
 )
 
 // readBibleInvariants returns the normalized invariants block (CRLF→LF).
@@ -267,5 +269,115 @@ func TestCanaryAdjudicationLedger(t *testing.T) {
 	}
 	if rows == 0 {
 		t.Fatal("ledger has no data rows")
+	}
+}
+
+// B13 — every process this system spawns gets a SCRUBBED environment. R4 was
+// first "fixed" at two of five spawn sites; probe/verify/locallane still handed
+// children the ambient env, and probe+verify make LIVE billable calls that
+// write no receipt, so unscrubbed spend there is invisible (review 2026-07-25).
+// A grep-level canary is crude, but the alternative — remembering — already
+// failed once.
+func TestCanaryB13EverySpawnScrubsEnv(t *testing.T) {
+	root, err := RepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := GoSourceFiles(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawn := regexp.MustCompile(`exec\.Command(Context)?\(`)
+	scrubCall := regexp.MustCompile(`childenv\.Scrub\(`)
+	// Exemptions are an explicit ALLOWLIST, not a content heuristic. The first
+	// version excused any file mentioning "taskkill"/"git"/"go" as a
+	// "process-control helper" — and claudelane, codexlane and locallane all kill
+	// their child on timeout, so the three most important lane spawn sites were
+	// silently exempt: deleting their scrub still PASSED (mutation-tested
+	// 2026-07-25). An escape hatch keyed on the condition under test is not an
+	// escape hatch, it is a hole. Adding a file here must be a conscious act with
+	// a stated reason.
+	exempt := map[string]string{
+		"cmd/mr-goldverify/main.go": "spawns only git, go and the gold task's own verify command — no model lane, so R10 does not apply",
+	}
+	for _, f := range files {
+		rel := filepath.ToSlash(strings.TrimPrefix(filepath.ToSlash(f), filepath.ToSlash(root)+"/"))
+		if strings.Contains(rel, "internal/canary/") {
+			continue // this file's own regexes
+		}
+		if _, ok := exempt[rel]; ok {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Comments stripped: a comment MENTIONING childenv.Scrub used to satisfy
+		// this check, so deleting the call still passed (mutation-tested).
+		src := StripGoComments(string(b))
+		if !spawn.MatchString(src) {
+			continue
+		}
+		if !scrubCall.MatchString(src) {
+			t.Errorf("B13 violated — %s spawns a process but never calls childenv.Scrub; an ambient ANTHROPIC_API_KEY would redirect it to metered spend (R10). If this file genuinely spawns no model lane, add it to the exempt map with a reason.", rel)
+		}
+	}
+}
+
+// B14 — every third-party lane adapter reaches the egress gate.
+//
+// The gate's PREDICATE is lane-generic, but enforcement is not inherited: an
+// adapter that never calls egress.Plan is simply ungated, and the CHANGELOG for
+// v0.15.0 originally claimed the approved free lanes "inherit" the gate when
+// exactly one adapter (glm) called it. This canary turns that claim into a
+// mechanical one — seating groq/cloudflare/gemini as a run<Lane>Lane dispatcher
+// without wiring the gate fails here rather than exporting a client checkout.
+//
+// The lane set comes from egress.ThirdPartyLanes, so the canary cannot drift
+// from the gate it polices.
+func TestCanaryB14ThirdPartyLanesAreGated(t *testing.T) {
+	root, err := RepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := GoSourceFiles(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Collect each lane's dispatcher body: `func run<Lane>Lane(` up to the next
+	// top-level func. fn keeps the SOURCE spelling (runGLMLane, not runglmLane)
+	// so a failure names something greppable.
+	bodies, fn := map[string]string{}, map[string]string{}
+	for _, f := range files {
+		if strings.Contains(filepath.ToSlash(f), "/internal/canary/") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// StripGoComments also normalizes CRLF→LF, which the `\n}\n` body
+		// terminator below needs: a fresh `git clone` on Windows checks these
+		// files out with CRLF and the match would silently never fire. Both this
+		// and the comment stripping are mutation-tested, not assumed.
+		src := StripGoComments(string(b))
+		for _, lane := range egress.ThirdPartyLanes {
+			re := regexp.MustCompile(`(?is)\nfunc (run` + regexp.QuoteMeta(lane) + `Lane)\(.*?(\n}\n)`)
+			if m := re.FindStringSubmatch(src); m != nil {
+				bodies[lane], fn[lane] = m[0], m[1]
+			}
+		}
+	}
+	if len(bodies) == 0 {
+		t.Fatal("B14 found NO run<Lane>Lane dispatcher for any third-party lane — either the naming convention changed (fix this canary) or the gate now polices nothing")
+	}
+	if _, ok := bodies["glm"]; !ok {
+		t.Error("B14: glm is the shipped third-party lane and its dispatcher was not found — the convention this canary keys on has changed and the check has gone inert")
+	}
+	planCall := regexp.MustCompile(`egress\.Plan\(`)
+	for lane, body := range bodies {
+		if !planCall.MatchString(body) {
+			t.Errorf("B14 violated — %s (lane %q) dispatches a THIRD-PARTY lane but never calls egress.Plan; prompt and repo context would leave with no data-boundary decision and no receipt entry", fn[lane], lane)
+		}
 	}
 }

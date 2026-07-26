@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 )
 
 const version = "0.1.0"
@@ -269,6 +270,11 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 		args = append(args, "-cwd", cwd)
 	}
 	cmd := exec.Command(orchBin, args...)
+	// The replay spawns the ORCHESTRATOR, which then spawns lane binaries. It
+	// scrubs again downstream, but a weekly unattended run is the last place to
+	// rely on someone else's hygiene: an ambient ANTHROPIC_API_KEY here would be
+	// one bug away from turning ~150 replay dispatches into metered spend (R10).
+	cmd.Env = childenv.Scrub(os.Environ())
 	outB, runErr := cmd.CombinedOutput()
 	stdout := string(outB)
 	row.LatencyMs = time.Since(start).Milliseconds()
@@ -290,6 +296,19 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 	case 3:
 		row.OutcomeClass = "deferred" // admission closed — recorded, never hammered
 		row.Note = firstLine(outB, nil)
+		return row
+	case 6:
+		// Egress-denied: the data-boundary gate refused to send this task's
+		// working directory to a third-party lane. Like a deferral this is a
+		// HOLE, not an observation. Recording it as a failure would poison the
+		// oracle permanently — loadDone never refills a non-deferred row — and
+		// would make every third-party exec cell read as incompetent, which
+		// then drives the weekly A2 alarm and any B8 promotion eval off a lie
+		// (review 2026-07-25). The replay worktree lives under TEMP, so this
+		// fires for EVERY exec task on glm until TEMP (or an -agent-worktree
+		// root) is allowlisted.
+		row.OutcomeClass = "deferred"
+		row.Note = "egress-denied (hole, not a failure): " + firstLine(outB, nil)
 		return row
 	case 5:
 		row.Dispatched = true
@@ -345,6 +364,7 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 		vArgs = append(vArgs, "-repos", repos)
 	}
 	vc := exec.Command(verifyBin, vArgs...)
+	vc.Env = childenv.Scrub(os.Environ())
 	vOut, vErr := vc.CombinedOutput()
 	if vErr == nil {
 		row.VerifierPass = true

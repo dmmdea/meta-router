@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 	"github.com/dmmdea/meta-router/internal/policyeval"
 	"github.com/dmmdea/meta-router/internal/policyzoo"
@@ -380,13 +381,15 @@ func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool) (p
 				return nil, fmt.Errorf("neutral state seed %s: %w", f, werr)
 			}
 		}
-		extraEnv = append(os.Environ(), "MR_ORCH_STATE="+dir)
+		extraEnv = append(childenv.Scrub(os.Environ()), "MR_ORCH_STATE="+dir)
 	}
 	laneFor := map[string]string{}
 	for task, prompt := range promptOf {
 		cmd := exec.Command(bin, "route", "-desc", prompt, "-no-receipt")
+		// R10 (canary B13): even a read-only child gets a scrubbed environment.
+		cmd.Env = childenv.Scrub(os.Environ())
 		if extraEnv != nil {
-			cmd.Env = extraEnv
+			cmd.Env = extraEnv // already derived from os.Environ() + MR_ORCH_STATE
 		}
 		out, err := cmd.Output()
 		if err != nil {
