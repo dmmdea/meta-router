@@ -9,6 +9,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dmmdea/meta-router/internal/orch/ledger"
 )
 
 // These are BEHAVIOURAL tests of the GLM dispatcher's data boundary, and they
@@ -204,4 +207,58 @@ func dispatchDirLink(t *testing.T, link, target string) bool {
 		return false
 	}
 	return true
+}
+
+// SECURITY.md states that EVERY dispatch records its gate decision on the receipt,
+// "including quota deferrals and paced deferrals, which are decided after the gate
+// has already ruled". Nothing tested that: the only egress_gate assertion in the
+// suite was on dry-run stdout, so the deferral receipts could silently lose the
+// field and the security document would quietly become false (review round 4).
+func TestGLMDeferralReceiptCarriesTheEgressGate(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("MR_ORCH_STATE", state)
+	repo := t.TempDir()
+	cfg, err := json.Marshal(map[string]any{"glm_allow_repos": []string{repo}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "config.json"), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Exhaust the glm 5h window so the quota gate defers AFTER the egress gate has
+	// already allowed the dispatch.
+	if err := ledger.Update(filepath.Join(state, "ledger.json"), func(l *ledger.Ledger) {
+		l.SetCapacity("glm", ledger.Win5h, 10)
+		l.AddShadow("glm", ledger.Win5h, 100, time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := runGLMLane(&out, "hello", "glm-5.2", "", repo, 30, nil,
+		false, false, "test", "deferral receipt", recFields{}, strategyFields{})
+	if err != nil {
+		t.Fatalf("runGLMLane: %v", err)
+	}
+	if code != exitDeferred {
+		t.Fatalf("test premise: the quota gate must defer, got exit %d: %s", code, out.String())
+	}
+	b, rerr := os.ReadFile(filepath.Join(state, "dispatch.jsonl"))
+	if rerr != nil {
+		t.Fatalf("no receipt written: %v", rerr)
+	}
+	var rec map[string]any
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if jerr := json.Unmarshal([]byte(lines[len(lines)-1]), &rec); jerr != nil {
+		t.Fatalf("receipt is not JSON: %v\n%s", jerr, b)
+	}
+	if rec["outcome_class"] != "deferred" {
+		t.Fatalf("expected a deferral receipt, got %v", rec["outcome_class"])
+	}
+	gate, _ := rec["egress_gate"].(string)
+	if gate == "" {
+		t.Fatal("the deferral receipt dropped egress_gate — the gate ruled before quota did, and SECURITY.md promises every decision is recorded")
+	}
+	if !strings.Contains(gate, "allowlisted") {
+		t.Fatalf("the receipt must carry the real basis, got %q", gate)
+	}
 }

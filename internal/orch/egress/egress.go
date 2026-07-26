@@ -221,6 +221,21 @@ func canonical(p string) (string, error) {
 	}
 }
 
+// pathShaped reports whether a token could name a filesystem location. Used only
+// for the optional-value flags, where the value is normally an inert filter word
+// and refusing every such flag outright would block diagnosing a dispatch.
+// Conservative: anything with a separator, a drive letter, or a leading dot is
+// treated as a path.
+func pathShaped(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.ContainsAny(s, `/\`) || strings.HasPrefix(s, ".") {
+		return true
+	}
+	return len(s) >= 2 && s[1] == ':'
+}
+
 // isUNC reports whether p is a UNC path (\\server\share\...).
 func isUNC(p string) bool {
 	return strings.HasPrefix(filepath.ToSlash(p), "//")
@@ -332,10 +347,23 @@ func RefuseExtras(extra []string) []string {
 			bad = append(bad, tok) // a bare positional; the prompt is passed separately
 			continue
 		}
-		name, _, hasVal := strings.Cut(tok, "=")
+		name, val, hasVal := strings.Cut(tok, "=")
 		if extraOptionalValue[name] {
-			// Consume a following value only when it cannot be a flag itself.
-			if !hasVal && i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
+			// Consume a following value only when it cannot be a flag itself —
+			// and only when it cannot be a PATH. `--debug`'s filter is a token
+			// like "api"; consuming it unconditionally let `-d ../client-secret`
+			// through as an unjudged positional, the one shape the refusal list
+			// did not cover (review round 4).
+			if hasVal {
+				if pathShaped(val) {
+					bad = append(bad, tok)
+				}
+				continue
+			}
+			if i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
+				if pathShaped(extra[i+1]) {
+					bad = append(bad, extra[i+1])
+				}
 				i++
 			}
 			continue

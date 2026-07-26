@@ -74,8 +74,8 @@ func TestCanaryBibleVerifyPointers(t *testing.T) {
 			ptrs = append(ptrs, tm[1])
 		}
 	}
-	if len(ptrs) < 14 {
-		t.Fatalf("expected >=14 verify pointers (B1-B14, some with two), found %d", len(ptrs))
+	if len(ptrs) < 15 {
+		t.Fatalf("expected >=15 verify pointers (B1-B14, B14 citing two), found %d", len(ptrs))
 	}
 	tests, err := GoSourceFiles(root, true)
 	if err != nil {

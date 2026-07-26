@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [0.15.0] — 2026-07-25
 
+### Fixed — review round 4 (Opus, 10-agent panel; verdict DO-NOT-MERGE, one blocker with a one-token fix)
+
+- **BLOCKER — round 3's resolver `break`ed on the FIRST `.Env` assignment after a spawn**, so an ambient overwrite following the scrub was never examined. That regressed a capability round 2 had, and every doc in the tree — `ROUTER_BIBLE.md`, the resolver's own comment, the canary's comment, this changelog — said "the LAST assignment decides". The reviewer reproduced it A/B/A against an isolated export and confirmed the one-token remedy; it is applied, and pinned by `TestSpawnResolverRules` so round 5 does not rediscover it.
+- **A scrub the default path never runs is not a scrub.** `if len(req.Env) > 0 { cmd.Env = childEnv(…) }` left `cmd.Env == nil` — full ambient inheritance — on the common path and still passed. The resolver now tracks block depth: an `.Env` assignment nested deeper than its spawn is conditional and cannot be credited.
+- **Scrub credit is now a BASE check, not a mention.** `cmd.Env = append(os.Environ(), childenv.Scrub(pins)...)` was credited even though the ambient environment is the base — the same mention-vs-dataflow defect fixed one level up in round 3, one level down. `append(X, …)` recurses into `X`, which is the shape codexlane and mr-scorecard legitimately use.
+- **Helper credit requires EVERY environment-returning path to carry the scrub.** It was existential, so a helper with one clean and one dirty return laundered every call site.
+- **An aliased `import ex "os/exec"` was invisible** to the resolver *and* to the accounting tripwire meant to catch under-counting. The local import name is now resolved per file.
+- `nonLaneCommands` no longer exempts shells and package managers (`powershell`, `bash`, `sh`, `cmd`, `npx`, `npm`, `go`, …), each of which can start a model lane — the list contradicted the invariant it serves. It is now `git` plus the kill family, which is what the tree's real unscrubbed spawns need.
+- `-d/--debug`'s OPTIONAL value was forwarded unjudged, so `-extra "-d ../client-secret"` exited 0 with the path in argv — the one shape the refusal list did not cover. Path-shaped optional values are now refused; inert filters (`--debug api`) still work.
+- A quota or paced deferral receipt's `egress_gate` had **no test**, so `SECURITY.md`'s "every dispatch records its gate decision" was unenforced; `TestGLMDeferralReceiptCarriesTheEgressGate` now pins it. The Bible verify-pointer arity guard was `< 14` against 15 pointers, letting B14's behavioural pointer be un-cited silently.
+- **MIGRATION.** `mr-orchestrate run -lane glm -extra "--add-dir <dir>"` worked one commit ago and now exits 6, even when `<dir>` is allowlisted. That is deliberate (see round 3), and it is a behaviour change rather than a pure hole-closing for anyone driving the CLI by hand: pass the directory as `-cwd` instead, with the repo in `glm_allow_repos`.
+- **Full mutation matrix re-run after every change above — 19/19 defeat classes caught:** the scrub deleted at each of the 10 spawn sites, plus ambient-overwrite, conditional scrub, append-argument scrub, laundering helper, rebind-after-scrub, `&exec.Cmd{}` literal, var-decl spawn, second-spawn-in-a-scrubbing-file, and comment-only claim. B12 re-measured 18286 against a ceiling of 18300.
+
 ### Fixed — review round 3 (Opus, 13-agent panel; verdict DO-NOT-MERGE, 3 blockers, all reproduced live)
 
 Round 2 built the gate. Round 3 proved two of its fixes still leaked, in the same function, for new reasons.

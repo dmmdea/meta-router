@@ -336,3 +336,26 @@ func TestUnreachableUNCFailsClosedAndIsNotLocalised(t *testing.T) {
 		t.Fatalf("an unresolvable UNC path must fail closed: %+v", d)
 	}
 }
+
+// -d/--debug takes an OPTIONAL value, so the token after it is ambiguous. An inert
+// filter word is fine; a path is not — `-d ../client-secret` previously exited 0
+// with the path forwarded as an unjudged positional (review round 4).
+func TestRefuseExtrasJudgesOptionalValues(t *testing.T) {
+	for _, extra := range [][]string{
+		{"-d", "../client-secret"},
+		{"--debug", "D:/client"},
+		{"--debug=../x"},
+		{"-d", "./rel"},
+	} {
+		if bad := RefuseExtras(extra); len(bad) == 0 {
+			t.Errorf("%v carries a path-shaped optional value and must be refused", extra)
+		}
+	}
+	for _, extra := range [][]string{
+		{"-d"}, {"--debug"}, {"--debug", "api"}, {"--debug=api"},
+	} {
+		if bad := RefuseExtras(extra); len(bad) != 0 {
+			t.Errorf("%v is an inert debug filter and must be allowed, refused %v", extra, bad)
+		}
+	}
+}

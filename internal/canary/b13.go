@@ -26,6 +26,9 @@ type Spawn struct {
 	Scrubbed bool
 	// Func names the enclosing function, for a failure message that can be found.
 	Func string
+	// Conditional marks a spawn whose only scrub sits in a deeper block — an
+	// if/else arm or a loop body — so it does not run on every path to the spawn.
+	Conditional bool
 }
 
 // nonLaneCommands are argv[0] literals that cannot be a model lane, so spawning
@@ -36,11 +39,16 @@ type Spawn struct {
 // "process-control helper" — and claudelane, codexlane and locallane all kill a
 // timed-out child, so the three most important lane spawn sites were exempt and
 // deleting their scrub still passed (mutation-tested 2026-07-25).
+// Deliberately SHORT. The first version also exempted shells and package managers
+// (`powershell`, `bash`, `sh`, `cmd`, `npx`, `npm`, `go`, …), every one of which
+// can start a model lane — `powershell -c claude -p …` is one exempt spawn away
+// from an unscrubbed dispatch, which contradicts the invariant this list serves
+// (review round 4). Only programs that cannot themselves become a lane stay, and
+// each is here because a real unscrubbed spawn in this tree needs it: `git` for
+// the replay's worktree plumbing, the kill family for timeout handling.
 var nonLaneCommands = map[string]bool{
-	"git": true, "go": true, "gofmt": true,
+	"git":      true,
 	"taskkill": true, "kill": true, "tasklist": true,
-	"npm": true, "npx": true, "pnpm": true, "yarn": true,
-	"cmd": true, "powershell": true, "pwsh": true, "sh": true, "bash": true,
 }
 
 // Spawns parses every non-test Go file under root and returns each process-spawn
@@ -69,7 +77,8 @@ func Spawns(root string) ([]Spawn, error) {
 			return nil, fmt.Errorf("%s: %w", rel, perr)
 		}
 		accounted := 0
-		total := countSpawns(file)
+		execName := execAlias(file)
+		total := countSpawns(file, execName)
 		// Every OUTERMOST function body is a scope. Declared functions and
 		// package-level func literals both count — `var spawnSupervisor = func(...)`
 		// holds a real lane spawn, and walking only ast.FuncDecl missed it (caught
@@ -91,7 +100,7 @@ func Spawns(root string) ([]Spawn, error) {
 			if body == nil {
 				return false
 			}
-			ss := spawnsInScope(fset, body, name, rel, scrubbers[filepath.Dir(rel)])
+			ss := spawnsInScope(fset, body, name, rel, scrubbers[filepath.Dir(rel)], execName)
 			accounted += len(ss)
 			out = append(out, ss...)
 			return false
@@ -115,16 +124,16 @@ func relTo(root, f string) string {
 // so it must recognize exactly the same construction forms spawnsInScope does —
 // otherwise a form one sees and the other does not produces a mismatch reported as
 // "outside a function body", which is a true failure with a false diagnosis.
-func countSpawns(n ast.Node) int {
+func countSpawns(n ast.Node, execName string) int {
 	c := 0
 	ast.Inspect(n, func(m ast.Node) bool {
 		switch x := m.(type) {
 		case *ast.CallExpr:
-			if isSpawn(x) != "" {
+			if isSpawn(x, execName) != "" {
 				c++
 			}
 		case *ast.CompositeLit:
-			if isCmdLit(x) {
+			if isCmdLit(x, execName) {
 				c++
 			}
 		}
@@ -133,14 +142,34 @@ func countSpawns(n ast.Node) int {
 	return c
 }
 
+// execAlias returns the local name a file binds "os/exec" to, or "" when the
+// file does not import it. Hardcoding "exec" made `import ex "os/exec"` invisible
+// to BOTH the resolver and the accounting tripwire meant to catch under-counting
+// (review round 4) — an aliased import is legal Go and would have shipped silently.
+func execAlias(file *ast.File) string {
+	for _, imp := range file.Imports {
+		if imp.Path == nil || imp.Path.Value != `"os/exec"` {
+			continue
+		}
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return "exec"
+	}
+	return ""
+}
+
 // isSpawn returns "Command", "CommandContext" or "" for a call expression.
-func isSpawn(call *ast.CallExpr) string {
+func isSpawn(call *ast.CallExpr, execName string) string {
+	if execName == "" {
+		return ""
+	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return ""
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	if !ok || pkg.Name != "exec" {
+	if !ok || pkg.Name != execName {
 		return ""
 	}
 	if sel.Sel.Name == "Command" || sel.Sel.Name == "CommandContext" {
@@ -184,7 +213,7 @@ func commandLiteral(call *ast.CallExpr, kind string) string {
 // derives from childenv.Scrub. An assignment that reads <name>.Env (append) keeps
 // whatever the previous verdict was, because extending an environment cannot
 // unscrub it.
-func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, scrubbers map[string]bool) []Spawn {
+func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, scrubbers map[string]bool, execName string) []Spawn {
 	type event struct {
 		pos     token.Pos
 		kind    int // 0 = spawn, 1 = env assignment
@@ -193,11 +222,22 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 		scrub   bool // env assignment: derives from Scrub
 		extends bool // env assignment: reads <name>.Env, so it preserves
 		hasVar  bool
+		depth   int // block nesting relative to the function body
 	}
 	var events []event
 	claimed := map[ast.Node]bool{}
 
-	record := func(n ast.Node) bool {
+	depth := 0
+	var record func(n ast.Node) bool
+	record = func(n ast.Node) bool {
+		if _, ok := n.(*ast.BlockStmt); ok {
+			depth++
+			for _, c := range childNodes(n) {
+				record(c)
+			}
+			depth--
+			return false
+		}
 		switch x := n.(type) {
 		case *ast.AssignStmt:
 			for i, lhs := range x.Lhs {
@@ -211,11 +251,11 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 				}
 				events = append(events, event{pos: x.Pos(), kind: 1, name: id.Name,
 					scrub:   containsScrub(x.Rhs[i], scrubbers),
-					extends: referencesEnvOf(x.Rhs[i], id.Name)})
+					extends: referencesEnvOf(x.Rhs[i], id.Name), depth: depth})
 			}
 			for i, rhs := range x.Rhs {
 				call, ok := rhs.(*ast.CallExpr)
-				if !ok || isSpawn(call) == "" {
+				if !ok || isSpawn(call, execName) == "" {
 					continue
 				}
 				claimed[call] = true
@@ -226,7 +266,7 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 					}
 				}
 				events = append(events, event{pos: call.Pos(), kind: 0, name: name,
-					cmd: commandLiteral(call, isSpawn(call)), hasVar: name != ""})
+					cmd: commandLiteral(call, isSpawn(call, execName)), hasVar: name != "", depth: depth})
 			}
 		case *ast.ValueSpec:
 			// `var cmd = exec.Command(...)` — a DeclStmt, not an AssignStmt. The
@@ -234,7 +274,7 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 			// loud but wrong diagnosis.
 			for i, v := range x.Values {
 				call, ok := v.(*ast.CallExpr)
-				if !ok || isSpawn(call) == "" {
+				if !ok || isSpawn(call, execName) == "" {
 					continue
 				}
 				claimed[call] = true
@@ -243,12 +283,17 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 					name = x.Names[i].Name
 				}
 				events = append(events, event{pos: call.Pos(), kind: 0, name: name,
-					cmd: commandLiteral(call, isSpawn(call)), hasVar: name != ""})
+					cmd: commandLiteral(call, isSpawn(call, execName)), hasVar: name != "", depth: depth})
 			}
 		}
-		return true
+		for _, c := range childNodes(n) {
+			record(c)
+		}
+		return false
 	}
-	ast.Inspect(body, record)
+	for _, st := range body.List {
+		record(st)
+	}
 
 	// Unclaimed spawns keep no handle at all (chained .Run(), passed inline).
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -256,7 +301,7 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 		if !ok || claimed[call] {
 			return true
 		}
-		if kind := isSpawn(call); kind != "" {
+		if kind := isSpawn(call, execName); kind != "" {
 			events = append(events, event{pos: call.Pos(), kind: 0, cmd: commandLiteral(call, kind)})
 		}
 		return true
@@ -265,7 +310,7 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 	// isSpawn, so an unscrubbed spawn written this way shipped with zero signal.
 	ast.Inspect(body, func(n ast.Node) bool {
 		cl, ok := n.(*ast.CompositeLit)
-		if !ok || !isCmdLit(cl) {
+		if !ok || !isCmdLit(cl, execName) {
 			return true
 		}
 		scrubbed := false
@@ -310,8 +355,23 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 				if later.extends {
 					continue // append preserves whatever it already was
 				}
+				// LAST non-extends assignment wins — deliberately no break here.
+				// Breaking on the FIRST one regressed a capability round 2 had:
+				// `cmd.Env = childenv.Scrub(...)` followed by `cmd.Env = os.Environ()`
+				// scored as scrubbed, and every doc comment in this file said the
+				// opposite of what the code did (review round 4). Pinned by
+				// TestSpawnScrubOrdering.
 				s.Scrubbed = later.scrub
-				break
+				// A scrub that only happens on SOME paths is not a scrub. An
+				// assignment nested deeper than the spawn's own block is
+				// conditional (an if/else arm, a loop body), so it cannot be
+				// credited unconditionally: `if len(req.Env) > 0 { cmd.Env = … }`
+				// leaves cmd.Env nil — full ambient inheritance — on the default
+				// path, and statement order alone cannot see that.
+				if later.depth > e.depth {
+					s.Scrubbed = false
+					s.Conditional = true
+				}
 			}
 		}
 		out = append(out, s)
@@ -320,44 +380,49 @@ func spawnsInScope(fset *token.FileSet, body *ast.BlockStmt, fname, rel string, 
 }
 
 // isCmdLit reports whether a composite literal constructs an exec.Cmd.
-func isCmdLit(cl *ast.CompositeLit) bool {
+func isCmdLit(cl *ast.CompositeLit, execName string) bool {
+	if execName == "" {
+		return false
+	}
 	sel, ok := cl.Type.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Cmd" {
 		return false
 	}
 	id, ok := sel.X.(*ast.Ident)
-	return ok && id.Name == "exec"
+	return ok && id.Name == execName
 }
 
-// containsScrub reports whether an expression passes through childenv.Scrub —
-// either directly, or via a same-package helper that itself calls it.
+// containsScrub reports whether an expression's BASE value is the scrub result —
+// either childenv.Scrub directly, or a same-package helper that returns it.
 //
-// The indirection is admitted STRUCTURALLY, not by name: scrubbers is built by
-// scanning the package for functions whose own body calls childenv.Scrub. The
-// claude lane legitimately wraps it (`childEnv(os.Environ(), req.Env)`) so that
-// the lane's own deliberate pins are appended AFTER the scrub, and demanding a
-// literal call at every site would force that abstraction to be inlined.
+// The base, not "appears anywhere": the previous version walked the whole
+// expression, so `cmd.Env = append(os.Environ(), childenv.Scrub(req.Env)...)`
+// was credited even though the ambient environment is the base and the scrub only
+// contributes the pins (review round 4). That is the same mention-vs-dataflow
+// defect fixed one level up in the helper credit, and it has to hold here too.
+//
+// append(X, …) recurses into X, because appending to a scrubbed base keeps it
+// scrubbed — that is the shape codexlane and mr-scorecard legitimately use.
 func containsScrub(e ast.Expr, scrubbers map[string]bool) bool {
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		switch x := n.(type) {
-		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok && id.Name == "childenv" && x.Sel.Name == "Scrub" {
-				found = true
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	if id, ok := call.Fun.(*ast.Ident); ok {
+		if id.Name == "append" {
+			if len(call.Args) == 0 {
 				return false
 			}
-		case *ast.CallExpr:
-			if id, ok := x.Fun.(*ast.Ident); ok && scrubbers[id.Name] {
-				found = true
-				return false
-			}
+			return containsScrub(call.Args[0], scrubbers)
 		}
-		return true
-	})
-	return found
+		return scrubbers[id.Name]
+	}
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "childenv" && sel.Sel.Name == "Scrub" {
+			return true
+		}
+	}
+	return false
 }
 
 // referencesEnvOf reports whether an expression reads <name>.Env, i.e. whether
@@ -424,11 +489,8 @@ func bodyReturnsScrub(body *ast.BlockStmt) bool {
 	// anywhere would accept `_ = childenv.Scrub(x); return os.Environ()`.
 	// Tracking assignment-to-local is the smallest rule that separates those two.
 	derived := map[string]bool{}
-	found := false
+	returns, scrubReturns := 0, 0
 	ast.Inspect(body, func(n ast.Node) bool {
-		if found {
-			return false
-		}
 		switch x := n.(type) {
 		case *ast.AssignStmt:
 			for i, lhs := range x.Lhs {
@@ -447,20 +509,29 @@ func bodyReturnsScrub(body *ast.BlockStmt) bool {
 				derived[id.Name] = false
 			}
 		case *ast.ReturnStmt:
-			for _, r := range x.Results {
-				if directScrub(r) {
-					found = true
-					return false
-				}
-				if id, ok := r.(*ast.Ident); ok && derived[id.Name] {
-					found = true
-					return false
-				}
+			if len(x.Results) == 0 {
+				return true
+			}
+			r := x.Results[0]
+			// A nil first result is an error path, not an environment.
+			if id, ok := r.(*ast.Ident); ok && id.Name == "nil" {
+				return true
+			}
+			returns++
+			if directScrub(r) {
+				scrubReturns++
+				return false
+			}
+			if id, ok := r.(*ast.Ident); ok && derived[id.Name] {
+				scrubReturns++
 			}
 		}
 		return true
 	})
-	return found
+	// EVERY environment-returning path must carry the scrub. Existential credit —
+	// "some return is scrubbed" — let a helper with a second, unscrubbed return
+	// launder every call site (review round 4).
+	return returns > 0 && returns == scrubReturns
 }
 
 // referencesIdent reports whether an expression reads the named identifier.
@@ -506,4 +577,23 @@ func (s Spawn) Exempt() (bool, string) {
 		return true, s.Command + " is not a model lane"
 	}
 	return false, s.Command + " is not on the non-lane list"
+}
+
+// childNodes returns a node's immediate children, so a walk can maintain its own
+// block-nesting depth (ast.Inspect gives no depth signal and its callback cannot
+// tell an if-body assignment from a top-level one).
+func childNodes(n ast.Node) []ast.Node {
+	var out []ast.Node
+	first := true
+	ast.Inspect(n, func(c ast.Node) bool {
+		if first {
+			first = false
+			return true
+		}
+		if c != nil {
+			out = append(out, c)
+		}
+		return false
+	})
+	return out
 }
