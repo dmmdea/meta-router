@@ -7,6 +7,49 @@ import (
 	"testing"
 )
 
+// The oracle row records the model PIN, not the model that answered, so a lane
+// replayed without a pin writes evidence under a model nobody chose. That is
+// what silently happened: -claude-model defaulted to claude-sonnet-5 and the A2
+// weekly script never passed it, so 204 claude rows recorded Sonnet while the
+// rank table dispatched claude-opus-4-8. These pin the defaults OUT.
+func TestRequireModelPins(t *testing.T) {
+	cases := []struct {
+		name  string
+		lanes []string
+		model map[string]string
+		want  []string
+	}{
+		{"all pinned", []string{"claude", "codex"},
+			map[string]string{"claude": "claude-opus-5", "codex": "gpt-5.6-terra"}, nil},
+		{"claude unpinned is caught", []string{"claude", "codex"},
+			map[string]string{"claude": "", "codex": "gpt-5.6-terra"}, []string{"claude"}},
+		{"whitespace is not a pin", []string{"claude"},
+			map[string]string{"claude": "   "}, []string{"claude"}},
+		{"only replayed lanes are required", []string{"claude"},
+			map[string]string{"claude": "claude-opus-5", "glm": ""}, nil},
+		{"order follows the lane list, not the map", []string{"local", "glm"},
+			map[string]string{"local": "", "glm": ""}, []string{"local", "glm"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := requireModelPins(c.lanes, c.model)
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Fatalf("requireModelPins = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// The error must tell the operator which flags to pass, not just what is wrong.
+func TestPinFlagsForIsActionable(t *testing.T) {
+	got := pinFlagsFor([]string{"claude", "glm"})
+	for _, want := range []string{"-claude-model", "-glm-model"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("pinFlagsFor = %q, must name %s", got, want)
+		}
+	}
+}
+
 func TestExtractDiff(t *testing.T) {
 	cases := []struct{ name, in, wantPrefix string }{
 		{"clean diff", "diff --git a/x.go b/x.go\n@@ -1 +1 @@\n-a\n+b\n", "diff --git"},

@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.16.0] — 2026-07-27
+
+### Changed
+- **`mr-goldreplay` no longer defaults a model pin — every replayed lane must be pinned explicitly (exit 2 otherwise).** The oracle row records the PIN, not the model that answered, so an unpassed flag writes evidence under a model nobody chose. That was live: `-claude-model` defaulted to `claude-sonnet-5` and the A2 weekly script passed `-codex-model` and `-glm-model` but never `-claude-model`, so **all 204 claude observations in the oracle recorded Sonnet 5 while the compiled seed rank table dispatches `claude-opus-4-8` at rank 1 on the hard classes**. The scorecard resolves cells by `(task, lane)` with no model dimension, so the router's Opus decisions were scored with Sonnet's measured results for the life of the table — `router-live 1.224× non-inferior` is a measurement of a configuration that was never deployed. `claudelane/args.go` already refused an unpinned model for this exact reason ("unpinned claude -p defaults to Sonnet 5"); the flag default reintroduced the trap one layer up. All four lane pins (`claude`, `codex`, `glm`, `local`) are now required, enforced per lane actually replayed, with an error that names the missing flags.
+
+### Known gaps (recorded, not fixed here)
+- The scorecard remains model-blind, so the A2 script deliberately keeps pinning `claude-sonnet-5`: switching to Opus now would blend two models under one `claude` key rather than update the table. The pin moves only once the evidence cell becomes `(lane, model, effort)`.
+- **Effort is unmeasured entirely.** `mr-goldreplay` never passed or recorded it and the oracle row has no `effort` field, yet the seed table ranks by effort (`xhigh` rank 1, `high` rank 2). Those rankings carry no evidence.
+- **Gold-set coverage is 5 of the router's 15 classes** (`agentic-coding`, `research`, `review`, `extraction`, `quick-edit`). Ten classes have never been measured, and the scorecard's own note records that production `classify.go` disagrees with the gold labels on 48/56 tasks.
+
 ## [0.15.0] — 2026-07-25
 
 ### Fixed — review round 4 (Opus, 10-agent panel; verdict DO-NOT-MERGE, one blocker with a one-token fix)

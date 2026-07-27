@@ -168,10 +168,20 @@ func main() {
 	orchBin := flag.String("orchestrate", defaultHomeBin("mr-orchestrate.exe"), "mr-orchestrate binary")
 	verifyBin := flag.String("goldverify", defaultHomeBin("mr-goldverify.exe"), "mr-goldverify binary (exec tasks)")
 	reposFlag := flag.String("repos", "", "logical repo overrides for exec tasks: name=path,...")
-	claudeModel := flag.String("claude-model", "claude-sonnet-5", "model pin for the claude lane")
-	codexModel := flag.String("codex-model", "gpt-5.5", "model pin for the codex lane")
-	glmModel := flag.String("glm-model", "glm-5.2", "model pin for the glm lane")
-	localModel := flag.String("local-model", "gemma4-cascade", "model tag for the local lane")
+	// NO DEFAULTS. A default model pin is not a convenience, it is a mislabelled
+	// oracle: the row records the PIN, so an unpassed flag writes evidence under
+	// a model nobody chose. That is not hypothetical — `-claude-model` defaulted
+	// to claude-sonnet-5 and the A2 weekly script passed -codex-model and
+	// -glm-model but not -claude-model, so all 204 claude observations recorded
+	// Sonnet 5 while the seed rank table dispatched claude-opus-4-8. The router's
+	// Opus decisions were scored with Sonnet's results for the life of the table.
+	// claudelane/args.go already refuses an unpinned model for exactly this
+	// reason; the flag default reintroduced the trap one layer up (audit
+	// 2026-07-27). Required per lane actually replayed — see requireModelPins.
+	claudeModel := flag.String("claude-model", "", "model pin for the claude lane (REQUIRED when -lanes includes claude)")
+	codexModel := flag.String("codex-model", "", "model pin for the codex lane (REQUIRED when -lanes includes codex)")
+	glmModel := flag.String("glm-model", "", "model pin for the glm lane (REQUIRED when -lanes includes glm)")
+	localModel := flag.String("local-model", "", "model tag for the local lane (REQUIRED when -lanes includes local)")
 	timeoutSec := flag.Int("timeout", 900, "per-dispatch timeout (seconds)")
 	maxNotional := flag.Float64("max-notional", 10, "claude-lane notional guard ceiling (real coding tasks exceed the $2 default)")
 	claudeExtra := flag.String("claude-extra", "--dangerously-skip-permissions",
@@ -200,6 +210,12 @@ func main() {
 			fatal("unknown lane %q", l)
 		}
 		lanes = append(lanes, l)
+	}
+	if missing := requireModelPins(lanes, laneModel); len(missing) > 0 {
+		fatal("model pin required for lane(s) %s: the oracle row records the PIN, so replaying "+
+			"a lane without one writes evidence under a model nobody chose (this is how 204 claude "+
+			"rows recorded sonnet-5 while the rank table dispatched opus-4-8). Pass %s",
+			strings.Join(missing, ", "), pinFlagsFor(missing))
 	}
 
 	done := loadDone(*outPath)
@@ -415,6 +431,29 @@ func csvSet(s string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// requireModelPins returns the lanes being replayed that carry no model pin, in
+// the caller's lane order (deterministic message). Only lanes actually in the
+// run are required, so `-lanes claude` needs no glm pin.
+func requireModelPins(lanes []string, laneModel map[string]string) []string {
+	var missing []string
+	for _, l := range lanes {
+		if strings.TrimSpace(laneModel[l]) == "" {
+			missing = append(missing, l)
+		}
+	}
+	return missing
+}
+
+// pinFlagsFor renders the flags the operator must pass, so the error is
+// actionable rather than a diagnosis they have to translate.
+func pinFlagsFor(lanes []string) string {
+	flags := make([]string, 0, len(lanes))
+	for _, l := range lanes {
+		flags = append(flags, "-"+l+"-model <id>")
+	}
+	return strings.Join(flags, " ")
 }
 
 func gitC(dir string, timeoutSec int, args ...string) ([]byte, error) {
