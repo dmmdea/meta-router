@@ -215,16 +215,20 @@ func main() {
 	// validation and then be RECORDED and DISPATCHED untrimmed, producing a
 	// model string unequal to every other row's — the same mislabelling this
 	// gate exists to prevent, one layer down (review 2026-07-27).
-	laneModel := normalizePins(map[string]string{
+	rawPins := map[string]string{
 		"claude": *claudeModel, "codex": *codexModel, "glm": *glmModel, "local": *localModel,
-	})
+	}
+	// rawPins is passed on UNNORMALIZED and that is deliberate: buildRunPlan does
+	// its own normalization for the dispatch decision, and requireModelPins
+	// TrimSpaces internally. Normalizing here too would be dead code that looks
+	// load-bearing — an equivalent mutant a future reader would try to "fix".
 	lanes := parseLanes(*lanesFlag)
 	for _, l := range lanes {
-		if _, ok := laneModel[l]; !ok {
+		if _, ok := rawPins[l]; !ok {
 			fatal("unknown lane %q", l)
 		}
 	}
-	if missing := requireModelPins(lanes, laneModel); len(missing) > 0 {
+	if missing := requireModelPins(lanes, rawPins); len(missing) > 0 {
 		fatal("model pin required for lane(s) %s: the oracle row records the PIN, so replaying "+
 			"a lane without one writes evidence under a model nobody chose (this is how 204 claude "+
 			"rows recorded sonnet-5 while the rank table dispatched opus-4-8). Pass %s",
@@ -238,7 +242,53 @@ func main() {
 	}
 	defer out.Close()
 
-	total, run, skip := 0, 0, 0
+	plan := buildRunPlan(tasks, *lanesFlag, rawPins, *trials, taskFilter, classFilter, done)
+	for _, c := range plan.Run {
+		row := replayOne(c.GoldTask, c.Lane, c.Model, c.Trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
+		b, _ := json.Marshal(row)
+		fmt.Fprintln(out, string(b))
+		fmt.Printf("[%s %s trial %d] dispatched=%v outcome=%s pass=%v (%dms) %s\n",
+			row.Task, row.Lane, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, row.Note)
+	}
+	fmt.Printf("\nreplay complete: %d cells (%d run now, %d already recorded) → %s\n",
+		plan.Total, len(plan.Run), plan.Skipped, *outPath)
+}
+
+// plannedCell is one (task, lane, model, trial) the replay will dispatch.
+type plannedCell struct {
+	Task, Lane, Model string
+	Trial             int
+	GoldTask          goldtask.Task
+}
+
+// runPlan is what a replay WOULD do, decided before anything is dispatched.
+type runPlan struct {
+	Run     []plannedCell
+	Skipped int
+	Total   int
+}
+
+// buildRunPlan resolves filters, the per-lane model pin and the resume set into
+// the exact cells that will be dispatched.
+//
+// This is a FUNCTION rather than an inline loop because the defects lived at
+// the CALL SITES, not in the helpers. Review 2026-07-27 mutation-tested three
+// reverts against the previous shape — the resume lookup dropping the model,
+// `normalizePins` deleted, `parseLanes` replaced by `strings.Split` — and all
+// three compiled and left the ENTIRE repo suite green, while a binary built
+// from the first one re-dispatched all 224 already-recorded cells. Unit tests
+// on rowKey/normalizePins/parseLanes could not see any of it. This repo already
+// holds its canaries to call-site mutation testing (see internal/canary's
+// StripGoComments note); the same standard belongs here.
+// It takes the RAW -lanes string and the RAW pins and normalizes them itself,
+// deliberately: if it accepted already-normalized inputs, deleting the
+// normalization from main() would leave every test green again (MUT-2/MUT-3).
+// The dispatch decision owns its own normalization.
+func buildRunPlan(tasks []goldtask.Task, lanesCSV string, rawPins map[string]string,
+	trials int, taskFilter, classFilter, done map[string]bool) runPlan {
+	lanes := parseLanes(lanesCSV)
+	laneModel := normalizePins(rawPins)
+	var p runPlan
 	for _, t := range tasks {
 		if len(taskFilter) > 0 && !taskFilter[t.ID] {
 			continue
@@ -247,22 +297,19 @@ func main() {
 			continue
 		}
 		for _, lane := range lanes {
-			for trial := 1; trial <= *trials; trial++ {
-				total++
-				if done[rowKey(t.ID, lane, laneModel[lane], trial)] {
-					skip++
+			for trial := 1; trial <= trials; trial++ {
+				p.Total++
+				model := laneModel[lane]
+				if done[rowKey(t.ID, lane, model, trial)] {
+					p.Skipped++
 					continue
 				}
-				row := replayOne(t, lane, laneModel[lane], trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
-				b, _ := json.Marshal(row)
-				fmt.Fprintln(out, string(b))
-				run++
-				fmt.Printf("[%s %s trial %d] dispatched=%v outcome=%s pass=%v (%dms) %s\n",
-					row.Task, row.Lane, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, row.Note)
+				p.Run = append(p.Run, plannedCell{
+					Task: t.ID, Lane: lane, Model: model, Trial: trial, GoldTask: t})
 			}
 		}
 	}
-	fmt.Printf("\nreplay complete: %d cells (%d run now, %d already recorded) → %s\n", total, run, skip, *outPath)
+	return p
 }
 
 // replayOne runs one (task,lane,trial) cell end to end.

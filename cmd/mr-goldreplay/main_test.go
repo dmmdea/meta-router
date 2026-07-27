@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/meta-router/internal/goldtask"
 )
 
 // The oracle row records the model PIN, not the model that answered, so a lane
@@ -72,6 +74,67 @@ func TestLanesAreDeduped(t *testing.T) {
 	got := parseLanes("claude, codex ,claude,,codex")
 	if len(got) != 2 || got[0] != "claude" || got[1] != "codex" {
 		t.Fatalf("parseLanes must dedupe preserving first-seen order, got %v", got)
+	}
+}
+
+// The four unit tests above are NOT sufficient and this comment is the reason.
+// Review 2026-07-27 mutation-tested three reverts at main()'s CALL SITES and
+// all three compiled and left the whole repo suite green:
+//
+//	MUT-1  done[rowKey(t.ID, lane, laneModel[lane], trial)] -> rowKey(..., "", ...)
+//	MUT-2  laneModel := normalizePins(map[...]) -> laneModel := map[...]
+//	MUT-3  lanes := parseLanes(*lanesFlag)      -> strings.Split(*lanesFlag, ",")
+//
+// A binary built from MUT-1 re-dispatched all 224 already-recorded cells of the
+// real oracle. These tests drive buildRunPlan, which is where those call sites
+// now live, so each mutation fails at least one of them.
+func planFixture(t *testing.T, lanesCSV string, pins map[string]string, done map[string]bool) runPlan {
+	t.Helper()
+	tasks := []goldtask.Task{{ID: "AC-01", Class: "agentic-coding"}}
+	return buildRunPlan(tasks, lanesCSV, pins, 1, nil, nil, done)
+}
+
+// Kills MUT-1: a cell already recorded under the SAME model must be skipped,
+// and the same cell under a DIFFERENT model must still run.
+func TestRunPlanResumeIsModelAware(t *testing.T) {
+	done := map[string]bool{rowKey("AC-01", "claude", "claude-sonnet-5", 1): true}
+
+	same := planFixture(t, "claude", map[string]string{"claude": "claude-sonnet-5"}, done)
+	if len(same.Run) != 0 || same.Skipped != 1 {
+		t.Fatalf("recorded cell must be skipped: run=%d skipped=%d", len(same.Run), same.Skipped)
+	}
+
+	other := planFixture(t, "claude", map[string]string{"claude": "claude-opus-4-8"}, done)
+	if len(other.Run) != 1 || other.Skipped != 0 {
+		t.Fatalf("a DIFFERENT model must still run: run=%d skipped=%d", len(other.Run), other.Skipped)
+	}
+}
+
+// Kills MUT-2: the model that reaches the planned cell must be the TRIMMED pin,
+// otherwise the padded value is what gets recorded and dispatched.
+func TestRunPlanUsesTrimmedPin(t *testing.T) {
+	p := planFixture(t, "claude", map[string]string{"claude": "  claude-opus-4-8  "}, nil)
+	if len(p.Run) != 1 {
+		t.Fatalf("expected one planned cell, got %d", len(p.Run))
+	}
+	if p.Run[0].Model != "claude-opus-4-8" {
+		t.Fatalf("planned cell must carry the trimmed pin, got %q", p.Run[0].Model)
+	}
+}
+
+// Kills MUT-3: a duplicated lane must produce ONE cell, and a space-padded lane
+// name must still resolve its pin (strings.Split leaves " codex" untrimmed, so
+// laneModel[" codex"] is "" and the cell would be planned with an empty model).
+func TestRunPlanDedupesAndTrimsLanes(t *testing.T) {
+	p := planFixture(t, "claude,claude, codex",
+		map[string]string{"claude": "claude-opus-4-8", "codex": "gpt-5.6-terra"}, nil)
+	if len(p.Run) != 2 {
+		t.Fatalf("expected 2 cells (claude once, codex once), got %d: %+v", len(p.Run), p.Run)
+	}
+	for _, c := range p.Run {
+		if c.Model == "" {
+			t.Fatalf("lane %q planned with an empty model — its pin was not resolved", c.Lane)
+		}
 	}
 }
 
