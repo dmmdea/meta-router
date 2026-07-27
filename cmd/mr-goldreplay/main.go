@@ -6,7 +6,12 @@
 // is RESUMABLE (existing rows are skipped), and a deferred admission (exit 3)
 // is recorded and skipped, never hammered.
 //
-//	mr-goldreplay -goldset <path> -lanes local,claude -trials 1 [-out oracle.jsonl]
+// Every replayed lane MUST carry an explicit model pin (exit 2 otherwise): the
+// oracle row records the pin, so an unpinned lane writes evidence under a model
+// nobody chose.
+//
+//	mr-goldreplay -goldset <path> -lanes local,claude -trials 1 \
+//	  -local-model gemma4-cascade -claude-model claude-sonnet-5 [-out oracle.jsonl]
 //
 // The replay-oracle Direct Method is the field-standard router eval (slice-4
 // brief §3.3; decision record Q8): this dense R[task][lane] table IS the
@@ -44,12 +49,20 @@ type Row struct {
 	Note         string `json:"note,omitempty"`
 }
 
-func rowKey(task, lane string, trial int) string {
-	return fmt.Sprintf("%s|%s|%d", task, lane, trial)
+// rowKey identifies an oracle cell. MODEL IS PART OF THE IDENTITY: a mandatory
+// pin that is not in the key is a no-op, because resume then treats a row
+// recorded under a DIFFERENT model as already-done. Review 2026-07-27
+// reproduced exactly that — with a claude-sonnet-5 row present, a rerun with
+// the corrected `-claude-model claude-opus-4-8` reported "0 run now, 1 already
+// recorded" and exited 0, leaving the mislabelled row standing while looking
+// fixed. Effort is NOT in the key yet because it is not recorded or applied to
+// the dispatch at all; it joins when both are true (see the evidence-cell plan).
+func rowKey(task, lane, model string, trial int) string {
+	return fmt.Sprintf("%s|%s|%s|%d", task, lane, model, trial)
 }
 
 // loadDone reads an existing oracle file and returns the set of recorded
-// (task,lane,trial) keys, so a rerun only fills the holes.
+// (task,lane,model,trial) keys, so a rerun only fills the holes.
 func loadDone(path string) map[string]bool {
 	done := map[string]bool{}
 	b, err := os.ReadFile(path)
@@ -64,7 +77,7 @@ func loadDone(path string) map[string]bool {
 		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && r.OutcomeClass != "deferred" {
 			// A deferred row is a HOLE (admission was closed), not an
 			// observation — resume must refill it when the window reopens.
-			done[rowKey(r.Task, r.Lane, r.Trial)] = true
+			done[rowKey(r.Task, r.Lane, r.Model, r.Trial)] = true
 		}
 	}
 	return done
@@ -168,10 +181,20 @@ func main() {
 	orchBin := flag.String("orchestrate", defaultHomeBin("mr-orchestrate.exe"), "mr-orchestrate binary")
 	verifyBin := flag.String("goldverify", defaultHomeBin("mr-goldverify.exe"), "mr-goldverify binary (exec tasks)")
 	reposFlag := flag.String("repos", "", "logical repo overrides for exec tasks: name=path,...")
-	claudeModel := flag.String("claude-model", "claude-sonnet-5", "model pin for the claude lane")
-	codexModel := flag.String("codex-model", "gpt-5.5", "model pin for the codex lane")
-	glmModel := flag.String("glm-model", "glm-5.2", "model pin for the glm lane")
-	localModel := flag.String("local-model", "gemma4-cascade", "model tag for the local lane")
+	// NO DEFAULTS. A default model pin is not a convenience, it is a mislabelled
+	// oracle: the row records the PIN, so an unpassed flag writes evidence under
+	// a model nobody chose. That is not hypothetical — `-claude-model` defaulted
+	// to claude-sonnet-5 and the A2 weekly script passed -codex-model and
+	// -glm-model but not -claude-model, so all 204 claude observations recorded
+	// Sonnet 5 while the seed rank table dispatched claude-opus-4-8. The router's
+	// Opus decisions were scored with Sonnet's results for the life of the table.
+	// claudelane/args.go already refuses an unpinned model for exactly this
+	// reason; the flag default reintroduced the trap one layer up (audit
+	// 2026-07-27). Required per lane actually replayed — see requireModelPins.
+	claudeModel := flag.String("claude-model", "", "model pin for the claude lane (REQUIRED when -lanes includes claude)")
+	codexModel := flag.String("codex-model", "", "model pin for the codex lane (REQUIRED when -lanes includes codex)")
+	glmModel := flag.String("glm-model", "", "model pin for the glm lane (REQUIRED when -lanes includes glm)")
+	localModel := flag.String("local-model", "", "model tag for the local lane (REQUIRED when -lanes includes local)")
 	timeoutSec := flag.Int("timeout", 900, "per-dispatch timeout (seconds)")
 	maxNotional := flag.Float64("max-notional", 10, "claude-lane notional guard ceiling (real coding tasks exceed the $2 default)")
 	claudeExtra := flag.String("claude-extra", "--dangerously-skip-permissions",
@@ -187,19 +210,29 @@ func main() {
 	}
 	taskFilter := csvSet(*tasksFlag)
 	classFilter := csvSet(*classesFlag)
-	laneModel := map[string]string{
+	// Trim for USE, not just for validation. The gate below checks
+	// TrimSpace(pin); if the raw value were carried on, a padded pin would pass
+	// validation and then be RECORDED and DISPATCHED untrimmed, producing a
+	// model string unequal to every other row's — the same mislabelling this
+	// gate exists to prevent, one layer down (review 2026-07-27).
+	rawPins := map[string]string{
 		"claude": *claudeModel, "codex": *codexModel, "glm": *glmModel, "local": *localModel,
 	}
-	var lanes []string
-	for _, l := range strings.Split(*lanesFlag, ",") {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			continue
-		}
-		if _, ok := laneModel[l]; !ok {
+	// rawPins is passed on UNNORMALIZED and that is deliberate: buildRunPlan does
+	// its own normalization for the dispatch decision, and requireModelPins
+	// TrimSpaces internally. Normalizing here too would be dead code that looks
+	// load-bearing — an equivalent mutant a future reader would try to "fix".
+	lanes := parseLanes(*lanesFlag)
+	for _, l := range lanes {
+		if _, ok := rawPins[l]; !ok {
 			fatal("unknown lane %q", l)
 		}
-		lanes = append(lanes, l)
+	}
+	if missing := requireModelPins(lanes, rawPins); len(missing) > 0 {
+		fatal("model pin required for lane(s) %s: the oracle row records the PIN, so replaying "+
+			"a lane without one writes evidence under a model nobody chose (this is how 204 claude "+
+			"rows recorded sonnet-5 while the rank table dispatched opus-4-8). Pass %s",
+			strings.Join(missing, ", "), pinFlagsFor(missing))
 	}
 
 	done := loadDone(*outPath)
@@ -209,7 +242,53 @@ func main() {
 	}
 	defer out.Close()
 
-	total, run, skip := 0, 0, 0
+	plan := buildRunPlan(tasks, *lanesFlag, rawPins, *trials, taskFilter, classFilter, done)
+	for _, c := range plan.Run {
+		row := replayOne(c.GoldTask, c.Lane, c.Model, c.Trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
+		b, _ := json.Marshal(row)
+		fmt.Fprintln(out, string(b))
+		fmt.Printf("[%s %s trial %d] dispatched=%v outcome=%s pass=%v (%dms) %s\n",
+			row.Task, row.Lane, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, row.Note)
+	}
+	fmt.Printf("\nreplay complete: %d cells (%d run now, %d already recorded) → %s\n",
+		plan.Total, len(plan.Run), plan.Skipped, *outPath)
+}
+
+// plannedCell is one (task, lane, model, trial) the replay will dispatch.
+type plannedCell struct {
+	Task, Lane, Model string
+	Trial             int
+	GoldTask          goldtask.Task
+}
+
+// runPlan is what a replay WOULD do, decided before anything is dispatched.
+type runPlan struct {
+	Run     []plannedCell
+	Skipped int
+	Total   int
+}
+
+// buildRunPlan resolves filters, the per-lane model pin and the resume set into
+// the exact cells that will be dispatched.
+//
+// This is a FUNCTION rather than an inline loop because the defects lived at
+// the CALL SITES, not in the helpers. Review 2026-07-27 mutation-tested three
+// reverts against the previous shape — the resume lookup dropping the model,
+// `normalizePins` deleted, `parseLanes` replaced by `strings.Split` — and all
+// three compiled and left the ENTIRE repo suite green, while a binary built
+// from the first one re-dispatched all 224 already-recorded cells. Unit tests
+// on rowKey/normalizePins/parseLanes could not see any of it. This repo already
+// holds its canaries to call-site mutation testing (see internal/canary's
+// StripGoComments note); the same standard belongs here.
+// It takes the RAW -lanes string and the RAW pins and normalizes them itself,
+// deliberately: if it accepted already-normalized inputs, deleting the
+// normalization from main() would leave every test green again (MUT-2/MUT-3).
+// The dispatch decision owns its own normalization.
+func buildRunPlan(tasks []goldtask.Task, lanesCSV string, rawPins map[string]string,
+	trials int, taskFilter, classFilter, done map[string]bool) runPlan {
+	lanes := parseLanes(lanesCSV)
+	laneModel := normalizePins(rawPins)
+	var p runPlan
 	for _, t := range tasks {
 		if len(taskFilter) > 0 && !taskFilter[t.ID] {
 			continue
@@ -218,22 +297,19 @@ func main() {
 			continue
 		}
 		for _, lane := range lanes {
-			for trial := 1; trial <= *trials; trial++ {
-				total++
-				if done[rowKey(t.ID, lane, trial)] {
-					skip++
+			for trial := 1; trial <= trials; trial++ {
+				p.Total++
+				model := laneModel[lane]
+				if done[rowKey(t.ID, lane, model, trial)] {
+					p.Skipped++
 					continue
 				}
-				row := replayOne(t, lane, laneModel[lane], trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
-				b, _ := json.Marshal(row)
-				fmt.Fprintln(out, string(b))
-				run++
-				fmt.Printf("[%s %s trial %d] dispatched=%v outcome=%s pass=%v (%dms) %s\n",
-					row.Task, row.Lane, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, row.Note)
+				p.Run = append(p.Run, plannedCell{
+					Task: t.ID, Lane: lane, Model: model, Trial: trial, GoldTask: t})
 			}
 		}
 	}
-	fmt.Printf("\nreplay complete: %d cells (%d run now, %d already recorded) → %s\n", total, run, skip, *outPath)
+	return p
 }
 
 // replayOne runs one (task,lane,trial) cell end to end.
@@ -415,6 +491,58 @@ func csvSet(s string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// normalizePins trims every pin so the value VALIDATED is the value RECORDED
+// and DISPATCHED. Returns a new map; the caller's is not mutated.
+func normalizePins(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for lane, pin := range in {
+		out[lane] = strings.TrimSpace(pin)
+	}
+	return out
+}
+
+// parseLanes splits the -lanes list, trimming blanks and DEDUPING while
+// preserving first-seen order. Without the dedupe, `-lanes claude,claude`
+// replays the same cell twice in one run (the second dispatch is not yet in
+// `done`, which is loaded once before the loop) and repeats the flag name in
+// the pin error.
+func parseLanes(csv string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range strings.Split(csv, ",") {
+		l = strings.TrimSpace(l)
+		if l == "" || seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
+	}
+	return out
+}
+
+// requireModelPins returns the lanes being replayed that carry no model pin, in
+// the caller's lane order (deterministic message). Only lanes actually in the
+// run are required, so `-lanes claude` needs no glm pin.
+func requireModelPins(lanes []string, laneModel map[string]string) []string {
+	var missing []string
+	for _, l := range lanes {
+		if strings.TrimSpace(laneModel[l]) == "" {
+			missing = append(missing, l)
+		}
+	}
+	return missing
+}
+
+// pinFlagsFor renders the flags the operator must pass, so the error is
+// actionable rather than a diagnosis they have to translate.
+func pinFlagsFor(lanes []string) string {
+	flags := make([]string, 0, len(lanes))
+	for _, l := range lanes {
+		flags = append(flags, "-"+l+"-model <id>")
+	}
+	return strings.Join(flags, " ")
 }
 
 func gitC(dir string, timeoutSec int, args ...string) ([]byte, error) {
