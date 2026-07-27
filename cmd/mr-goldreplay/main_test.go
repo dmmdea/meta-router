@@ -12,6 +12,69 @@ import (
 // what silently happened: -claude-model defaulted to claude-sonnet-5 and the A2
 // weekly script never passed it, so 204 claude rows recorded Sonnet while the
 // rank table dispatched claude-opus-4-8. These pin the defaults OUT.
+// Making the pin MANDATORY is worthless if the pin is not part of the cell's
+// identity. Review 2026-07-27 reproduced it: with a sonnet row already in the
+// oracle, running with the corrected pin -claude-model claude-opus-4-8 printed
+// "0 run now, 1 already recorded" and exited 0 — the operator does exactly what
+// the new error demands, gets a green run, and the mislabelled row still stands.
+// With -trials 2 an opus row lands BESIDE the sonnet row and the scorecard
+// (which keys by task+lane) aggregates two models into one cell.
+func TestRowKeySeparatesModels(t *testing.T) {
+	sonnet := rowKey("RS-01", "claude", "claude-sonnet-5", 1)
+	opus := rowKey("RS-01", "claude", "claude-opus-4-8", 1)
+	if sonnet == opus {
+		t.Fatal("a different model MUST produce a different resume key, or the mandatory pin is a no-op")
+	}
+	if sonnet != rowKey("RS-01", "claude", "claude-sonnet-5", 1) {
+		t.Fatal("same config must produce a stable key")
+	}
+	if sonnet == rowKey("RS-01", "claude", "claude-sonnet-5", 2) {
+		t.Fatal("trial must still separate keys")
+	}
+	if sonnet == rowKey("RS-01", "codex", "claude-sonnet-5", 1) {
+		t.Fatal("lane must still separate keys")
+	}
+}
+
+// The regression the review actually reproduced, at the loadDone level: an
+// existing sonnet observation must NOT mark the opus cell as already-recorded.
+func TestLoadDoneDoesNotCreditADifferentModel(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	row := `{"ts":"t","task":"RS-01","class":"research","lane":"claude","model":"claude-sonnet-5","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true,"latency_ms":9}` + "\n"
+	if err := os.WriteFile(p, []byte(row), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := loadDone(p)
+	if !done[rowKey("RS-01", "claude", "claude-sonnet-5", 1)] {
+		t.Fatal("the recorded sonnet cell must be marked done")
+	}
+	if done[rowKey("RS-01", "claude", "claude-opus-4-8", 1)] {
+		t.Fatal("a sonnet row must NOT mark the opus cell done — that is the reproduced no-op")
+	}
+}
+
+// The gate validated strings.TrimSpace(pin) while the run passed the raw value
+// through to both the oracle row and the -model dispatch arg, so a padded pin
+// passed validation and was recorded as a distinct model string.
+func TestPinsAreTrimmedNotJustValidated(t *testing.T) {
+	got := normalizePins(map[string]string{"claude": "  claude-opus-4-8  ", "codex": "gpt-5.6-terra"})
+	if got["claude"] != "claude-opus-4-8" {
+		t.Fatalf("pin must be trimmed for USE, got %q", got["claude"])
+	}
+	if got["codex"] != "gpt-5.6-terra" {
+		t.Fatalf("an already-clean pin must be untouched, got %q", got["codex"])
+	}
+}
+
+// -lanes claude,claude would replay the same cell twice in one run and emit the
+// duplicated flag name in the error message.
+func TestLanesAreDeduped(t *testing.T) {
+	got := parseLanes("claude, codex ,claude,,codex")
+	if len(got) != 2 || got[0] != "claude" || got[1] != "codex" {
+		t.Fatalf("parseLanes must dedupe preserving first-seen order, got %v", got)
+	}
+}
+
 func TestRequireModelPins(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -80,7 +143,7 @@ not json — torn line survives
 		t.Fatal(err)
 	}
 	done := loadDone(p)
-	if !done[rowKey("AC-04", "local", 1)] || !done[rowKey("RS-03", "claude", 2)] {
+	if !done[rowKey("AC-04", "local", "m", 1)] || !done[rowKey("RS-03", "claude", "m", 2)] {
 		t.Fatalf("resume set wrong: %v", done)
 	}
 	// A deferred row is a hole — resume must NOT count it as done.
@@ -88,10 +151,10 @@ not json — torn line survives
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
 	f.WriteString(deferredLine)
 	f.Close()
-	if loadDone(p)[rowKey("EX-01", "glm", 1)] {
+	if loadDone(p)[rowKey("EX-01", "glm", "m", 1)] {
 		t.Fatal("deferred row wrongly counted as done — the window-reopen refill would no-op")
 	}
-	if done[rowKey("AC-04", "local", 2)] || len(done) != 2 {
+	if done[rowKey("AC-04", "local", "m", 2)] || len(done) != 2 {
 		t.Fatalf("resume set has phantom rows: %v", done)
 	}
 	if loadDone(filepath.Join(t.TempDir(), "absent.jsonl")) == nil {

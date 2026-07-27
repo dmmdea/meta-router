@@ -6,7 +6,12 @@
 // is RESUMABLE (existing rows are skipped), and a deferred admission (exit 3)
 // is recorded and skipped, never hammered.
 //
-//	mr-goldreplay -goldset <path> -lanes local,claude -trials 1 [-out oracle.jsonl]
+// Every replayed lane MUST carry an explicit model pin (exit 2 otherwise): the
+// oracle row records the pin, so an unpinned lane writes evidence under a model
+// nobody chose.
+//
+//	mr-goldreplay -goldset <path> -lanes local,claude -trials 1 \
+//	  -local-model gemma4-cascade -claude-model claude-sonnet-5 [-out oracle.jsonl]
 //
 // The replay-oracle Direct Method is the field-standard router eval (slice-4
 // brief §3.3; decision record Q8): this dense R[task][lane] table IS the
@@ -44,12 +49,20 @@ type Row struct {
 	Note         string `json:"note,omitempty"`
 }
 
-func rowKey(task, lane string, trial int) string {
-	return fmt.Sprintf("%s|%s|%d", task, lane, trial)
+// rowKey identifies an oracle cell. MODEL IS PART OF THE IDENTITY: a mandatory
+// pin that is not in the key is a no-op, because resume then treats a row
+// recorded under a DIFFERENT model as already-done. Review 2026-07-27
+// reproduced exactly that — with a claude-sonnet-5 row present, a rerun with
+// the corrected `-claude-model claude-opus-4-8` reported "0 run now, 1 already
+// recorded" and exited 0, leaving the mislabelled row standing while looking
+// fixed. Effort is NOT in the key yet because it is not recorded or applied to
+// the dispatch at all; it joins when both are true (see the evidence-cell plan).
+func rowKey(task, lane, model string, trial int) string {
+	return fmt.Sprintf("%s|%s|%s|%d", task, lane, model, trial)
 }
 
 // loadDone reads an existing oracle file and returns the set of recorded
-// (task,lane,trial) keys, so a rerun only fills the holes.
+// (task,lane,model,trial) keys, so a rerun only fills the holes.
 func loadDone(path string) map[string]bool {
 	done := map[string]bool{}
 	b, err := os.ReadFile(path)
@@ -64,7 +77,7 @@ func loadDone(path string) map[string]bool {
 		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && r.OutcomeClass != "deferred" {
 			// A deferred row is a HOLE (admission was closed), not an
 			// observation — resume must refill it when the window reopens.
-			done[rowKey(r.Task, r.Lane, r.Trial)] = true
+			done[rowKey(r.Task, r.Lane, r.Model, r.Trial)] = true
 		}
 	}
 	return done
@@ -197,19 +210,19 @@ func main() {
 	}
 	taskFilter := csvSet(*tasksFlag)
 	classFilter := csvSet(*classesFlag)
-	laneModel := map[string]string{
+	// Trim for USE, not just for validation. The gate below checks
+	// TrimSpace(pin); if the raw value were carried on, a padded pin would pass
+	// validation and then be RECORDED and DISPATCHED untrimmed, producing a
+	// model string unequal to every other row's — the same mislabelling this
+	// gate exists to prevent, one layer down (review 2026-07-27).
+	laneModel := normalizePins(map[string]string{
 		"claude": *claudeModel, "codex": *codexModel, "glm": *glmModel, "local": *localModel,
-	}
-	var lanes []string
-	for _, l := range strings.Split(*lanesFlag, ",") {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			continue
-		}
+	})
+	lanes := parseLanes(*lanesFlag)
+	for _, l := range lanes {
 		if _, ok := laneModel[l]; !ok {
 			fatal("unknown lane %q", l)
 		}
-		lanes = append(lanes, l)
 	}
 	if missing := requireModelPins(lanes, laneModel); len(missing) > 0 {
 		fatal("model pin required for lane(s) %s: the oracle row records the PIN, so replaying "+
@@ -236,7 +249,7 @@ func main() {
 		for _, lane := range lanes {
 			for trial := 1; trial <= *trials; trial++ {
 				total++
-				if done[rowKey(t.ID, lane, trial)] {
+				if done[rowKey(t.ID, lane, laneModel[lane], trial)] {
 					skip++
 					continue
 				}
@@ -429,6 +442,35 @@ func csvSet(s string) map[string]bool {
 		if x = strings.TrimSpace(x); x != "" {
 			out[x] = true
 		}
+	}
+	return out
+}
+
+// normalizePins trims every pin so the value VALIDATED is the value RECORDED
+// and DISPATCHED. Returns a new map; the caller's is not mutated.
+func normalizePins(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for lane, pin := range in {
+		out[lane] = strings.TrimSpace(pin)
+	}
+	return out
+}
+
+// parseLanes splits the -lanes list, trimming blanks and DEDUPING while
+// preserving first-seen order. Without the dedupe, `-lanes claude,claude`
+// replays the same cell twice in one run (the second dispatch is not yet in
+// `done`, which is loaded once before the loop) and repeats the flag name in
+// the pin error.
+func parseLanes(csv string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range strings.Split(csv, ",") {
+		l = strings.TrimSpace(l)
+		if l == "" || seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
 	}
 	return out
 }
