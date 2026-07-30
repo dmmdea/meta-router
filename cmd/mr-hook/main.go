@@ -81,32 +81,67 @@ func bm25Fallback(prompt string, lex lexicalScorer) []string {
 	return nil
 }
 
+// logDepth is how many scored candidates each cosine-path event records
+// (W9 R9.2b). Deeper than the surface k so the curve analysis sees the
+// invoked skill's own score even when it ranked below the surfacing cut;
+// bounded so rows stay small.
+const logDepth = 8
+
 // decide is the pure surfacing decision: rank with the primary retriever
 // (embed-only by default; hybrid RRF behind -ranker=hybrid) and gate on the
 // top cosine. If the embedder errored, fall back to BM25 under a strict
 // precision gate (mode "bm25-fallback") or stay silent (mode
 // "embedder-down"); if the prompt is too short, surface nothing (mode
 // "too-short"). Returns the ids to surface, the top cosine (0 when not
-// applicable), and the mode for logging.
-func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string) {
+// applicable), the mode for logging, and the scored candidate list (W9
+// R9.2b) — populated on BOTH surfaced and gated-empty cosine paths (the
+// gated region is 27% of live traffic and exactly where the gate decision
+// needs scores), nil on modes where no cosine ran, so a BM25 score can never
+// recontaminate the cosine denominator the R9.2 analysis just cleaned.
+//
+// Retrieval depth is max(k, logDepth) but ONLY the first k surface: the
+// ranking is one deterministic sort, so the top-k of a deeper retrieval is
+// identical to a k-retrieval — pinned by TestSurfacedIsPrefixOfCandidates.
+func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string, []usagelog.Cand) {
 	if len(strings.TrimSpace(prompt)) < minLen {
-		return nil, 0, "too-short"
+		return nil, 0, "too-short", nil
 	}
-	res, topCos, err := primary.RetrieveScored(prompt, k)
+	kRetrieve := k
+	if kRetrieve < logDepth {
+		kRetrieve = logDepth
+	}
+	res, topCos, err := primary.RetrieveScored(prompt, kRetrieve)
 	if err != nil {
 		if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
-			return ids, 0, "bm25-fallback"
+			return ids, 0, "bm25-fallback", nil
 		}
-		return nil, 0, "embedder-down"
+		return nil, 0, "embedder-down", nil
+	}
+	// cands carries COSINES OR NOTHING. Hybrid's RetrieveScored returns RRF
+	// fused scores in .Score (~0.03 scale, 1/(60+rank) sums) — real cosines
+	// exist only in its topCos return. Logging those under "cos" would put
+	// 0.03-scale numbers into the cosine denominator with no discriminator on
+	// gated-empty rows (review 2026-07-30, MAJOR): the exact contamination
+	// class this field exists to prevent. So candidates are logged on the
+	// embed path only; hybrid rows carry none.
+	var cands []usagelog.Cand
+	if primaryMode == "embed" {
+		cands = make([]usagelog.Cand, len(res))
+		for i, s := range res {
+			cands[i] = usagelog.Cand{ID: s.ID, Cos: s.Score}
+		}
 	}
 	if topCos < minCos {
-		return nil, topCos, "gated-empty"
+		return nil, topCos, "gated-empty", cands
+	}
+	if len(res) > k {
+		res = res[:k]
 	}
 	ids := make([]string, len(res))
 	for i, s := range res {
 		ids[i] = s.ID
 	}
-	return ids, topCos, primaryMode
+	return ids, topCos, primaryMode, cands
 }
 
 func formatContext(byID map[string]catalog.Skill, ids []string) string {
@@ -280,23 +315,24 @@ func main() {
 		ids    []string
 		topCos float64
 		mode   string
-		hint   string // §6c RS1 quota+route hint ("" on any error / disabled)
+		cands  []usagelog.Cand // W9 R9.2b: scored candidates (cosine paths only)
+		hint   string          // §6c RS1 quota+route hint ("" on any error / disabled)
 	}
 	ch := make(chan result, 1)
 	go func() {
-		ids, topCos, mode := decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
+		ids, topCos, mode, cands := decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
 		// Quota+route hint computed INSIDE the deadline-bounded goroutine:
 		// ledger-direct, fail-open ("" on any error), zero policy content.
 		var hint string
 		if *quotaHintOn {
 			hint = quotaHint(time.Now().UTC())
 		}
-		ch <- result{ids, topCos, mode, hint}
+		ch <- result{ids, topCos, mode, cands, hint}
 	}()
 
 	select {
 	case r := <-ch:
-		rec.Surfaced, rec.TopCosine, rec.Mode = r.ids, r.topCos, r.mode
+		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
 		ctx := formatContext(byID, r.ids)
 		if offloadNudge(in.Prompt) {
 			rec.NudgeOffload = true

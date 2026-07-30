@@ -3,6 +3,7 @@
 package usagelog
 
 import (
+	"math"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,32 @@ type Record struct {
 	Err          string   `json:"err,omitempty"`
 	NudgeOffload bool     `json:"nudge_offload,omitempty"` // an offload-suitability nudge was appended
 	QuotaHint    bool     `json:"quota_hint,omitempty"`    // a quota+route hint was appended (§6c RS1)
+	// Cands is the ranked candidate list WITH scores from the EMBED path only
+	// — present on embed and embed-gated-empty rows, absent everywhere else
+	// (W9 R9.2b). Hybrid is deliberately excluded: its .Score is an RRF fused
+	// rank score, not a cosine, and gated-empty rows carry no ranker
+	// discriminator to tell them apart downstream. Without it every retrospective curve
+	// had to use the top-1 cosine as a proxy for the invoked skill's own
+	// score, making recall-at-gate an upper bound (R9.2 doc, caveat 6).
+	// Names + numbers only: the privacy posture (no prompt text) is unchanged.
+	Cands []Cand `json:"cands,omitempty"`
+}
+
+// Cand is one scored candidate. Cos is rounded to 4 decimals AT MARSHALING —
+// not in a constructor a future call site could bypass — because full float64
+// precision would bloat every row for no analytical gain, and "rows are
+// compact" must hold no matter who builds the value.
+type Cand struct {
+	ID  string  `json:"id"`
+	Cos float64 `json:"cos"`
+}
+
+func (c Cand) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		ID  string  `json:"id"`
+		Cos float64 `json:"cos"`
+	}
+	return json.Marshal(wire{ID: c.ID, Cos: math.Round(c.Cos*10000) / 10000})
 }
 
 func HashPrompt(prompt string) string {
