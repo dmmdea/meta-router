@@ -103,3 +103,22 @@ func TestRecordMarshalsCandsCompactAndOmitsWhenAbsent(t *testing.T) {
 		t.Fatal("absent cands must be omitted from the row")
 	}
 }
+
+// Hybrid's .Score is an RRF fused score, not a cosine — logging it under
+// "cos" would contaminate the denominator with 0.03-scale numbers that
+// gated-empty rows cannot even be filtered on (no ranker field). Cands is
+// embed-only (review 2026-07-30, MAJOR).
+func TestNoCandidatesOnHybridRanker(t *testing.T) {
+	pri := scoredPri(retrievers.Scored{ID: "a", Score: 0.033}, retrievers.Scored{ID: "b", Score: 0.016})
+	ids, _, mode, cands := decide("long enough prompt here", 3, 0.01, testMinLen, pri, "hybrid", fakeLex{})
+	if mode != "hybrid" || len(ids) == 0 {
+		t.Fatalf("expected surfaced hybrid, got mode=%s ids=%v", mode, ids)
+	}
+	if cands != nil {
+		t.Fatalf("hybrid rows must log no cands (RRF scores are not cosines): %+v", cands)
+	}
+	_, _, mode, cands = decide("long enough prompt here", 3, 0.99, testMinLen, pri, "hybrid", fakeLex{})
+	if mode != "gated-empty" || cands != nil {
+		t.Fatalf("hybrid gated-empty must also log no cands: %s %+v", mode, cands)
+	}
+}

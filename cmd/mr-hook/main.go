@@ -117,9 +117,19 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 		}
 		return nil, 0, "embedder-down", nil
 	}
-	cands := make([]usagelog.Cand, len(res))
-	for i, s := range res {
-		cands[i] = usagelog.Cand{ID: s.ID, Cos: s.Score}
+	// cands carries COSINES OR NOTHING. Hybrid's RetrieveScored returns RRF
+	// fused scores in .Score (~0.03 scale, 1/(60+rank) sums) — real cosines
+	// exist only in its topCos return. Logging those under "cos" would put
+	// 0.03-scale numbers into the cosine denominator with no discriminator on
+	// gated-empty rows (review 2026-07-30, MAJOR): the exact contamination
+	// class this field exists to prevent. So candidates are logged on the
+	// embed path only; hybrid rows carry none.
+	var cands []usagelog.Cand
+	if primaryMode == "embed" {
+		cands = make([]usagelog.Cand, len(res))
+		for i, s := range res {
+			cands[i] = usagelog.Cand{ID: s.ID, Cos: s.Score}
+		}
 	}
 	if topCos < minCos {
 		return nil, topCos, "gated-empty", cands
