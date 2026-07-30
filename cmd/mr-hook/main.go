@@ -116,6 +116,7 @@ func formatContext(byID map[string]catalog.Skill, ids []string) string {
 	var b strings.Builder
 	b.WriteString("meta-router — relevant installed skills for this task:\n")
 	wrote := 0
+	wroteAgent := false
 	for _, id := range ids {
 		s, ok := byID[id]
 		if !ok {
@@ -125,15 +126,32 @@ func formatContext(byID map[string]catalog.Skill, ids []string) string {
 		if len(desc) > 140 {
 			desc = desc[:140] + "…"
 		}
-		// s.ID is the INVOCABLE name ("gstack-qa", "superpowers:brainstorming")
-		// — surface exactly what the Skill tool accepts, never an internal name.
-		fmt.Fprintf(&b, "- %s (%s): %s\n", s.ID, s.Source, desc)
+		// s.ID is the INVOCABLE name ("gstack-qa", "superpowers:brainstorming",
+		// "/insights") — surface exactly what the invoking tool accepts, never
+		// an internal name. Agents are the exception that proves the rule: their
+		// index ID is "agent:<name>" (a namespace marker, and one that collides
+		// with the plugin pack:skill grammar this same list uses), while the
+		// Agent tool's subagent_type is the BARE name — so the bare name is what
+		// gets surfaced, labeled "agent" (review 2026-07-30, MAJOR: the model
+		// would otherwise call Skill(\"agent:context-engineer\") and fail).
+		if name, isAgent := strings.CutPrefix(s.ID, "agent:"); isAgent {
+			fmt.Fprintf(&b, "- %s (agent): %s\n", name, desc)
+			wroteAgent = true
+		} else {
+			fmt.Fprintf(&b, "- %s (%s): %s\n", s.ID, s.Source, desc)
+		}
 		wrote++
 	}
 	if wrote == 0 {
 		return "" // all ids missing from the index → surface nothing
 	}
+	// The trailer stays byte-identical to the pre-flat-roots output whenever no
+	// agent surfaced — which is every production prompt until W9's gate enables
+	// the flat roots — so this change is behavior-inert today by construction.
 	b.WriteString("Invoke one via the Skill tool or its slash command if it fits.")
+	if wroteAgent {
+		b.WriteString(" Entries marked (agent) are dispatched via the Agent tool (subagent_type = the listed name), never the Skill tool.")
+	}
 	return b.String()
 }
 

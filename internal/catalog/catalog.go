@@ -21,9 +21,44 @@ type Skill struct {
 // user skills are invoked by bare directory name ("gstack-qa"), plugin skills
 // by "<plugin>:<skill-dir>" ("superpowers:brainstorming") — matching exactly
 // how the Skill tool invokes them.
+// Kind selects the harvest shape for a root. The zero value ("", or the
+// explicit "skills") is the original SKILL.md directory walk, so every
+// pre-Kind roots.json keeps meaning exactly what it meant. W9 R9.1 added the
+// flat kinds for ~/.claude/commands and ~/.claude/agents — 46 invocables that
+// were structurally absent from the index. Adding a Kind here is a CAPABILITY;
+// production index composition changes only when a roots.json entry actually
+// names one of these roots, and that entry ships only behind W9's measured
+// recall/precision gate.
+// ID namespaces (review 2026-07-30): commands take "/<name>" — a "/" can never
+// appear in a skill ID, so that space is collision-free. Agents take
+// "agent:<name>", which RESERVES the pack name "agent": a plugin literally
+// named "agent" would mint byte-identical IDs and DedupByID would silently
+// shadow one side. No such plugin exists and pack names come from installer
+// manifests, but the reservation is a contract, not an accident — ValidKind
+// and this comment are where it is recorded.
+const (
+	KindSkills   = "skills"
+	KindCommands = "commands" // flat *.md; invoked as /<basename>; frontmatter has no name
+	KindAgents   = "agents"   // flat *.md; dispatched by frontmatter name via the Agent tool
+)
+
+// ValidKind reports whether k is a recognized root kind. The zero value is the
+// SKILL.md walk. Anything else ("command" singular, "Agents") must be REFUSED
+// loudly by loaders: HarvestRoots would silently fall through to the SKILL.md
+// walk, find nothing under a flat dir, and index zero entries — a no-op the
+// operator can only detect by noticing absence (review 2026-07-30, MINOR).
+func ValidKind(k string) bool {
+	switch k {
+	case "", KindSkills, KindCommands, KindAgents:
+		return true
+	}
+	return false
+}
+
 type Root struct {
 	Path string `json:"path"`
 	Pack string `json:"pack"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // UserPack is the pack name for the user's own skills; its IDs are unprefixed.
@@ -48,6 +83,20 @@ func InvocableID(pack, name string) string {
 // children of a non-target key (e.g. a `metadata:` block) are skipped, so they
 // never leak into the description.
 func ParseSkillMD(path string) (Skill, error) {
+	s, err := parseFrontmatterMD(path)
+	if err != nil {
+		return Skill{}, err
+	}
+	if s.Name == "" {
+		return Skill{}, fmt.Errorf("%s: frontmatter has no name", path)
+	}
+	return s, nil
+}
+
+// parseFrontmatterMD is ParseSkillMD without the name requirement: command
+// files legitimately carry only a description (their name IS the filename), so
+// the flat harvesters need the same block-scalar-safe parsing minus that check.
+func parseFrontmatterMD(path string) (Skill, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Skill{}, err
@@ -129,9 +178,6 @@ func ParseSkillMD(path string) (Skill, error) {
 				s.WhenToUse = joined
 			}
 		}
-	}
-	if s.Name == "" {
-		return Skill{}, fmt.Errorf("%s: frontmatter has no name", path)
 	}
 	return s, nil
 }
@@ -244,8 +290,30 @@ func Harvest(rootPaths []string) ([]Skill, error) {
 // invocable copy of any twin. Unparseable skills are skipped (not fatal) so
 // one bad skill can't blind the whole catalog.
 func HarvestRoots(roots []Root) ([]Skill, error) {
+	// Skills-class roots are processed BEFORE flat roots regardless of file
+	// order: DedupByDescription keeps the first occurrence, and a command that
+	// 1:1-wraps a skill carries a byte-identical description — whichever came
+	// first would silently delete the other from the index. The skill must win
+	// (it is the Skill-tool-invocable canonical), and that must be a rule, not
+	// an artifact of roots.json ordering (review 2026-07-30, MINOR). Relative
+	// order within each class is preserved.
+	ordered := make([]Root, 0, len(roots))
+	for _, r := range roots {
+		if r.Kind != KindCommands && r.Kind != KindAgents {
+			ordered = append(ordered, r)
+		}
+	}
+	for _, r := range roots {
+		if r.Kind == KindCommands || r.Kind == KindAgents {
+			ordered = append(ordered, r)
+		}
+	}
 	var out []Skill
-	for _, root := range roots {
+	for _, root := range ordered {
+		if root.Kind == KindCommands || root.Kind == KindAgents {
+			out = append(out, harvestFlat(root)...)
+			continue
+		}
 		cleanRoot := filepath.Clean(root.Path)
 		var hs []harvested
 		_ = filepath.WalkDir(cleanRoot, func(p string, d fs.DirEntry, err error) error {
@@ -305,4 +373,91 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 		}
 	}
 	return out, nil
+}
+
+// harvestFlat reads a FLAT root of *.md files (commands/, agents/). It does
+// not descend into subdirectories — neither surface nests — and skips
+// non-markdown, hidden files, and unparseable frontmatter (skip-not-fatal, the
+// same tolerance the SKILL.md walk has, so one bad file can't blind the rest).
+//
+// Identity rules differ per kind and both are the INVOCABLE identity, matching
+// the skills philosophy (a skill's name is its directory because that is what
+// the Skill tool accepts):
+//   - commands: Name = file basename (invoked as /<basename>; frontmatter has
+//     no name field), ID = "/" + name.
+//   - agents:   Name = frontmatter name (the Agent tool's subagent_type),
+//     falling back to the basename; ID = "agent:" + name.
+//
+// Results are name-sorted for determinism (ReadDir order is already sorted,
+// but the frontmatter-name override for agents can reorder).
+func harvestFlat(root Root) []Skill {
+	cleanRoot := filepath.Clean(root.Path)
+	des, err := os.ReadDir(cleanRoot)
+	if err != nil {
+		return nil
+	}
+	type flatEntry struct {
+		skill     Skill
+		nameMatch bool // identity == file basename (see ordering rule below)
+	}
+	var hs []flatEntry
+	for _, de := range des {
+		// EqualFold: Windows filesystems are case-insensitive, so FOO.MD is a
+		// valid command file the exact-case check silently dropped (review
+		// 2026-07-30, NIT).
+		if de.IsDir() || strings.HasPrefix(de.Name(), ".") {
+			continue
+		}
+		if len(de.Name()) < 3 || !strings.EqualFold(de.Name()[len(de.Name())-3:], ".md") {
+			continue
+		}
+		p := filepath.Join(cleanRoot, de.Name())
+		s, perr := parseFrontmatterMD(p)
+		if perr != nil {
+			continue // skip bad
+		}
+		// An empty description is the degenerate name-only embed — the exact
+		// failure shape that once blinded 69% of skills. Indexing it would let
+		// it participate in cosine ranking as pure noise, and
+		// DedupByDescription deliberately never collapses empties. Skip it,
+		// the same disposition as a file with no frontmatter at all (review
+		// 2026-07-30, MINOR).
+		if strings.TrimSpace(s.Description) == "" {
+			continue
+		}
+		base := de.Name()[:len(de.Name())-3] // strip ".md" in whatever case it arrived
+		switch root.Kind {
+		case KindCommands:
+			s.Name = base
+			s.ID = "/" + base
+		case KindAgents:
+			if s.Name == "" {
+				s.Name = base
+			}
+			s.ID = "agent:" + s.Name
+		}
+		s.Source = root.Pack
+		hs = append(hs, flatEntry{skill: s, nameMatch: s.Name == base})
+	}
+	// Ordering contract (load-bearing for two reasons): downstream DedupByID
+	// keeps the FIRST occurrence, and two agent files can mint the same ID
+	// (frontmatter `name: victim` in stealer.md vs victim.md's basename
+	// fallback). sort.Slice is UNSTABLE, so equal keys made the survivor a Go
+	// version accident (review 2026-07-30, MINOR). Rule: basename-matching
+	// identity first (the file that IS what it claims), then name, then path —
+	// SliceStable so the winner is a contract, not pdqsort's mood.
+	sort.SliceStable(hs, func(i, j int) bool {
+		if hs[i].nameMatch != hs[j].nameMatch {
+			return hs[i].nameMatch
+		}
+		if hs[i].skill.Name != hs[j].skill.Name {
+			return hs[i].skill.Name < hs[j].skill.Name
+		}
+		return hs[i].skill.Path < hs[j].skill.Path
+	})
+	out := make([]Skill, 0, len(hs))
+	for _, h := range hs {
+		out = append(out, h.skill)
+	}
+	return out
 }

@@ -45,12 +45,13 @@ func parseArgs(argv []string) (config, error) {
 // resolveRoots returns the harvest root set for this run.
 //   - -skill-roots given: use exactly those paths (pack = dir basename),
 //     never touching roots.json — the explicit-flag escape hatch.
-//   - build (no flag): always re-discover (user skills + installed plugin
-//     packs) and persist to roots.json next to the index, so a manual build
-//     also refreshes the recorded set.
-//   - refresh (no flag): read roots.json; if absent or unreadable, discover
-//     and create it. This is what lets the SessionStart hook run
-//     `mr-index refresh` with no flags and still see the full set.
+//   - build (no flag): re-discover (user skills + installed plugin packs),
+//     carry over operator-owned roots per the ownership rule below, and
+//     persist to roots.json next to the index.
+//   - refresh (no flag): read roots.json; if ABSENT, discover and create it
+//     (this is what lets the SessionStart hook run `mr-index refresh` with no
+//     flags and still see the full set). A file that exists but is INVALID is
+//     fatal for both commands — see the comment at the Load call.
 func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 	if cfg.skillRoots != "" {
 		var rs []catalog.Root
@@ -67,14 +68,18 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 		return rs, nil
 	}
 	rootsPath := roots.ConfigPathFor(outPath)
-	if cfg.cmd == "refresh" {
-		rs, err := roots.Load(rootsPath)
-		if err == nil {
-			return rs, nil
-		}
-		if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "warning: %v — rediscovering roots\n", err)
-		}
+	// A roots.json that EXISTS but is invalid (parse error, unknown kind) is
+	// FATAL for both commands — never "warn and rediscover". Rediscovery ends
+	// in roots.Save, which OVERWRITES the operator's file: a typo'd kind would
+	// be repaid with the silent destruction of the very edits that carried it
+	// (review 2026-07-30 — this exact path also lost hand-added flat roots).
+	// Only a genuinely absent file falls through to discovery.
+	existing, loadErr := roots.Load(rootsPath)
+	if loadErr != nil && !os.IsNotExist(loadErr) {
+		return nil, fmt.Errorf("%v — fix or delete %s (refusing to rediscover: that would overwrite your edits)", loadErr, rootsPath)
+	}
+	if cfg.cmd == "refresh" && loadErr == nil {
+		return existing, nil
 	}
 	claudeDir, err := roots.DefaultClaudeDir()
 	if err != nil {
@@ -83,6 +88,34 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 	rs := roots.Discover(claudeDir)
 	if len(rs) == 0 {
 		return nil, fmt.Errorf("no skill roots found under %s", claudeDir)
+	}
+	// OWNERSHIP RULE (review 2026-07-30 MAJOR + closure-audit MINOR): discovery
+	// owns the ~/.claude space — a skills root under claudeDir that discovery
+	// no longer finds is an uninstalled pack and SHOULD drop. The operator owns
+	// everything else: flat roots (Discover can never emit a kind) and any
+	// hand-added root outside claudeDir exist only because a human put them in
+	// roots.json, so a build that dropped them would silently destroy edits —
+	// the first review round proved that for flat roots (enablement AND all 46
+	// index entries gone in one stroke), and the closure audit showed the same
+	// shape for outside-tree skills roots. Carried entries are deduped by
+	// cleaned path and appended after discovered roots (flat-last also matches
+	// HarvestRoots' skills-first dedup ordering).
+	if loadErr == nil {
+		seen := make(map[string]bool, len(rs))
+		for _, r := range rs {
+			seen[filepath.Clean(r.Path)] = true
+		}
+		cleanClaude := filepath.Clean(claudeDir) + string(filepath.Separator)
+		for _, r := range existing {
+			if seen[filepath.Clean(r.Path)] {
+				continue
+			}
+			flat := r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents
+			outside := !strings.HasPrefix(filepath.Clean(r.Path)+string(filepath.Separator), cleanClaude)
+			if flat || outside {
+				rs = append(rs, r)
+			}
+		}
 	}
 	if err := roots.Save(rootsPath, rs); err != nil {
 		// Persisting is best-effort: an unwritable roots.json must not block
