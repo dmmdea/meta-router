@@ -135,6 +135,22 @@ func main() {
 		} else {
 			rlist = append(rlist, hyb)
 		}
+
+		// W9 R9.3: the cross-encoder leg — embed top-20 re-scored by
+		// bge-reranker-v2-m3 on the SAME endpoint host (local-stack-reuse: the
+		// reranker is already resident; zero new models). Eval-only until it
+		// earns production wiring through W9's measured gate. Reuses the
+		// first live endpoint the embedder probe found; failures inside the
+		// leg PROPAGATE (a silent fallback would score embed-only under the
+		// embed+rerank label).
+		if emb != nil {
+			for _, ep := range eps {
+				if isEndpointUp(ep) {
+					rlist = append(rlist, retrievers.NewEmbedRerank(emb, skills, ep, 30*time.Second))
+					break
+				}
+			}
+		}
 	}
 
 	// Evaluate: full set + covered-only subset.

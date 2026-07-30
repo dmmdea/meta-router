@@ -4,6 +4,14 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.19.0] — 2026-07-30
+
+### Added
+- **W9 R9.3 — `embed+rerank` eval leg, and its verdict: MEASURED, LOST, NOT WIRED.** `retrievers.EmbedRerank` composes the embed top-20 with `bge-reranker-v2-m3` via the local `/v1/rerank` endpoint (probed live before the client was written; raw-logit scores, order-only — never logged as cosines, the R9.2b lesson applied to this producer). `mr-eval` gains the row. On the 232-case gold set, covered-only (73 cases): recall@3 0.795 → 0.822 (**exactly 2 extra cases**), recall@1/@5 unchanged, MRR 0.718 → 0.715, median latency **195ms → 6,527ms (33×)** against a 1,000ms production hook deadline. Per W9's fix gate the reranker earns NO production wiring; the eval leg ships so the negative result is reproducible. Failures inside the leg PROPAGATE by design — a silent fallback would score embed-only under the `embed+rerank` label.
+
+### Known gaps (recorded, not fixed here)
+- **The gold set has decayed 68.5%:** 159 of 232 cases expect skills that no longer exist in the 191-skill discoverable catalog, so two-thirds of the set can validate nothing, and cross-date comparisons (June's 0.855 recall@3 vs today's 0.795) span different skill populations. R9.5 is therefore a REFRESH, not an extension.
+
 ## [0.18.0] — 2026-07-30
 
 ### Added
