@@ -22,7 +22,7 @@ var hintLanes = []string{"claude", "codex", "glm"}
 var windowOrder = []ledger.WindowKind{ledger.Win5h, ledger.Win7d}
 
 // quotaHint builds a one-line quota+route pointer from the ledger file DIRECTLY
-// (no subprocess, no network — the hook's ~300ms deadline stands; a file read is
+// (no subprocess, no network — the hook's deadline stands (300ms binary default; 1000ms via -timeout-ms in production); a file read is
 // microseconds). ANY failure or absent signal → "" (inject nothing; fail-open
 // is absolute). Zero policy content: it reports STATE and points at the oracle —
 // it NEVER names a preferred lane or a rank-table model (§6c: policy lives in

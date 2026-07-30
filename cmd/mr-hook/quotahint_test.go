@@ -104,9 +104,9 @@ func TestQuotaHintGLMHardStop(t *testing.T) {
 }
 
 // A2R-#11: the quota hint is now computed INSIDE the hook's deadline-bounded
-// goroutine (it used to run AFTER the select resolved, outside the ~300ms
+// goroutine (it used to run AFTER the select resolved, outside the configured (default 300ms)
 // budget). This pins the property that made the move safe: on a seeded ledger
-// the hint is (a) unchanged in content and (b) computed FAR under the ~300ms
+// the hint is (a) unchanged in content and (b) computed FAR under the configured (default 300ms)
 // hook budget, so folding it inside the deadline cannot blow it.
 func TestQuotaHintFitsWithinHookDeadlineBudget(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir())
@@ -123,10 +123,10 @@ func TestQuotaHintFitsWithinHookDeadlineBudget(t *testing.T) {
 	if h == "" || !strings.Contains(h, "85%") || !strings.Contains(h, "mr-orchestrate route") {
 		t.Fatalf("moving the hint must not change its output: %q", h)
 	}
-	// A file read is microseconds; a comfortable margin under the 300ms hook
+	// A file read is microseconds; a comfortable margin under even the default 300ms hook
 	// deadline proves the hint fits inside the bounded goroutine.
 	if elapsed > 100*time.Millisecond {
-		t.Fatalf("quotaHint took %v — too slow to fold inside the ~300ms hook deadline", elapsed)
+		t.Fatalf("quotaHint took %v — too slow to fold inside the hook deadline (300ms binary default; production settings.json runs -timeout-ms 1000)", elapsed)
 	}
 }
 

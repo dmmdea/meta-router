@@ -155,3 +155,30 @@ func TestEmbedRerankUnknownIDFails(t *testing.T) {
 		t.Fatal("an unresolvable candidate id must be an error, not a silent skip")
 	}
 }
+
+// Review LOW: the refusal branches were code-covered but unpinned — a server
+// regression returning a truncated results array, a duplicate index, or
+// garbage JSON must all REFUSE (propagate), never partially score.
+func TestRerankRefusalBranches(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"truncated results", `{"results":[{"index":0,"relevance_score":-1.0}]}`},
+		{"duplicate index", `{"results":[{"index":0,"relevance_score":-1.0},{"index":0,"relevance_score":-2.0}]}`},
+		{"out-of-range index", `{"results":[{"index":0,"relevance_score":-1.0},{"index":9,"relevance_score":-2.0}]}`},
+		{"garbage json", `{"results": not-json`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer srv.Close()
+			er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram"}}, rerankSkills(), srv.URL, testTimeout())
+			if _, err := er.Retrieve("anything at all", 2); err == nil {
+				t.Fatalf("%s must refuse, not partially score", c.name)
+			}
+		})
+	}
+}
