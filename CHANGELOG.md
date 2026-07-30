@@ -4,6 +4,15 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.17.0] — 2026-07-30
+
+### Added
+- **W9 R9.1 — `mr-index` can now harvest `~/.claude/commands/` and `~/.claude/agents/` (flat-root kinds), OFF by default.** The surfacer's index held only skills and plugin skills; the operator's 11 commands and 35 agents were structurally unreachable — absent from the index, not badly ranked (W9 audit, re-verified). `catalog.Root` gains an additive `kind` field (`"commands"` / `"agents"`); the zero value keeps every existing `roots.json` meaning exactly what it meant. Identity follows the invocable form, same philosophy as skills taking their directory name: commands index as `/<basename>` (their frontmatter has no `name`), agents by frontmatter `name` (the Agent tool's `subagent_type`, basename fallback) as `agent:<name>`. The frontmatter parser is the SAME block-scalar-safe core skills use (split into `parseFrontmatterMD`; `ParseSkillMD` keeps its name requirement) — not a second parser to re-learn the 69%-blind lesson on. **Production index composition is unchanged**: no live `roots.json` names a flat root, and per W9's fix gate none may until the measured recall/precision win exists. Verified both ways against the real machine: a scratch roots.json with the two flat roots refreshes `+46` (11 commands + 35 agents, zero degenerate embed texts); the same refresh without them is `+0`.
+
+### Known gaps (recorded, not fixed here)
+- **Production `roots.json` is stale independent of this change:** auto-discovery finds 17 roots / 191 skills; the live file lists 13 roots and the live index holds 127 entries — ~64 skills from newer plugin packs are missing because `refresh` trusts the persisted root list and only `build` rediscovers. Re-baselining the production index is an index-composition change and goes through the same W9 gate discussion.
+- Plugin-provided agents (e.g. `claude-code-guide`, which lives in a plugin, not `~/.claude/agents/`) are not covered by the user-agents root; a per-plugin `agents/` root is the same mechanism if measurement earns it.
+
 ## [0.16.0] — 2026-07-27
 
 ### Changed

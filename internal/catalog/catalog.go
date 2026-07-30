@@ -21,9 +21,24 @@ type Skill struct {
 // user skills are invoked by bare directory name ("gstack-qa"), plugin skills
 // by "<plugin>:<skill-dir>" ("superpowers:brainstorming") — matching exactly
 // how the Skill tool invokes them.
+// Kind selects the harvest shape for a root. The zero value ("", or the
+// explicit "skills") is the original SKILL.md directory walk, so every
+// pre-Kind roots.json keeps meaning exactly what it meant. W9 R9.1 added the
+// flat kinds for ~/.claude/commands and ~/.claude/agents — 46 invocables that
+// were structurally absent from the index. Adding a Kind here is a CAPABILITY;
+// production index composition changes only when a roots.json entry actually
+// names one of these roots, and that entry ships only behind W9's measured
+// recall/precision gate.
+const (
+	KindSkills   = "skills"
+	KindCommands = "commands" // flat *.md; invoked as /<basename>; frontmatter has no name
+	KindAgents   = "agents"   // flat *.md; dispatched by frontmatter name via the Agent tool
+)
+
 type Root struct {
 	Path string `json:"path"`
 	Pack string `json:"pack"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // UserPack is the pack name for the user's own skills; its IDs are unprefixed.
@@ -48,6 +63,20 @@ func InvocableID(pack, name string) string {
 // children of a non-target key (e.g. a `metadata:` block) are skipped, so they
 // never leak into the description.
 func ParseSkillMD(path string) (Skill, error) {
+	s, err := parseFrontmatterMD(path)
+	if err != nil {
+		return Skill{}, err
+	}
+	if s.Name == "" {
+		return Skill{}, fmt.Errorf("%s: frontmatter has no name", path)
+	}
+	return s, nil
+}
+
+// parseFrontmatterMD is ParseSkillMD without the name requirement: command
+// files legitimately carry only a description (their name IS the filename), so
+// the flat harvesters need the same block-scalar-safe parsing minus that check.
+func parseFrontmatterMD(path string) (Skill, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Skill{}, err
@@ -129,9 +158,6 @@ func ParseSkillMD(path string) (Skill, error) {
 				s.WhenToUse = joined
 			}
 		}
-	}
-	if s.Name == "" {
-		return Skill{}, fmt.Errorf("%s: frontmatter has no name", path)
 	}
 	return s, nil
 }
@@ -246,6 +272,10 @@ func Harvest(rootPaths []string) ([]Skill, error) {
 func HarvestRoots(roots []Root) ([]Skill, error) {
 	var out []Skill
 	for _, root := range roots {
+		if root.Kind == KindCommands || root.Kind == KindAgents {
+			out = append(out, harvestFlat(root)...)
+			continue
+		}
 		cleanRoot := filepath.Clean(root.Path)
 		var hs []harvested
 		_ = filepath.WalkDir(cleanRoot, func(p string, d fs.DirEntry, err error) error {
@@ -305,4 +335,53 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 		}
 	}
 	return out, nil
+}
+
+// harvestFlat reads a FLAT root of *.md files (commands/, agents/). It does
+// not descend into subdirectories — neither surface nests — and skips
+// non-markdown, hidden files, and unparseable frontmatter (skip-not-fatal, the
+// same tolerance the SKILL.md walk has, so one bad file can't blind the rest).
+//
+// Identity rules differ per kind and both are the INVOCABLE identity, matching
+// the skills philosophy (a skill's name is its directory because that is what
+// the Skill tool accepts):
+//   - commands: Name = file basename (invoked as /<basename>; frontmatter has
+//     no name field), ID = "/" + name.
+//   - agents:   Name = frontmatter name (the Agent tool's subagent_type),
+//     falling back to the basename; ID = "agent:" + name.
+//
+// Results are name-sorted for determinism (ReadDir order is already sorted,
+// but the frontmatter-name override for agents can reorder).
+func harvestFlat(root Root) []Skill {
+	cleanRoot := filepath.Clean(root.Path)
+	des, err := os.ReadDir(cleanRoot)
+	if err != nil {
+		return nil
+	}
+	var out []Skill
+	for _, de := range des {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".md") || strings.HasPrefix(de.Name(), ".") {
+			continue
+		}
+		p := filepath.Join(cleanRoot, de.Name())
+		s, perr := parseFrontmatterMD(p)
+		if perr != nil {
+			continue // skip bad
+		}
+		base := strings.TrimSuffix(de.Name(), ".md")
+		switch root.Kind {
+		case KindCommands:
+			s.Name = base
+			s.ID = "/" + base
+		case KindAgents:
+			if s.Name == "" {
+				s.Name = base
+			}
+			s.ID = "agent:" + s.Name
+		}
+		s.Source = root.Pack
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
