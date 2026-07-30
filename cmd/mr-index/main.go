@@ -67,14 +67,18 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 		return rs, nil
 	}
 	rootsPath := roots.ConfigPathFor(outPath)
-	if cfg.cmd == "refresh" {
-		rs, err := roots.Load(rootsPath)
-		if err == nil {
-			return rs, nil
-		}
-		if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "warning: %v — rediscovering roots\n", err)
-		}
+	// A roots.json that EXISTS but is invalid (parse error, unknown kind) is
+	// FATAL for both commands — never "warn and rediscover". Rediscovery ends
+	// in roots.Save, which OVERWRITES the operator's file: a typo'd kind would
+	// be repaid with the silent destruction of the very edits that carried it
+	// (review 2026-07-30 — this exact path also lost hand-added flat roots).
+	// Only a genuinely absent file falls through to discovery.
+	existing, loadErr := roots.Load(rootsPath)
+	if loadErr != nil && !os.IsNotExist(loadErr) {
+		return nil, fmt.Errorf("%v — fix or delete %s (refusing to rediscover: that would overwrite your edits)", loadErr, rootsPath)
+	}
+	if cfg.cmd == "refresh" && loadErr == nil {
+		return existing, nil
 	}
 	claudeDir, err := roots.DefaultClaudeDir()
 	if err != nil {
@@ -83,6 +87,23 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 	rs := roots.Discover(claudeDir)
 	if len(rs) == 0 {
 		return nil, fmt.Errorf("no skill roots found under %s", claudeDir)
+	}
+	// Discovery can only ever find skills-class roots; flat roots (commands/
+	// agents) exist solely because the operator hand-added them. A build that
+	// dropped them would destroy the enablement AND rebuild the index without
+	// its 46 entries in one stroke (review 2026-07-30, MAJOR). Carry them over,
+	// deduped by cleaned path, appended after discovered roots — flat-last also
+	// matches HarvestRoots' skills-first dedup ordering.
+	if loadErr == nil {
+		seen := make(map[string]bool, len(rs))
+		for _, r := range rs {
+			seen[filepath.Clean(r.Path)] = true
+		}
+		for _, r := range existing {
+			if (r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents) && !seen[filepath.Clean(r.Path)] {
+				rs = append(rs, r)
+			}
+		}
 	}
 	if err := roots.Save(rootsPath, rs); err != nil {
 		// Persisting is best-effort: an unwritable roots.json must not block

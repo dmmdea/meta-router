@@ -59,6 +59,17 @@ func Load(path string) ([]catalog.Root, error) {
 		if r.Path == "" {
 			continue
 		}
+		// An unknown kind must be REFUSED here, not tolerated: HarvestRoots
+		// would fall through to the SKILL.md walk, find nothing under a flat
+		// dir, and index zero entries with no diagnostic anywhere — a silent
+		// no-op the operator can only detect by noticing absence. Since
+		// hand-editing roots.json is the flat-root enablement path, a typo
+		// ("command", "Agents") is the EXPECTED failure mode (review
+		// 2026-07-30, MINOR).
+		if !catalog.ValidKind(r.Kind) {
+			return nil, fmt.Errorf("roots: %s: unknown kind %q for %s (valid: %q, %q, %q, or omit)",
+				path, r.Kind, r.Path, catalog.KindSkills, catalog.KindCommands, catalog.KindAgents)
+		}
 		if r.Pack == "" {
 			r.Pack = catalog.UserPack
 		}

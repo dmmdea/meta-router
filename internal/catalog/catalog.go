@@ -29,11 +29,31 @@ type Skill struct {
 // production index composition changes only when a roots.json entry actually
 // names one of these roots, and that entry ships only behind W9's measured
 // recall/precision gate.
+// ID namespaces (review 2026-07-30): commands take "/<name>" — a "/" can never
+// appear in a skill ID, so that space is collision-free. Agents take
+// "agent:<name>", which RESERVES the pack name "agent": a plugin literally
+// named "agent" would mint byte-identical IDs and DedupByID would silently
+// shadow one side. No such plugin exists and pack names come from installer
+// manifests, but the reservation is a contract, not an accident — ValidKind
+// and this comment are where it is recorded.
 const (
 	KindSkills   = "skills"
 	KindCommands = "commands" // flat *.md; invoked as /<basename>; frontmatter has no name
 	KindAgents   = "agents"   // flat *.md; dispatched by frontmatter name via the Agent tool
 )
+
+// ValidKind reports whether k is a recognized root kind. The zero value is the
+// SKILL.md walk. Anything else ("command" singular, "Agents") must be REFUSED
+// loudly by loaders: HarvestRoots would silently fall through to the SKILL.md
+// walk, find nothing under a flat dir, and index zero entries — a no-op the
+// operator can only detect by noticing absence (review 2026-07-30, MINOR).
+func ValidKind(k string) bool {
+	switch k {
+	case "", KindSkills, KindCommands, KindAgents:
+		return true
+	}
+	return false
+}
 
 type Root struct {
 	Path string `json:"path"`
@@ -270,8 +290,26 @@ func Harvest(rootPaths []string) ([]Skill, error) {
 // invocable copy of any twin. Unparseable skills are skipped (not fatal) so
 // one bad skill can't blind the whole catalog.
 func HarvestRoots(roots []Root) ([]Skill, error) {
+	// Skills-class roots are processed BEFORE flat roots regardless of file
+	// order: DedupByDescription keeps the first occurrence, and a command that
+	// 1:1-wraps a skill carries a byte-identical description — whichever came
+	// first would silently delete the other from the index. The skill must win
+	// (it is the Skill-tool-invocable canonical), and that must be a rule, not
+	// an artifact of roots.json ordering (review 2026-07-30, MINOR). Relative
+	// order within each class is preserved.
+	ordered := make([]Root, 0, len(roots))
+	for _, r := range roots {
+		if r.Kind != KindCommands && r.Kind != KindAgents {
+			ordered = append(ordered, r)
+		}
+	}
+	for _, r := range roots {
+		if r.Kind == KindCommands || r.Kind == KindAgents {
+			ordered = append(ordered, r)
+		}
+	}
 	var out []Skill
-	for _, root := range roots {
+	for _, root := range ordered {
 		if root.Kind == KindCommands || root.Kind == KindAgents {
 			out = append(out, harvestFlat(root)...)
 			continue
@@ -358,9 +396,19 @@ func harvestFlat(root Root) []Skill {
 	if err != nil {
 		return nil
 	}
-	var out []Skill
+	type flatEntry struct {
+		skill     Skill
+		nameMatch bool // identity == file basename (see ordering rule below)
+	}
+	var hs []flatEntry
 	for _, de := range des {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".md") || strings.HasPrefix(de.Name(), ".") {
+		// EqualFold: Windows filesystems are case-insensitive, so FOO.MD is a
+		// valid command file the exact-case check silently dropped (review
+		// 2026-07-30, NIT).
+		if de.IsDir() || strings.HasPrefix(de.Name(), ".") {
+			continue
+		}
+		if len(de.Name()) < 3 || !strings.EqualFold(de.Name()[len(de.Name())-3:], ".md") {
 			continue
 		}
 		p := filepath.Join(cleanRoot, de.Name())
@@ -368,7 +416,16 @@ func harvestFlat(root Root) []Skill {
 		if perr != nil {
 			continue // skip bad
 		}
-		base := strings.TrimSuffix(de.Name(), ".md")
+		// An empty description is the degenerate name-only embed — the exact
+		// failure shape that once blinded 69% of skills. Indexing it would let
+		// it participate in cosine ranking as pure noise, and
+		// DedupByDescription deliberately never collapses empties. Skip it,
+		// the same disposition as a file with no frontmatter at all (review
+		// 2026-07-30, MINOR).
+		if strings.TrimSpace(s.Description) == "" {
+			continue
+		}
+		base := de.Name()[:len(de.Name())-3] // strip ".md" in whatever case it arrived
 		switch root.Kind {
 		case KindCommands:
 			s.Name = base
@@ -380,8 +437,27 @@ func harvestFlat(root Root) []Skill {
 			s.ID = "agent:" + s.Name
 		}
 		s.Source = root.Pack
-		out = append(out, s)
+		hs = append(hs, flatEntry{skill: s, nameMatch: s.Name == base})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	// Ordering contract (load-bearing for two reasons): downstream DedupByID
+	// keeps the FIRST occurrence, and two agent files can mint the same ID
+	// (frontmatter `name: victim` in stealer.md vs victim.md's basename
+	// fallback). sort.Slice is UNSTABLE, so equal keys made the survivor a Go
+	// version accident (review 2026-07-30, MINOR). Rule: basename-matching
+	// identity first (the file that IS what it claims), then name, then path —
+	// SliceStable so the winner is a contract, not pdqsort's mood.
+	sort.SliceStable(hs, func(i, j int) bool {
+		if hs[i].nameMatch != hs[j].nameMatch {
+			return hs[i].nameMatch
+		}
+		if hs[i].skill.Name != hs[j].skill.Name {
+			return hs[i].skill.Name < hs[j].skill.Name
+		}
+		return hs[i].skill.Path < hs[j].skill.Path
+	})
+	out := make([]Skill, 0, len(hs))
+	for _, h := range hs {
+		out = append(out, h.skill)
+	}
 	return out
 }
