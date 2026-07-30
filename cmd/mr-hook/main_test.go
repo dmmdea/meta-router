@@ -32,12 +32,12 @@ const testMinLen = 6
 
 func TestDecide_PrimaryAboveThreshold(t *testing.T) {
 	pri := fakePrimary{res: []retrievers.Scored{{ID: "gstack-qa"}, {ID: "gstack"}}, topCos: 0.6}
-	ids, _, mode := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
+	ids, _, mode, _ := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
 	if mode != "embed" || len(ids) != 2 || ids[0] != "gstack-qa" {
 		t.Fatalf("ids=%v mode=%q", ids, mode)
 	}
 	// -ranker=hybrid keeps its own mode label for the usage log
-	_, _, mode = decide("long enough prompt here", 3, 0.55, testMinLen, pri, "hybrid", fakeLex{})
+	_, _, mode, _ = decide("long enough prompt here", 3, 0.55, testMinLen, pri, "hybrid", fakeLex{})
 	if mode != "hybrid" {
 		t.Fatalf("mode=%q, want hybrid", mode)
 	}
@@ -45,7 +45,7 @@ func TestDecide_PrimaryAboveThreshold(t *testing.T) {
 
 func TestDecide_GatedEmptyBelowThreshold(t *testing.T) {
 	pri := fakePrimary{res: []retrievers.Scored{{ID: "gstack-qa"}}, topCos: 0.2}
-	ids, _, mode := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{res: []retrievers.Scored{{ID: "z", Score: 99}}})
+	ids, _, mode, _ := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{res: []retrievers.Scored{{ID: "z", Score: 99}}})
 	if mode != "gated-empty" || len(ids) != 0 {
 		t.Fatalf("expected gated-empty, got ids=%v mode=%q", ids, mode)
 	}
@@ -55,7 +55,7 @@ func TestDecide_GatedEmptyBelowThreshold(t *testing.T) {
 func TestDecide_EmbedderDown_WeakLexStaysSilent(t *testing.T) {
 	pri := fakePrimary{err: errBoom}
 	// 8 prompt tokens, top score 5: raw 5 < 18 and 5/8 < 1.5 → gated
-	ids, topCos, mode := decide("one two three four five six seven eight", 3, 0.55, testMinLen, pri, "embed", fakeLex{res: []retrievers.Scored{{ID: "x", Score: 5}}})
+	ids, topCos, mode, _ := decide("one two three four five six seven eight", 3, 0.55, testMinLen, pri, "embed", fakeLex{res: []retrievers.Scored{{ID: "x", Score: 5}}})
 	if mode != "embedder-down" || len(ids) != 0 || topCos != 0 {
 		t.Fatalf("weak lexical match must stay silent: ids=%v cos=%v mode=%q", ids, topCos, mode)
 	}
@@ -65,7 +65,7 @@ func TestDecide_EmbedderDown_WeakLexStaysSilent(t *testing.T) {
 func TestDecide_EmbedderDown_StrongRawSurfacesTop1(t *testing.T) {
 	pri := fakePrimary{err: errBoom}
 	lex := fakeLex{res: []retrievers.Scored{{ID: "gstack-qa", Score: 25}, {ID: "noise", Score: 24}}}
-	ids, _, mode := decide("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen", 3, 0.55, testMinLen, pri, "embed", lex)
+	ids, _, mode, _ := decide("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen", 3, 0.55, testMinLen, pri, "embed", lex)
 	if mode != "bm25-fallback" {
 		t.Fatalf("mode=%q, want bm25-fallback", mode)
 	}
@@ -79,7 +79,7 @@ func TestDecide_EmbedderDown_PerTokenGate(t *testing.T) {
 	pri := fakePrimary{err: errBoom}
 	lex := fakeLex{res: []retrievers.Scored{{ID: "gstack-qa", Score: 8}}}
 	// 4 tokens → 8/4 = 2.0 >= 1.5
-	ids, _, mode := decide("run gstack qa now", 3, 0.55, testMinLen, pri, "embed", lex)
+	ids, _, mode, _ := decide("run gstack qa now", 3, 0.55, testMinLen, pri, "embed", lex)
 	if mode != "bm25-fallback" || len(ids) != 1 || ids[0] != "gstack-qa" {
 		t.Fatalf("per-token gate should fire: ids=%v mode=%q", ids, mode)
 	}
@@ -87,7 +87,7 @@ func TestDecide_EmbedderDown_PerTokenGate(t *testing.T) {
 
 func TestDecide_EmbedderDown_NoLexResults(t *testing.T) {
 	pri := fakePrimary{err: errBoom}
-	ids, topCos, mode := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
+	ids, topCos, mode, _ := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
 	if mode != "embedder-down" || len(ids) != 0 || topCos != 0 {
 		t.Fatalf("no lexical results must stay silent: ids=%v cos=%v mode=%q", ids, topCos, mode)
 	}
@@ -96,7 +96,7 @@ func TestDecide_EmbedderDown_NoLexResults(t *testing.T) {
 func TestDecide_TooShort(t *testing.T) {
 	pri := fakePrimary{res: []retrievers.Scored{{ID: "a"}}, topCos: 0.9}
 	// "ok go" is 5 chars (trimmed) — below minLen=6
-	ids, topCos, mode := decide("ok go", 3, 0.55, testMinLen, pri, "embed", fakeLex{res: []retrievers.Scored{{ID: "x", Score: 99}}})
+	ids, topCos, mode, _ := decide("ok go", 3, 0.55, testMinLen, pri, "embed", fakeLex{res: []retrievers.Scored{{ID: "x", Score: 99}}})
 	if mode != "too-short" {
 		t.Fatalf("expected mode too-short, got %q", mode)
 	}
@@ -111,7 +111,7 @@ func TestDecide_TooShort(t *testing.T) {
 func TestDecide_TooShort_Whitespace(t *testing.T) {
 	pri := fakePrimary{res: []retrievers.Scored{{ID: "a"}}, topCos: 0.9}
 	// Padded with spaces but trimmed is still short (2 < 6)
-	ids, _, mode := decide("   ok   ", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
+	ids, _, mode, _ := decide("   ok   ", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
 	if mode != "too-short" || len(ids) != 0 {
 		t.Fatalf("expected too-short for whitespace-padded short prompt, got ids=%v mode=%q", ids, mode)
 	}

@@ -4,6 +4,11 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.18.0] — 2026-07-30
+
+### Added
+- **W9 R9.2b — per-candidate cosine logging in `mr-hook`.** `usage.jsonl` recorded only the top-1 cosine and bare surfaced names, so every retrospective curve used the event's top-1 as a proxy for the invoked skill's own score — recall-at-gate was an upper bound (R9.2 doc, caveat 6). Cosine-path rows now carry `cands`: the top-`logDepth` (8) candidates with scores, rounded to 4 decimals at marshaling (not in a bypassable constructor), present on **both** surfaced and `gated-empty` rows (the gated region is 27% of live traffic and exactly where the gate decision needs scores) and absent on non-cosine modes so a BM25 score can never recontaminate the cosine denominator R9.2 cleaned. Privacy posture unchanged: names + numbers, no prompt text. Surfacing behavior untouched — retrieval deepens to `max(k, 8)` but only the first `k` surface, pinned by `TestSurfacedIsPrefixOfCandidates`.
+
 ## [0.17.0] — 2026-07-30
 
 ### Added
