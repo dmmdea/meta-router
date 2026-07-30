@@ -45,12 +45,13 @@ func parseArgs(argv []string) (config, error) {
 // resolveRoots returns the harvest root set for this run.
 //   - -skill-roots given: use exactly those paths (pack = dir basename),
 //     never touching roots.json — the explicit-flag escape hatch.
-//   - build (no flag): always re-discover (user skills + installed plugin
-//     packs) and persist to roots.json next to the index, so a manual build
-//     also refreshes the recorded set.
-//   - refresh (no flag): read roots.json; if absent or unreadable, discover
-//     and create it. This is what lets the SessionStart hook run
-//     `mr-index refresh` with no flags and still see the full set.
+//   - build (no flag): re-discover (user skills + installed plugin packs),
+//     carry over operator-owned roots per the ownership rule below, and
+//     persist to roots.json next to the index.
+//   - refresh (no flag): read roots.json; if ABSENT, discover and create it
+//     (this is what lets the SessionStart hook run `mr-index refresh` with no
+//     flags and still see the full set). A file that exists but is INVALID is
+//     fatal for both commands — see the comment at the Load call.
 func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 	if cfg.skillRoots != "" {
 		var rs []catalog.Root
@@ -88,19 +89,30 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 	if len(rs) == 0 {
 		return nil, fmt.Errorf("no skill roots found under %s", claudeDir)
 	}
-	// Discovery can only ever find skills-class roots; flat roots (commands/
-	// agents) exist solely because the operator hand-added them. A build that
-	// dropped them would destroy the enablement AND rebuild the index without
-	// its 46 entries in one stroke (review 2026-07-30, MAJOR). Carry them over,
-	// deduped by cleaned path, appended after discovered roots — flat-last also
-	// matches HarvestRoots' skills-first dedup ordering.
+	// OWNERSHIP RULE (review 2026-07-30 MAJOR + closure-audit MINOR): discovery
+	// owns the ~/.claude space — a skills root under claudeDir that discovery
+	// no longer finds is an uninstalled pack and SHOULD drop. The operator owns
+	// everything else: flat roots (Discover can never emit a kind) and any
+	// hand-added root outside claudeDir exist only because a human put them in
+	// roots.json, so a build that dropped them would silently destroy edits —
+	// the first review round proved that for flat roots (enablement AND all 46
+	// index entries gone in one stroke), and the closure audit showed the same
+	// shape for outside-tree skills roots. Carried entries are deduped by
+	// cleaned path and appended after discovered roots (flat-last also matches
+	// HarvestRoots' skills-first dedup ordering).
 	if loadErr == nil {
 		seen := make(map[string]bool, len(rs))
 		for _, r := range rs {
 			seen[filepath.Clean(r.Path)] = true
 		}
+		cleanClaude := filepath.Clean(claudeDir) + string(filepath.Separator)
 		for _, r := range existing {
-			if (r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents) && !seen[filepath.Clean(r.Path)] {
+			if seen[filepath.Clean(r.Path)] {
+				continue
+			}
+			flat := r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents
+			outside := !strings.HasPrefix(filepath.Clean(r.Path)+string(filepath.Separator), cleanClaude)
+			if flat || outside {
 				rs = append(rs, r)
 			}
 		}

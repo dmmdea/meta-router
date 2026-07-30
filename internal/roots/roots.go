@@ -43,8 +43,10 @@ func DefaultClaudeDir() (string, error) {
 }
 
 // Load reads roots.json. A missing file returns os.ErrNotExist (callers
-// discover instead); a present-but-invalid file returns an error so callers
-// can warn and rediscover rather than silently indexing nothing.
+// discover instead); a present-but-invalid file returns an error that callers
+// MUST treat as fatal — never "warn and rediscover", because rediscovery ends
+// in Save overwriting the operator's file, repaying a typo with the silent
+// destruction of the edits that carried it (review 2026-07-30).
 func Load(path string) ([]catalog.Root, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

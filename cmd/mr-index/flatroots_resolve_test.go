@@ -24,7 +24,27 @@ func writeRootsFile(t *testing.T, dir string, content string) string {
 	return p
 }
 
+// hermeticHome points discovery at a throwaway home with one stub skills root,
+// so these tests neither depend on nor leak the real machine's ~/.claude
+// (closure audit 2026-07-30: the first version failed on any box without
+// installed skills and baked real paths into its fixture).
+func hermeticHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	stub := filepath.Join(home, ".claude", "skills", "stub")
+	if err := os.MkdirAll(stub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stub, "SKILL.md"), []byte("---\nname: stub\ndescription: stub.\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	return home
+}
+
 func TestBuildPreservesOperatorFlatRoots(t *testing.T) {
+	hermeticHome(t)
 	dir := t.TempDir()
 	flat := filepath.ToSlash(filepath.Join(dir, "commands"))
 	if err := os.MkdirAll(flat, 0o755); err != nil {
@@ -59,6 +79,46 @@ func TestBuildPreservesOperatorFlatRoots(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("build PERSISTED roots.json without the operator's flat root — the destroy path is back")
+	}
+}
+
+// Ownership rule: discovery owns the ~/.claude space (an uninstalled pack's
+// root SHOULD drop on rebuild), the operator owns everything else — a
+// hand-added skills-class root OUTSIDE claudeDir survives a build, one INSIDE
+// that discovery no longer finds does not (closure audit 2026-07-30, MINOR:
+// the flat-only carry-over left valid outside-tree hand-edits on the old
+// destroy path while an invalid edit was sacred).
+func TestBuildOwnershipRuleForHandAddedSkillsRoots(t *testing.T) {
+	home := hermeticHome(t)
+	dir := t.TempDir()
+	outside := filepath.ToSlash(filepath.Join(t.TempDir(), "myrepo-skills"))
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	insideGone := filepath.ToSlash(filepath.Join(home, ".claude", "plugins", "uninstalled-pack", "skills"))
+	writeRootsFile(t, dir, `{"version":1,"roots":[
+		{"path":"`+outside+`","pack":"custompack"},
+		{"path":"`+insideGone+`","pack":"uninstalled-pack"}]}`)
+	out := filepath.Join(dir, "index.json")
+
+	rs, err := resolveRoots(config{cmd: "build"}, out)
+	if err != nil {
+		t.Fatalf("resolveRoots(build): %v", err)
+	}
+	var keptOutside, keptInsideGone bool
+	for _, r := range rs {
+		if filepath.Clean(r.Path) == filepath.Clean(outside) {
+			keptOutside = true
+		}
+		if filepath.Clean(r.Path) == filepath.Clean(insideGone) {
+			keptInsideGone = true
+		}
+	}
+	if !keptOutside {
+		t.Fatal("a hand-added skills root OUTSIDE ~/.claude must survive a build")
+	}
+	if keptInsideGone {
+		t.Fatal("an under-~/.claude root discovery no longer finds must DROP (uninstalled-pack cleanup)")
 	}
 }
 

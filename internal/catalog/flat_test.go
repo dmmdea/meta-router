@@ -151,9 +151,13 @@ func TestFlatEntriesEmbedTextIsFull(t *testing.T) {
 // DedupByID keeps the first occurrence, so order decides collision winners.
 func TestFlatOutputOrderIsTheDocumentedContract(t *testing.T) {
 	dir := t.TempDir()
-	// zz-aaa.md carries frontmatter name "aaa": name-sorted-naive would put it
-	// first; the contract puts basename-matching entries first instead.
-	writeFlat(t, dir, "zz-aaa.md", "---\nname: aaa\ndescription: frontmatter name differs from basename.\n---\n")
+	// FIXTURE RULE (closure audit 2026-07-30): ReadDir order must DIFFER from
+	// contract order, or this test passes with the sort deleted and its whole
+	// purpose is vacuous — the first fixture (zz-aaa/bbb/ccc) came back from
+	// ReadDir already in contract order and the M7 kill was silently carried
+	// by the collision test alone. aa-zz.md sorts FIRST in ReadDir but its
+	// non-matching identity puts it LAST under the contract.
+	writeFlat(t, dir, "aa-zz.md", "---\nname: zzz\ndescription: frontmatter name differs from basename.\n---\n")
 	writeFlat(t, dir, "bbb.md", "---\nname: bbb\ndescription: basename matches.\n---\n")
 	writeFlat(t, dir, "ccc.md", "---\nname: ccc\ndescription: basename matches too.\n---\n")
 	got, err := HarvestRoots([]Root{{Path: dir, Pack: "agents", Kind: KindAgents}})
@@ -164,7 +168,7 @@ func TestFlatOutputOrderIsTheDocumentedContract(t *testing.T) {
 	for _, s := range got {
 		names = append(names, s.Name)
 	}
-	want := "bbb,ccc,aaa" // matching pair name-sorted first, override last
+	want := "bbb,ccc,zzz" // matching pair name-sorted first, override last
 	if strings.Join(names, ",") != want {
 		t.Fatalf("order contract violated: got %v want %s", names, want)
 	}
