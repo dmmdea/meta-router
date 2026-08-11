@@ -148,7 +148,12 @@ func applyRunOutcomeSubject(l *ledger.Ledger, subject string, o claudelane.Outco
 	tok := o.TotalTokens()
 	l.AddShadowSubject("claude", subject, ledger.Win5h, tok, now)
 	l.AddShadowSubject("claude", subject, ledger.Win7d, tok, now)
-	if o.Class == "rate_limit" {
+	// W6 typed 429: only an UPSTREAM rate limit is a provider observation. A
+	// locally-originated one (our own sliding-window limiter) must never mark
+	// the vendor's window exhausted — that poisons quota truth with a denial
+	// the vendor never issued. "" = pre-W6 producer → treated as upstream
+	// (fail-safe toward the existing behavior).
+	if o.Class == "rate_limit" && o.RateLimitOrigin != "local" {
 		l.ObserveLimit("claude", subject, ledger.Win5h, now.Add(5*time.Hour), now)
 	}
 }
@@ -485,7 +490,8 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	}), "ledger update (post-run)")
 	drec := dispatch.Record{
 		TS: now, Lane: "claude", Model: resolvedModel, AttributedModels: attributed, OutcomeClass: o.Class,
-		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
+		RateLimitOrigin: o.RateLimitOrigin,
+		Admit:           true, AdmitState: g.State, AdmitReason: g.Reason,
 		TokensIn: in, TokensOut: outTok, NumTurns: o.NumTurns, NotionalUSD: o.NotionalUSD,
 		Origin: opts.Origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: opts.Desc,
@@ -493,6 +499,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	}
 	sf.stamp(&drec)
 	warnIf(dispatch.Append(dispatchPath(), drec), "dispatch append")
+	noteLaneHealth(cfg.ExclusionOff, "claude", o.Class, now) // W6 breaker
 	if len(raw) > 0 {
 		fmt.Fprintln(out, string(raw))
 	} else {

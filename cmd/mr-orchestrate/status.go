@@ -12,6 +12,7 @@ import (
 
 	"github.com/dmmdea/meta-router/internal/orch/admission"
 	"github.com/dmmdea/meta-router/internal/orch/calib"
+	"github.com/dmmdea/meta-router/internal/orch/exclusion"
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
@@ -20,6 +21,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/router"
+	"github.com/dmmdea/meta-router/internal/orch/slidewin"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
@@ -74,6 +76,57 @@ type Status struct {
 	// month's ok=true reads identically to a healthy one on every surface.
 	A2WatchStale string          `json:"a2_watch_stale,omitempty"`
 	ScopedAlerts json.RawMessage `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
+	Resilience   *ResilienceStatus `json:"resilience,omitempty"`  // W6: breaker/limiter health (absent = nothing tracked, nothing wrong)
+}
+
+// ResilienceStatus (W6) surfaces the breaker/limiter's OWN health. The
+// mechanisms fail open by design, and their per-dispatch warns go to stderr —
+// which the detached strategy path wires to the null device — so without this
+// block a breaker that stopped persisting would degrade with zero observable
+// trace (review 2026-08-12). Absent when there is nothing to say.
+type ResilienceStatus struct {
+	// Exclusions: lane → human reason (fail count, failing class, self-heal
+	// instant) for every breaker-tracked lane — exclusion.Reason's surface.
+	Exclusions map[string]string `json:"exclusions,omitempty"`
+	// LimiterStamps: local-lane dispatch stamps currently in the sliding
+	// window file (pruning happens at decision time, so this is an upper
+	// bound between dispatches).
+	LimiterStamps int `json:"limiter_stamps,omitempty"`
+	// StateWarn: the breaker/limiter state was unreadable or corrupt — both
+	// mechanisms are FAILING OPEN right now.
+	StateWarn string `json:"state_warn,omitempty"`
+	// Alert: the persistence-failure latch (resil-alert.json) — a Save failed
+	// on some earlier dispatch and state may be stale since then. Cleared
+	// automatically by the next successful persist.
+	Alert json.RawMessage `json:"alert,omitempty"`
+}
+
+// buildResilience assembles the W6 block; nil when empty AND healthy.
+func buildResilience() *ResilienceStatus {
+	rs := &ResilienceStatus{}
+	exc, warn := exclusion.Load(exclusionsPath())
+	if warn != "" {
+		rs.StateWarn = warn
+	}
+	for _, lane := range exclusion.Lanes(exc) {
+		if rs.Exclusions == nil {
+			rs.Exclusions = map[string]string{}
+		}
+		rs.Exclusions[lane] = exclusion.Reason(exc, lane)
+	}
+	w, lwarn := slidewin.Load(localLimiterPath())
+	if lwarn != "" {
+		if rs.StateWarn != "" {
+			rs.StateWarn += "; "
+		}
+		rs.StateWarn += lwarn
+	}
+	rs.LimiterStamps = len(w.Stamps)
+	rs.Alert = readAlertJSON(statepaths.ResilAlert())
+	if rs.Exclusions == nil && rs.LimiterStamps == 0 && rs.StateWarn == "" && rs.Alert == nil {
+		return nil
+	}
+	return rs
 }
 
 // QuotaHealth is the E6 surface: is the quota signal ALIVE? A stale trace means
@@ -300,6 +353,7 @@ func runStatus(args []string) error {
 	// never a crash.
 	rs := summarizeReceipts(loadReceipts(dispatchPath()))
 	st.Receipts = &rs
+	st.Resilience = buildResilience()
 	out, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err

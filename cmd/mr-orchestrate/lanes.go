@@ -16,12 +16,44 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/codexlane"
 	"github.com/dmmdea/meta-router/internal/orch/dispatch"
 	"github.com/dmmdea/meta-router/internal/orch/egress"
+	"github.com/dmmdea/meta-router/internal/orch/exclusion"
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/glmlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/locallane"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/slidewin"
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
+
+// warnIfExcluded tells the operator when a DIRECT dispatch (--lane / --force,
+// which bypass routing) targets a breaker-excluded lane — otherwise the only
+// symptom is a generic "unavailable" mask in route consults and the operator
+// has no pointer to the self-heal time or to the fact that it is OUR breaker.
+func warnIfExcluded(off bool, lane string, now time.Time) {
+	if off {
+		return
+	}
+	s, _ := exclusion.Load(exclusionsPath())
+	if on, _ := exclusion.Excluded(s, lane, now); on {
+		fmt.Fprintln(os.Stderr, "note: "+lane+" is breaker-"+exclusion.Reason(s, lane)+"; this direct dispatch proceeds and its outcome still counts")
+	}
+}
+
+// upstreamRLO types a receipt's rate-limit origin (W6): keep an origin the
+// outcome already carries; otherwise a rate_limit on a lane that classifies
+// ONLY vendor output is "upstream" by construction. Receipts must carry the
+// distinction on EVERY lane or the local-vs-upstream count is a lie told by
+// omission (review 2026-08-12).
+func upstreamRLO(class, existing string) string {
+	if existing != "" {
+		return existing
+	}
+	if class == "rate_limit" {
+		return "upstream"
+	}
+	return ""
+}
 
 // laneGate is the non-claude lane admission: pure ledger admission only —
 // billing-mode and the fable fuse are claude-lane rules (the GLM 1313 latch
@@ -65,7 +97,11 @@ func applyCodexOutcome(l *ledger.Ledger, o codexlane.Outcome, cfg orchcfg.Config
 	}
 	if o.Class == "rate_limit" {
 		// Real provider signal — the exec stream has NO rate_limits surface
-		// (fixture-proven), so the veto itself is the observation.
+		// (fixture-proven), so the veto itself is the observation. UNGATED on
+		// rate-limit origin BY DESIGN: codexlane classifies only vendor output,
+		// so no locally-imposed limit can reach here. If a codex-lane limiter
+		// is ever added, THIS call must gain the origin gate
+		// applyRunOutcomeSubject has, or it will poison quota truth (W6).
 		l.ObserveLimit("codex", "", ledger.Win5h, now.Add(5*time.Hour), now)
 	}
 	return predictedUsedPct
@@ -148,7 +184,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		warnIf(writeCodexAlert(codexAlertPath(), note, now), "codex alert latch")
 	}
 	rec := dispatch.Record{
-		TS: now, Lane: "codex", Model: model, OutcomeClass: o.Class,
+		TS: now, Lane: "codex", Model: model, OutcomeClass: o.Class, RateLimitOrigin: upstreamRLO(o.Class, ""),
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
 		TokensIn: o.Usage.Input, TokensOut: o.Usage.Output + o.Usage.ReasoningOutput,
 		NumTurns: o.Turns,
@@ -157,6 +193,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")
+	noteLaneHealth(cfg.ExclusionOff, "codex", o.Class, now) // W6 breaker
 	if len(raw) > 0 {
 		fmt.Fprintln(out, string(raw))
 	} else {
@@ -183,6 +220,68 @@ func applyLocalOutcome(o claudelane.Outcome, now time.Time) {
 	// (S2R-4, R14) and metered by the receipt alone. No lock acquired.
 	_ = o
 	_ = now
+}
+
+// resilAlert latches a W6 persistence failure into a state file the operator
+// can actually see: stderr is null-wired on the detached strategy path, so a
+// breaker/limiter whose state stops persisting would otherwise degrade with
+// zero observable trace. Best-effort by construction — if even this write
+// fails, stderr is all that is left. Cleared by resilAlertClear on the next
+// successful persist (self-healing signal). Surfaced in `status`.
+func resilAlert(what string, err error) {
+	fmt.Fprintln(os.Stderr, "warn:", what+":", err)
+	b, _ := json.Marshal(map[string]string{
+		"ts": time.Now().UTC().Format(time.RFC3339), "what": what, "err": err.Error()})
+	_ = os.WriteFile(statepaths.ResilAlert(), b, 0o644)
+}
+
+func resilAlertClear() { _ = os.Remove(statepaths.ResilAlert()) }
+
+// noteLaneHealth feeds the W6 self-healing breaker from a dispatch outcome,
+// through the LOCKED read-modify-write (parallel dispatches would otherwise
+// lose updates silently — e.g. a concurrent heal overwritten by a stale
+// armed set). Qualifying failures are ADAPTER classes only — spawn_error and
+// parse_error on every lane (our binary/contract broke), plus api_error on
+// the free local lane (a harness tier fault; the cloud lanes' vendor-error
+// classes — claude/glm "api_error", codex "error" — are the VENDOR's
+// incident, which quota/admission owns, and never arm this breaker). ok and
+// deferred are HEALTHY (an honest defer is the local lane working as
+// designed) and clear the breaker. Everything else (rate_limit, refusal,
+// empty_result, incomplete) is neither: quota and policy signals never open
+// an infrastructure breaker. (config_error structurally never reaches here —
+// every lane runner returns its error before the receipt.) A dispatch to a
+// currently-excluded lane (--force / direct --lane) still records honestly;
+// the Reason surface in `status` shows the operator the sliding self-heal.
+func noteLaneHealth(off bool, lane, class string, now time.Time) {
+	if off { // the caller's ALREADY-LOADED cfg decides — a config edit landing
+		return // mid-dispatch must not make recorder and router disagree
+	}
+	warn, err := exclusion.Update(exclusionsPath(), func(s exclusion.Set) (exclusion.Set, bool) {
+		switch class {
+		case "spawn_error", "parse_error":
+			return exclusion.RecordFailure(s, lane, class, now, exclusion.Defaults()), true
+		case "api_error":
+			if lane != "local" {
+				return s, false
+			}
+			return exclusion.RecordFailure(s, lane, class, now, exclusion.Defaults()), true
+		case "ok", "deferred":
+			if _, tracked := s[lane]; !tracked {
+				return s, false // nothing to clear — skip the write
+			}
+			return exclusion.RecordSuccess(s, lane), true
+		default:
+			return s, false
+		}
+	})
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "warn:", warn)
+	}
+	if err != nil {
+		resilAlert("exclusion update", err)
+		return
+	}
+	resilAlertClear()
 }
 
 // runLocalLane dispatches `run --lane local` through the S3R-1 TWO-DOOR
@@ -224,6 +323,44 @@ func runLocalLane(out io.Writer, prompt, class, model, cwd string, timeoutSec in
 		return 0, nil
 	}
 
+	// W6 sliding-window limiter: the local box serves interactive work too; a
+	// headless burst must not wedge it. A denial is a LOCAL rate limit — typed
+	// so it can never read as vendor exhaustion — and relegates (exit 3) like
+	// an honest defer, so the DAG escalates to a cloud alternative. Negative
+	// local_max_per_min disables; state failures fail OPEN (warned).
+	warnIfExcluded(cfg.ExclusionOff, "local", now)
+	if lim := cfg.LocalMaxPerMin; lim > 0 {
+		allow, retryAt, warn, derr := slidewin.Decide(localLimiterPath(), now, lim, time.Minute)
+		if warn != "" {
+			fmt.Fprintln(os.Stderr, "warn:", warn)
+		}
+		if derr != nil {
+			// Fail OPEN: a wedged lock or unpersistable state must not brick
+			// the free lane — but it must be VISIBLE (latched; stderr is
+			// null-wired on the strategy path).
+			resilAlert("local limiter", derr)
+			allow = true
+		} else {
+			resilAlertClear()
+		}
+		if !allow {
+			o := claudelane.Outcome{Class: "rate_limit", RateLimitOrigin: "local",
+				Result: fmt.Sprintf("local lane sliding-window limit (%d/60s) reached; earliest retry %s", lim, retryAt.UTC().Format(time.RFC3339))}
+			rec := dispatch.Record{
+				TS: now, Lane: "local", Model: model, OutcomeClass: o.Class, RateLimitOrigin: o.RateLimitOrigin,
+				Admit: false, AdmitState: "open", AdmitReason: o.Result,
+				Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
+				RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
+			}
+			sf.stamp(&rec)
+			warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (local limiter)")
+			b, _ := json.Marshal(map[string]string{"outcome_class": o.Class, "rate_limit_origin": o.RateLimitOrigin, "detail": o.Result})
+			fmt.Fprintln(out, string(b))
+			fmt.Fprintf(os.Stderr, "local limiter: %s (exit %d, relegation)\n", o.Result, exitDeferred)
+			return exitDeferred, nil
+		}
+	}
+
 	var o claudelane.Outcome
 	var raw []byte
 	var err error
@@ -235,10 +372,12 @@ func runLocalLane(out io.Writer, prompt, class, model, cwd string, timeoutSec in
 	if err != nil {
 		return 1, err // reserved for nothing: the adapter is fail-open (classified Outcome)
 	}
+	// W6: feed the self-healing breaker (ok/deferred heal; adapter classes arm).
+	noteLaneHealth(cfg.ExclusionOff, "local", o.Class, now)
 	// S3R-10: free lane — meter without any ledger lock (no-op seam).
 	applyLocalOutcome(o, now)
 	rec := dispatch.Record{
-		TS: now, Lane: "local", Model: model, OutcomeClass: o.Class,
+		TS: now, Lane: "local", Model: model, OutcomeClass: o.Class, RateLimitOrigin: upstreamRLO(o.Class, o.RateLimitOrigin),
 		Admit: true, AdmitState: "open", NumTurns: o.NumTurns,
 		Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
@@ -516,7 +655,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	}
 	sort.Strings(attributed)
 	rec := dispatch.Record{
-		TS: now, Lane: "glm", Model: model, AttributedModels: attributed, OutcomeClass: o.Class,
+		TS: now, Lane: "glm", Model: model, AttributedModels: attributed, OutcomeClass: o.Class, RateLimitOrigin: upstreamRLO(o.Class, o.RateLimitOrigin),
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
 		TokensIn: in, TokensOut: outTok, NumTurns: o.NumTurns, NotionalUSD: o.NotionalUSD,
 		Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
@@ -524,6 +663,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")
+	noteLaneHealth(cfg.ExclusionOff, "glm", o.Class, now) // W6 breaker
 	if len(raw) > 0 {
 		fmt.Fprintln(out, string(raw))
 	} else {

@@ -11,6 +11,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/burnrate"
 	"github.com/dmmdea/meta-router/internal/orch/calib"
 	"github.com/dmmdea/meta-router/internal/orch/dispatch"
+	"github.com/dmmdea/meta-router/internal/orch/exclusion"
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/glmlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
@@ -77,10 +78,41 @@ func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now 
 		}
 		out[lane] = ls
 	}
-	// local: always open. The free lane fails open — its capacity is not ledger
-	// -tracked (it goes through the local-offload MCP, S2R-4); the router's ctx
-	// prohibition floor is what keeps large tasks off it.
+	// local: always open QUOTA-wise. The free lane fails open — its capacity is
+	// not ledger-tracked (it goes through the local-offload MCP, S2R-4); the
+	// router's ctx prohibition floor is what keeps large tasks off it. The W6
+	// exclusion below is HEALTH, not quota: a broken adapter binary is the one
+	// thing that may briefly mask even the free lane.
 	out["local"] = router.LaneState{State: "open", WorstPct: worstPct(snap, "local", now)}
+	// W6 self-healing exclusion: an adapter-broken lane is masked (state
+	// "unavailable" — the router already treats that as masked) until its
+	// backoff expires. Load fails OPEN with a warning: undetermined breaker
+	// state must never exclude a lane. Kill-switch: exclusion_off.
+	if !cfg.ExclusionOff {
+		exc, warn := exclusion.Load(exclusionsPath())
+		if warn != "" {
+			fmt.Fprintln(os.Stderr, "warn:", warn)
+		}
+		for lane, ls := range out {
+			if on, until := exclusion.Excluded(exc, lane, now); on {
+				// Never downgrade a STRONGER masked state's label: a 1313
+				// hard_stop rendered as a transient "unavailable" hides the
+				// account-loss signal from the route JSON. Both are masked
+				// either way; only the surfaced name differs.
+				if ls.State != "hard_stop" && ls.State != "exhausted" {
+					ls.State = "unavailable"
+				}
+				// The lane must satisfy BOTH constraints to resume: an
+				// admission-exhausted lane that is also health-excluded cannot
+				// come back before the LATER of the two — advertising the
+				// earlier one would relegate work to a premature retry time.
+				if until.After(ls.ResumeAt) {
+					ls.ResumeAt = until
+				}
+				out[lane] = ls
+			}
+		}
+	}
 	return out
 }
 
@@ -278,7 +310,7 @@ func buildRouteDecision(cfg orchcfg.Config, fzs []fuses.Fuse, snap []ledger.Buck
 		fmt.Fprintln(os.Stderr, "WARN:", tableWarn)
 	}
 	_ = tableProvenance
-	return router.Route(tbl, class, states, ctxTokens, now, router.Opts{PaceRank: cfg.PaceRankOn})
+	return router.Route(tbl, class, states, ctxTokens, now, router.Opts{PaceRank: cfg.PaceRankOn, Incident: cfg.IncidentModeOn})
 }
 
 // dispatchVia is the S2R-4(a) execution-front-door field: the local lane's

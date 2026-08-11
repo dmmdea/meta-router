@@ -36,6 +36,13 @@ func PollState() string   { return filepath.Join(StateDir(), "poll-state.json") 
 func Profiles() string    { return filepath.Join(StateDir(), "profiles.json") }     // W2: credential-profile registry
 func A2Alert() string     { return filepath.Join(StateDir(), "a2-alert.json") }     // A2 weekly drift verdict
 func ScopedAlert() string { return filepath.Join(StateDir(), "scoped-alert.json") } // W1: critical scoped-limit latch
+func Exclusions() string  { return filepath.Join(StateDir(), "exclusions.json") }   // W6: self-healing lane breaker state
+func LocalLimiter() string {
+	return filepath.Join(StateDir(), "local-limiter.json") // W6: local-lane sliding-window stamps
+}
+func ResilAlert() string {
+	return filepath.Join(StateDir(), "resil-alert.json") // W6: persistence-failure latch (stderr is null-wired on the strategy path)
+}
 
 // Strategy state (slice 3): per-dispatch dirs under StateDir()/strategy/<id>/
 // hold state.json (durable state-as-bus + crash-resume), journal.jsonl (event

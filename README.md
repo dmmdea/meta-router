@@ -207,6 +207,29 @@ must be falsifiable:
   lines reconcile with the header totals, and zero-denominator percentages
   render `n/a`, not `0.0%`.
 
+### Resilience (W6)
+
+Four guards keep a bad hour from becoming a bad day, each with a canary test
+that goes red if the guard is reverted:
+
+- **Self-healing lane exclusion** — a lane whose *adapter* keeps failing
+  (`spawn_error`/`parse_error`; `api_error` on local) is masked with a
+  progressive backoff (1m → 2m → … capped 30m) and re-admitted when it
+  expires; one healthy dispatch clears it. Quota signals never open this
+  breaker — admission already prices those. Kill-switch: `exclusion_off`.
+- **Incident mode** (`incident_mode_on`, ships OFF) — when most lanes are
+  pressured, the router stops demoting throttled lanes (+1 shadow prices
+  suspended) and routes by pure rank among survivors: with no calmer lane to
+  shed onto, the demotion only picks a worse model. Off by default pending
+  eval evidence, same posture as `pace_rank_on`.
+- **Typed 429** — receipts carry `rate_limit_origin`: `upstream` (the vendor
+  said no; ledger-eligible) vs `local` (our own limiter; never recorded as
+  vendor exhaustion).
+- **Local sliding-window limiter** (`local_max_per_min`, default 20/60s;
+  negative disables) — headless bursts can't wedge the local box the operator
+  is also using interactively. A denial relegates (exit 3) with a typed
+  receipt so the DAG escalates to a cloud lane.
+
 ### `mr-eval` — measure retrieval quality
 
 A benchmarking tool that scores retrievers (BM25, embedding-only, hybrid) against a labeled gold-set, reporting recall@1/@3/@5, MRR, and median latency — useful for tuning or for validating a change to the retrieval logic. It evaluates over the same discovered root set the hook indexes, and reports both the full gold-set and the *covered-only* subset (cases whose expected skill is actually installed), so uninstalled targets can't mask ranking regressions.

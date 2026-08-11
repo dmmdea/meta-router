@@ -13,20 +13,22 @@ import (
 // reads the ledger for the quota hint and must resolve the SAME layout).
 // MR_ORCH_STATE overrides for tests and smoke runs so they never touch the
 // real ledger.
-func stateDir() string        { return statepaths.StateDir() }
-func ledgerPath() string      { return statepaths.Ledger() }
-func quotaTracePath() string  { return statepaths.QuotaTrace() }
-func fusesPath() string       { return statepaths.Fuses() }
-func configPath() string      { return statepaths.Config() }
-func dispatchPath() string    { return statepaths.Dispatch() }
-func dropPath() string        { return statepaths.Drop() }
-func policyAlertPath() string { return statepaths.PolicyAlert() }
-func codexAlertPath() string  { return statepaths.CodexAlert() }
-func glmTokenPath() string    { return statepaths.GLMToken() }
-func glmAlertPath() string    { return statepaths.GLMAlert() }
-func rankTablePath() string   { return statepaths.RankTable() }
-func spendDownPath() string   { return statepaths.SpendDown() }
-func profilesPath() string    { return statepaths.Profiles() }
+func stateDir() string         { return statepaths.StateDir() }
+func ledgerPath() string       { return statepaths.Ledger() }
+func quotaTracePath() string   { return statepaths.QuotaTrace() }
+func fusesPath() string        { return statepaths.Fuses() }
+func configPath() string       { return statepaths.Config() }
+func dispatchPath() string     { return statepaths.Dispatch() }
+func dropPath() string         { return statepaths.Drop() }
+func policyAlertPath() string  { return statepaths.PolicyAlert() }
+func codexAlertPath() string   { return statepaths.CodexAlert() }
+func glmTokenPath() string     { return statepaths.GLMToken() }
+func glmAlertPath() string     { return statepaths.GLMAlert() }
+func rankTablePath() string    { return statepaths.RankTable() }
+func spendDownPath() string    { return statepaths.SpendDown() }
+func profilesPath() string     { return statepaths.Profiles() }
+func exclusionsPath() string   { return statepaths.Exclusions() }   // W6 breaker state
+func localLimiterPath() string { return statepaths.LocalLimiter() } // W6 local sliding window
 
 // fixturesDir locates the committed fixtures for probe/verify. CWD-relative
 // by default (repo workflows); MR_ORCH_FIXTURES pins it for scheduled tasks

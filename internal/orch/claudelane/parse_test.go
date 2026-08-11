@@ -62,8 +62,15 @@ func TestParseEmptyResult(t *testing.T) {
 
 func TestParseRateLimit(t *testing.T) {
 	raw := []byte(`{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":429,"result":"","total_cost_usd":0,"num_turns":0}`)
-	if o := Parse(raw); o.Class != "rate_limit" {
+	o := Parse(raw)
+	if o.Class != "rate_limit" {
 		t.Fatalf("429 must classify rate_limit, got %q", o.Class)
+	}
+	// W6: parsed off the vendor's own status → typed upstream, so receipts can
+	// count the local-vs-upstream distinction (a "" here reads as a pre-W6
+	// producer and makes the count a lie by omission).
+	if o.RateLimitOrigin != "upstream" {
+		t.Fatalf("vendor 429 must be typed upstream, got %q", o.RateLimitOrigin)
 	}
 }
 
