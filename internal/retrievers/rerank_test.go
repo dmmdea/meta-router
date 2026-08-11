@@ -93,6 +93,87 @@ func (f fixedOrder) RetrieveScored(prompt string, k int) ([]Scored, float64, err
 	return out, top, nil
 }
 
+// RetrieveScored is what lets the reranker reach PRODUCTION: mr-hook's decide()
+// needs ([]Scored, topCos, error), gates on topCos, and logs .Score as a cosine.
+//
+// The load-bearing property is that wiring rerank must NOT move the gate. So
+// RetrieveScored returns the RERANKED ORDER but keeps each candidate's EMBED
+// COSINE in .Score, and returns the primary's max cosine as topCos. Same
+// prompts pass the gate as embed-only; only WHICH skills surface changes.
+func TestEmbedRerankScoredKeepsCosinesAndGate(t *testing.T) {
+	srv := rerankServer(t, docScores(map[string]float64{
+		"ship": -3.0, "diagram": -10.0, "deploy": -1.0, // reranker prefers deploy
+	}), nil)
+	defer srv.Close()
+
+	primary := fixedOrder{ids: []string{"ship", "diagram", "deploy"}}
+	er := NewEmbedRerank(primary, rerankSkills(), srv.URL, 2*time.Second)
+
+	got, topCos, err := er.RetrieveScored("does not matter", 3)
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+
+	// Order comes from the cross-encoder.
+	if len(got) != 3 || got[0].ID != "deploy" {
+		t.Fatalf("reranked order must win, got %+v", got)
+	}
+
+	// topCos must be the PRIMARY's max cosine, untouched — the gate compares
+	// against this, so anything else silently re-tunes the production gate.
+	wantTop := 1.0 // fixedOrder's first score
+	if topCos != wantTop {
+		t.Fatalf("topCos must be the embed max cosine %v, got %v", wantTop, topCos)
+	}
+
+	// Each .Score must still be that candidate's EMBED cosine, not a rerank
+	// logit — cands is cosines-or-nothing (R9.2b). "deploy" was embed-rank 3,
+	// so its cosine is 1.0-0.2 = 0.8 even though it now surfaces first.
+	if got[0].Score != 0.8 {
+		t.Fatalf("surfaced-first candidate must carry its own EMBED cosine 0.8, got %v", got[0].Score)
+	}
+	for _, s := range got {
+		if s.Score < 0 {
+			t.Fatalf("a negative score means a cross-encoder logit leaked into the cosine field: %+v", got)
+		}
+	}
+}
+
+// k must bound the RESULT while the cross-encoder still sees the wide pool —
+// otherwise reranking only the already-surfaced few cannot rescue a burial,
+// which is the entire point.
+func TestEmbedRerankScoredRerankspDepthButReturnsK(t *testing.T) {
+	srv := rerankServer(t, docScores(map[string]float64{
+		"ship": -3.0, "diagram": -10.0, "deploy": -1.0,
+	}), nil)
+	defer srv.Close()
+
+	primary := &countingPrimary{inner: fixedOrder{ids: []string{"ship", "diagram", "deploy"}}}
+	er := NewEmbedRerank(primary, rerankSkills(), srv.URL, 2*time.Second)
+
+	got, _, err := er.RetrieveScored("q", 1)
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "deploy" {
+		t.Fatalf("k must bound the result, got %+v", got)
+	}
+	if primary.lastK != rerankDepth {
+		t.Fatalf("the cross-encoder must see rerankDepth=%d candidates, primary was asked for %d", rerankDepth, primary.lastK)
+	}
+}
+
+type countingPrimary struct {
+	inner fixedOrder
+	lastK int
+}
+
+func (c *countingPrimary) Name() string { return "counting" }
+func (c *countingPrimary) RetrieveScored(prompt string, k int) ([]Scored, float64, error) {
+	c.lastK = k
+	return c.inner.RetrieveScored(prompt, k)
+}
+
 // The reranker must be able to OVERRULE the embed order — that is its entire
 // value over the mid-band.
 func TestEmbedRerankReorders(t *testing.T) {

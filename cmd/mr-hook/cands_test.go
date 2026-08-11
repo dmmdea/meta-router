@@ -34,6 +34,124 @@ func mustJSONStr(t *testing.T, v any) string {
 	return string(b)
 }
 
+// EmbedRerank propagates every failure BY DESIGN — correct for the eval, where
+// a silent fallback would score embed-only under the "embed+rerank" label. In
+// PRODUCTION that same strictness is a regression: a reranker hiccup would make
+// decide() report embedder-down and surface NOTHING, when the embed ordering
+// was available the whole time. Degrade to embed order, and say so in the mode
+// so the log never claims a rerank that did not happen.
+func TestRerankDegradesToEmbedOrderWhenRerankerFails(t *testing.T) {
+	embedRes := []retrievers.Scored{
+		{ID: "a", Score: 0.61},
+		{ID: "b", Score: 0.55},
+	}
+	ro := &rerankOrEmbed{
+		rerank: fakePrimary{err: errors.New("rerank: connection refused")},
+		embed:  fakePrimary{res: embedRes, topCos: 0.61},
+	}
+
+	ids, top, mode, cands := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
+
+	if len(ids) != 2 || ids[0] != "a" {
+		t.Fatalf("a reranker outage must still surface the EMBED ordering, got %v", ids)
+	}
+	if top != 0.61 {
+		t.Fatalf("the gate must still see the embed cosine, got %v", top)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("candidates must still be logged, got %d", len(cands))
+	}
+	if !ro.degraded {
+		t.Fatal("the degradation must be observable so the mode can tell the truth")
+	}
+	if mode != "rerank" {
+		t.Fatalf("decide reports the requested mode; the caller rewrites it on degradation (mode=%q)", mode)
+	}
+	if got := ro.mode("rerank"); got != "embed" {
+		t.Fatalf("a degraded run must be logged as %q, not as a rerank that never ran; got %q", "embed", got)
+	}
+}
+
+// When the reranker works, nothing is degraded and the mode stands.
+func TestRerankOrEmbedReportsRerankWhenHealthy(t *testing.T) {
+	ro := &rerankOrEmbed{
+		rerank: fakePrimary{res: []retrievers.Scored{{ID: "b", Score: 0.55}, {ID: "a", Score: 0.61}}, topCos: 0.61},
+		embed:  fakePrimary{err: errors.New("must not be consulted")},
+	}
+	ids, _, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
+	if len(ids) != 2 || ids[0] != "b" {
+		t.Fatalf("healthy rerank ordering must win, got %v", ids)
+	}
+	if ro.degraded {
+		t.Fatal("a healthy rerank must not report degradation")
+	}
+	if got := ro.mode("rerank"); got != "rerank" {
+		t.Fatalf("healthy mode must stay %q, got %q", "rerank", got)
+	}
+}
+
+// Wiring the reranker must NOT move the gate. EmbedRerank passes the embed max
+// cosine through as topCos, so for any given prompt the gate decision is
+// byte-identical to embed-only — reranking changes WHICH skills surface, never
+// WHETHER anything surfaces. If this ever regresses, the reranker would be
+// silently re-tuning a gate calibrated on a different scale.
+func TestRerankModeGatesIdenticallyToEmbed(t *testing.T) {
+	// topCos below the gate: both modes must suppress, and both must still log
+	// candidates so the gated region stays measurable.
+	pri := scoredPri(
+		retrievers.Scored{ID: "a", Score: 0.30},
+		retrievers.Scored{ID: "b", Score: 0.20},
+	)
+	for _, mode := range []string{"embed", "rerank"} {
+		ids, top, m, cands := decide("a long enough prompt to pass minLen", 3, 0.40, 5, pri, mode, fakeLex{})
+		if m != "gated-empty" || len(ids) != 0 {
+			t.Fatalf("%s: below-gate must surface nothing, got mode=%q ids=%v", mode, m, ids)
+		}
+		if top != 0.30 {
+			t.Fatalf("%s: topCos must be the embed cosine, got %v", mode, top)
+		}
+		if len(cands) != 2 {
+			t.Fatalf("%s: gated rows must still carry candidates, got %d", mode, len(cands))
+		}
+	}
+
+	// topCos above the gate: both modes must surface.
+	pri = scoredPri(
+		retrievers.Scored{ID: "a", Score: 0.61},
+		retrievers.Scored{ID: "b", Score: 0.55},
+	)
+	for _, mode := range []string{"embed", "rerank"} {
+		ids, _, m, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, pri, mode, fakeLex{})
+		if m != mode || len(ids) != 2 {
+			t.Fatalf("%s: above-gate must surface, got mode=%q ids=%v", mode, m, ids)
+		}
+	}
+}
+
+// Rerank rows carry REAL cosines (only the order comes from the cross-encoder),
+// so unlike hybrid they must be logged.
+func TestRerankModeLogsCosineCandidates(t *testing.T) {
+	pri := scoredPri(
+		retrievers.Scored{ID: "deploy", Score: 0.52}, // reranked to the front
+		retrievers.Scored{ID: "ship", Score: 0.71},
+	)
+	_, _, _, cands := decide("a long enough prompt to pass minLen", 3, 0.40, 5, pri, "rerank", fakeLex{})
+	if len(cands) != 2 {
+		t.Fatalf("rerank rows must log candidates, got %d", len(cands))
+	}
+	// Each candidate keeps ITS OWN cosine, not a rank-derived or logit value —
+	// note they are deliberately NOT descending here, because the order is the
+	// reranker's while the numbers stay the embedder's.
+	if cands[0].ID != "deploy" || cands[0].Cos != 0.52 || cands[1].Cos != 0.71 {
+		t.Fatalf("candidates must carry their own embed cosines in surfaced order, got %+v", cands)
+	}
+	for _, c := range cands {
+		if c.Cos < 0 {
+			t.Fatalf("a negative score means a cross-encoder logit leaked into the cosine field: %+v", cands)
+		}
+	}
+}
+
 // The candidates must be logged even when the gate SUPPRESSES surfacing —
 // gated-empty events are 27% of live traffic and exactly the region the gate
 // decision needs scores for.

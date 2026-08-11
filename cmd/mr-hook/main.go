@@ -30,6 +30,42 @@ type lexicalScorer interface {
 	RetrieveScored(prompt string, k int) []retrievers.Scored
 }
 
+// rerankOrEmbed makes the cross-encoder OPTIONAL at surfacing time.
+//
+// retrievers.EmbedRerank propagates every failure by design — correct for the
+// eval, where a silent fallback would score embed-only under the
+// "embed+rerank" label and poison the comparison. In production that same
+// strictness is a regression: decide() turns a primary error into
+// "embedder-down" and surfaces NOTHING, even though the embed ordering was
+// available all along. A reranker outage should cost the ORDERING, never the
+// surfacing.
+//
+// The fallback is recorded, not silent: mode() rewrites the logged mode to
+// "embed" so usage.jsonl never claims a rerank that did not run.
+type rerankOrEmbed struct {
+	rerank   scoredRetriever
+	embed    scoredRetriever
+	degraded bool
+}
+
+func (r *rerankOrEmbed) RetrieveScored(prompt string, k int) ([]retrievers.Scored, float64, error) {
+	res, top, err := r.rerank.RetrieveScored(prompt, k)
+	if err == nil {
+		return res, top, nil
+	}
+	r.degraded = true
+	return r.embed.RetrieveScored(prompt, k)
+}
+
+// mode returns the mode actually achieved: the requested one, or "embed" when
+// the cross-encoder failed and the embed ordering was used instead.
+func (r *rerankOrEmbed) mode(requested string) string {
+	if r.degraded {
+		return "embed"
+	}
+	return requested
+}
+
 // failedRetriever stands in for a primary ranker that could not be built, so
 // decide uniformly takes its BM25-fallback branch (no untested side path in main).
 type failedRetriever struct{ err error }
@@ -124,8 +160,13 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 	// gated-empty rows (review 2026-07-30, MAJOR): the exact contamination
 	// class this field exists to prevent. So candidates are logged on the
 	// embed path only; hybrid rows carry none.
+	// "rerank" qualifies alongside "embed": EmbedRerank.RetrieveScored returns
+	// each candidate's own EMBED cosine in .Score (only the ORDER comes from the
+	// cross-encoder), so these rows carry real cosines. Its raw logits are never
+	// exposed here. Hybrid remains excluded — its .Score is an RRF fused rank
+	// score, which is the contamination this field exists to prevent.
 	var cands []usagelog.Cand
-	if primaryMode == "embed" {
+	if primaryMode == "embed" || primaryMode == "rerank" {
 		cands = make([]usagelog.Cand, len(res))
 		for i, s := range res {
 			cands[i] = usagelog.Cand{ID: s.ID, Cos: s.Score}
@@ -219,7 +260,7 @@ func main() {
 	minLen := flag.Int("min-len", 6, "min prompt length (chars, trimmed) to attempt retrieval")
 	k := flag.Int("k", 3, "max skills to surface")
 	timeoutMs := flag.Int("timeout-ms", 300, "hard deadline for the whole retrieve")
-	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only; measured better on the goldset) or "hybrid" (BM25+embed RRF)`)
+	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only), "rerank" (embed then bge-reranker-v2-m3 reorder; measured better on REAL mined prompts) or "hybrid" (BM25+embed RRF)`)
 	quotaHintOn := flag.Bool("quota-hint", true, "append the mr-orchestrate quota+route hint (ledger-direct, fail-open, zero policy)")
 	showVersion := flag.Bool("version", false, "print this binary's build revision and exit (deployed-fleet freshness — a deployed hook that cannot be asked what it is stayed 3 releases stale)")
 	flag.Parse()
@@ -284,7 +325,44 @@ func main() {
 	}
 	primaryMode := *ranker
 	var sr scoredRetriever
+	var degradable *rerankOrEmbed // non-nil only in rerank mode
 	switch *ranker {
+	case "rerank":
+		// W9: embed+rerank is the only retriever that BEATS embed-only on real
+		// mined prompts (recall@3 0.276 vs 0.233; organic 0.340 vs 0.321). It
+		// had been retired twice on the synthetic gold set, which inverts the
+		// ordering because its prompts are description-derived.
+		//
+		// The reranker only REORDERS: RetrieveScored passes the embed max
+		// cosine through as topCos, so the -min-cosine gate admits exactly the
+		// same prompts it does under embed-only, and each candidate keeps its
+		// own cosine so cands stays cosines-only.
+		vecs := idx.Vectors()
+		if len(skills) != len(vecs) {
+			sr = failedRetriever{fmt.Errorf("index: %d skills but %d vectors", len(skills), len(vecs))}
+			break
+		}
+		ids := make([]string, len(skills))
+		for i, s := range skills {
+			ids[i] = s.ID
+		}
+		// Embed resolves an empty -endpoint internally (env / machine file /
+		// failover chain); EmbedRerank does NOT — it appends "/v1/rerank" to
+		// whatever it is handed, so passing the raw flag would post to a
+		// hostless URL and fail every call. Resolve first, exactly as mr-eval
+		// does. The reranker rides the first resolved endpoint; if it is down,
+		// rerankOrEmbed degrades to embed order rather than losing surfacing.
+		rerankEP := *endpoint
+		if eps := retrievers.ResolveEndpoints(*endpoint); len(eps) > 0 {
+			rerankEP = eps[0]
+		}
+		emb := retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO)
+		ro := &rerankOrEmbed{
+			rerank: retrievers.NewEmbedRerank(emb, skills, rerankEP, embedTO),
+			embed:  emb,
+		}
+		degradable = ro
+		sr = ro
 	case "hybrid":
 		hyb, herr := retrievers.NewHybridFromIndex(skills, idx.Vectors(), *endpoint, embedTO)
 		if herr != nil {
@@ -321,6 +399,13 @@ func main() {
 	ch := make(chan result, 1)
 	go func() {
 		ids, topCos, mode, cands := decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
+		// If the cross-encoder failed and the embed ordering was used instead,
+		// the row must say "embed" — never claim a rerank that did not run.
+		// Only rewrite the ranker modes; decide's own outcomes (gated-empty,
+		// too-short, bm25-fallback, embedder-down) already describe themselves.
+		if degradable != nil && mode == primaryMode {
+			mode = degradable.mode(primaryMode)
+		}
 		// Quota+route hint computed INSIDE the deadline-bounded goroutine:
 		// ledger-direct, fail-open ("" on any error), zero policy content.
 		var hint string
