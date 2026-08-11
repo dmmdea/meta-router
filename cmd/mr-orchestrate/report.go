@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
+	iofs "io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -103,9 +103,14 @@ type Report struct {
 // fallbackPair reports whether the answering models differ from the request,
 // and the "requested→actual" label when they do. An EMPTY attribution is not
 // evidence of a fallback — it is counted separately (Report.Unattributed) so
-// its prevalence is visible.
+// its prevalence is visible. An empty REQUEST is not evidence either: with no
+// recorded request there is nothing to have fallen back from, and inflating
+// the headline alarm with unknowns would erode it (the receipt still shows in
+// the models "(none)" bucket). A multi-model answer set that INCLUDES the
+// requested model still counts: some answers came from elsewhere, which is
+// exactly the signal AttributedModels exists to carry (dispatch.go).
 func fallbackPair(r dispatch.Record) (string, bool) {
-	if len(r.AttributedModels) == 0 {
+	if r.Model == "" || len(r.AttributedModels) == 0 {
 		return "", false
 	}
 	if len(r.AttributedModels) == 1 && r.AttributedModels[0] == r.Model {
@@ -157,8 +162,9 @@ func buildReport(recs []dispatch.Record, skipped, days int, lane string) Report 
 		}
 		if r.TS.IsZero() {
 			// A parseable receipt with no timestamp cannot be windowed. Count
-			// it ALWAYS; include it in whole-log aggregates; exclude it from a
-			// -days view (the render says so) — never drop it silently.
+			// it whenever the lane filter admits it; include it in whole-log
+			// aggregates; exclude it from a -days view (the render says so) —
+			// never drop it silently.
 			rep.UntimedReceipts++
 			if days > 0 {
 				continue
@@ -397,7 +403,14 @@ func renderReport(out io.Writer, r Report) error {
 		fmt.Fprintf(w, "deviations: %s\n", countLine(r.Adherence.DeviationsByReason))
 	}
 	if len(r.ByDay) > 0 {
-		fmt.Fprintf(w, "\nactivity (UTC):\n")
+		// A rolling-hours window cuts through a calendar day, so the oldest
+		// row of a -days view is usually a partial bucket — say so rather
+		// than letting it read as a real dip in volume.
+		if r.WindowDays > 0 {
+			fmt.Fprintf(w, "\nactivity (UTC; oldest day may be partial — the window cuts mid-day):\n")
+		} else {
+			fmt.Fprintf(w, "\nactivity (UTC):\n")
+		}
 		for _, day := range sortedKeys(r.ByDay) {
 			fmt.Fprintf(w, "  %s %5d\n", day, r.ByDay[day])
 		}
@@ -440,29 +453,19 @@ func loadReceiptsCounted(path string) (recs []dispatch.Record, skipped int, err 
 	return recs, skipped, nil
 }
 
-// lanesPresent lists the distinct lane labels in the log (render form), for
-// the -lane miss hint.
-func lanesPresent(recs []dispatch.Record) []string {
-	set := map[string]bool{}
-	for _, r := range recs {
-		set[orNone(r.Lane)] = true
-	}
-	return sortedKeys(set)
-}
-
 func runReport(args []string) error {
-	fs2 := flag.NewFlagSet("report", flag.ExitOnError)
-	days := fs2.Int("days", 0, "window in days, anchored to the newest receipt (0 = whole log)")
-	lane := fs2.String("lane", "", "restrict to one lane; \"(none)\" selects receipts with no lane")
-	asJSON := fs2.Bool("json", false, "emit the report as JSON instead of the text dashboard")
-	_ = fs2.Parse(args)
+	fs := flag.NewFlagSet("report", flag.ExitOnError)
+	days := fs.Int("days", 0, "window in days back from the newest receipt, cutoff instant INCLUDED (0 = whole log)")
+	lane := fs.String("lane", "", "restrict to one lane; \"(none)\" selects receipts with no lane")
+	asJSON := fs.Bool("json", false, "emit the report as JSON instead of the text dashboard")
+	_ = fs.Parse(args)
 	if *days < 0 {
 		return errors.New("-days must be >= 0")
 	}
 	recs, skipped, err := loadReceiptsCounted(dispatchPath())
 	logAbsent := false
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
+		if !errors.Is(err, iofs.ErrNotExist) {
 			return err
 		}
 		logAbsent = true // a normal state — render the empty report, honestly labeled
@@ -478,12 +481,19 @@ func runReport(args []string) error {
 		return werr
 	}
 	if logAbsent {
-		fmt.Println("no receipts yet: dispatch log absent at", dispatchPath())
-		return nil
+		_, werr := fmt.Println("no receipts yet: dispatch log absent at", dispatchPath())
+		return werr
 	}
 	if *lane != "" && rep.Receipts == 0 && len(recs) > 0 {
-		fmt.Fprintf(os.Stderr, "hint: no receipts for lane %q; lanes in the log: %s\n",
-			*lane, strings.Join(lanesPresent(recs), ", "))
+		// The hint must not blame the lane when the WINDOW emptied the scope:
+		// name the lanes present in the same view the operator asked for.
+		inView := buildReport(recs, 0, *days, "")
+		where := "the log"
+		if *days > 0 {
+			where = "this window"
+		}
+		fmt.Fprintf(os.Stderr, "hint: no receipts for lane %q in %s; lanes in %s: %s\n",
+			*lane, where, where, strings.Join(sortedKeys(inView.Lanes), ", "))
 	}
 	return renderReport(os.Stdout, rep)
 }

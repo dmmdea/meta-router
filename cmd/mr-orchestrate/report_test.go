@@ -138,6 +138,48 @@ func TestReportDeterministicOnFixedInput(t *testing.T) {
 	}
 }
 
+// reportGolden is the byte-exact render of repFixture (skipped=1, whole log).
+// This single assertion carries the acceptance gate's determinism clause:
+// review measured that the two-runs-compare test alone let an unsorted-map
+// mutation escape ~25% of the time (per-process range randomization can
+// agree); a golden goes red every time. A deliberate format change updates
+// this string consciously.
+const reportGolden = `mr-orchestrate report — whole log
+2020-03-01T12:00:00Z → 2020-03-10T12:00:00Z
+receipts 6 · consults 1 · runs 3 · strategy 1 step(s) in 1 run(s) · retries 1 · egress denied 1
+WARN: 1 unparseable line(s) skipped — the log holds data this report cannot read
+
+LANE         RUNS  STEPS     TOK-IN    TOK-OUT  NOTIONAL     CASH   DEV   G/B  EGR-DENY
+claude          1      1        130         70      1.50     0.00     0  1/0          0
+codex           1      0         10          5      0.00     0.02     1  0/0          0
+glm             1      0          7          0      0.00     0.00     0  0/1          1
+
+outcomes:  error 1 · ok 3
+models:    glm-4 1 · gpt-5 1 · opus 2
+SILENT FALLBACKS: 1 — gpt-5→gpt-5-mini 1 (attribution present on 2/4 executed)
+rotations: typed_limit 1
+spend-down: 1 batch consult(s), 1 boost-influenced
+quality:   1 unrated run(s)
+adherence: coverage 66.7% · obedience 50.0% (consulted 2 of 3 runs)
+deviations: quota 1
+
+activity (UTC):
+  2020-03-01     2
+  2020-03-02     2
+  2020-03-03     1
+  2020-03-10     1
+`
+
+func TestReportGoldenRender(t *testing.T) {
+	var buf bytes.Buffer
+	if err := renderReport(&buf, buildReport(repFixture(), 1, 0, "")); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != reportGolden {
+		t.Fatalf("render diverged from golden.\nACTUAL-BEGIN\n%s\nACTUAL-END", buf.String())
+	}
+}
+
 // A parseable receipt with a missing/zero ts must never be silently
 // window-filtered (review MAJOR 2): whole-log counts it into aggregates but
 // not span/activity; -days excludes it but the counter + WARN surface it.
@@ -190,6 +232,41 @@ func TestReportNoneBuckets(t *testing.T) {
 	f := buildReport(recs, 0, 0, "(none)")
 	if f.Receipts != 1 {
 		t.Fatalf("-lane \"(none)\" must select empty-lane receipts: %+v", f)
+	}
+}
+
+// The -days boundary is INCLUSIVE of the cutoff instant [anchor − days·24h,
+// anchor]. Pinned because review proved the inclusive→exclusive mutation
+// (`!r.TS.After(cutoff)`) left the whole suite green.
+func TestReportDaysBoundaryInclusive(t *testing.T) {
+	anchor := repT0.Add(9 * 24 * time.Hour)
+	recs := []dispatch.Record{
+		{TS: anchor, Lane: "claude", OutcomeClass: "ok"},
+		{TS: anchor.Add(-2 * 24 * time.Hour), Lane: "claude", OutcomeClass: "ok"},           // exactly AT the cutoff
+		{TS: anchor.Add(-2*24*time.Hour - time.Second), Lane: "claude", OutcomeClass: "ok"}, // 1s outside
+	}
+	r := buildReport(recs, 0, 2, "")
+	if r.Receipts != 2 {
+		t.Fatalf("cutoff instant must be INCLUDED: want 2 receipts, got %d", r.Receipts)
+	}
+	if r.From != anchor.Add(-2*24*time.Hour) {
+		t.Fatalf("From must be the at-cutoff receipt, got %v", r.From)
+	}
+}
+
+// A receipt with attribution but an EMPTY requested model is not an
+// established fallback (nothing recorded to have fallen back FROM) — and it is
+// not unattributed either (attribution is present). Review MINOR 5: the
+// earlier draft rendered it as an alarming bare-arrow "→opus" fallback.
+func TestReportEmptyRequestNotAFallback(t *testing.T) {
+	recs := []dispatch.Record{{TS: repT0, Lane: "x", OutcomeClass: "ok",
+		Model: "", AttributedModels: []string{"opus"}}}
+	r := buildReport(recs, 0, 0, "")
+	if r.SilentFallbacks != 0 || r.Unattributed != 0 {
+		t.Fatalf("empty request: fallbacks=%d unattributed=%d", r.SilentFallbacks, r.Unattributed)
+	}
+	if r.Models["(none)"] != 1 {
+		t.Fatalf("the receipt still shows in the (none) model bucket: %+v", r.Models)
 	}
 }
 

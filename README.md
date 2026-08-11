@@ -184,13 +184,28 @@ block, and per-day activity:
 mr-orchestrate report              # whole log, human dashboard
 mr-orchestrate report -days 7     # last 7 days — anchored to the newest receipt, never the clock
 mr-orchestrate report -lane claude -json
+mr-orchestrate report -lane "(none)"   # receipts that carry no lane
 ```
 
 It is offline by construction (no network, no ledger transaction, no clock), so
-the same log renders identically on every run. It is also honest about the log
-itself: unparseable lines are counted and shown as a `WARN`, an absent log is
-"no receipts yet", and an unreadable one is an error — never an empty-but-healthy
-dashboard.
+the same log renders identically on every run — the `-days` window is
+`[newest receipt − N·24h, newest receipt]`, cutoff instant included. It is also
+honest about the log itself, on the principle that a dashboard's *clean* states
+must be falsifiable:
+
+- unparseable lines are counted and shown as a `WARN`;
+- receipts that parse but carry **no timestamp** get their own surfaced counter —
+  they cannot be windowed, so a `-days` view excludes them *and says so* (the
+  whole-log view counts them but keeps them out of span/activity);
+- the fallback line always reports its own detector coverage
+  (`attribution present on N/M executed`) — "0 fallbacks" over receipts that
+  carry no attribution is a broken capture pipeline, not health;
+- an absent log is "no receipts yet" (`"log_absent": true` under `-json`);
+  an unreadable or torn-read log is an **error** — never an empty-but-healthy
+  dashboard;
+- empty `model`/`outcome_class`/lane fields bucket as `(none)` so the aggregate
+  lines reconcile with the header totals, and zero-denominator percentages
+  render `n/a`, not `0.0%`.
 
 ### `mr-eval` — measure retrieval quality
 
