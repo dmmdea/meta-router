@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestParseSkillMD(t *testing.T) {
-	s, err := ParseSkillMD("testdata/valid.md")
+func TestParseFrontmatterMD(t *testing.T) {
+	s, err := parseFrontmatterMD("testdata/valid.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,13 +19,13 @@ func TestParseSkillMD(t *testing.T) {
 }
 
 func TestParseSkillMD_NoFrontmatter(t *testing.T) {
-	if _, err := ParseSkillMD("testdata/no-frontmatter.md"); err == nil {
+	if _, err := parseFrontmatterMD("testdata/no-frontmatter.md"); err == nil {
 		t.Fatal("expected error on missing frontmatter")
 	}
 }
 
 func TestParseSkillMD_Minimal(t *testing.T) {
-	s, err := ParseSkillMD("testdata/minimal.md") // name+description only
+	s, err := parseFrontmatterMD("testdata/minimal.md") // name+description only
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestParseSkillMD_Minimal(t *testing.T) {
 }
 
 func TestParseSkillMD_BlockFolded(t *testing.T) {
-	s, err := ParseSkillMD("testdata/block-folded.md")
+	s, err := parseFrontmatterMD("testdata/block-folded.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestParseSkillMD_BlockFolded(t *testing.T) {
 }
 
 func TestParseSkillMD_BlockLiteral(t *testing.T) {
-	s, err := ParseSkillMD("testdata/block-literal.md")
+	s, err := parseFrontmatterMD("testdata/block-literal.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestParseSkillMD_BlockLiteral(t *testing.T) {
 }
 
 func TestParseSkillMD_NestedMetadataNoLeak(t *testing.T) {
-	s, err := ParseSkillMD("testdata/nested-metadata.md")
+	s, err := parseFrontmatterMD("testdata/nested-metadata.md")
 	if err != nil {
 		t.Fatal(err)
 	}
