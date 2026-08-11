@@ -23,12 +23,31 @@ func TestReuseRoots_DeadDiscoveryRootForcesRediscovery(t *testing.T) {
 	rs := []catalog.Root{
 		{Path: filepath.Join(claude, "plugins", "cache", "sp", "6.1.1", "skills"), Pack: "superpowers"},
 	}
-	reuse, notes := reuseRoots(rs, claude)
+	reuse, notes, dead := reuseRoots(rs, claude)
 	if reuse {
 		t.Fatal("a vanished pack root must NOT be reused — that is the silent decay")
 	}
 	if len(notes) != 1 || !strings.Contains(notes[0], "superpowers") {
 		t.Fatalf("the drop must be diagnosed by pack name, got %q", notes)
+	}
+	if len(dead) != 1 || dead[0] != "superpowers" {
+		t.Fatalf("the dead pack must be named so rediscovery can be VERIFIED, got %q", dead)
+	}
+}
+
+// packsMissing is what stops a failed rediscovery becoming permanent: if the
+// pack did not come back, roots.json must be left alone so the next refresh
+// retries, instead of Save erasing the only record the pack existed.
+func TestPacksMissing_ReportsPacksRediscoveryDidNotReplace(t *testing.T) {
+	got := packsMissing([]string{"superpowers", "gone-for-good"}, []catalog.Root{
+		{Path: "x", Pack: "superpowers"},
+		{Path: "y", Pack: "skills"},
+	})
+	if len(got) != 1 || got[0] != "gone-for-good" {
+		t.Fatalf("only the pack with no replacement root is missing, got %q", got)
+	}
+	if n := packsMissing(nil, []catalog.Root{{Path: "x", Pack: "a"}}); n != nil {
+		t.Fatalf("no dead packs means nothing missing, got %q", n)
 	}
 }
 
@@ -41,7 +60,7 @@ func TestReuseRoots_OperatorRootsWarnButSurvive(t *testing.T) {
 		{Path: filepath.Join(claude, "commands"), Pack: "skills", Kind: catalog.KindCommands},
 	}
 	// Nothing discovery-owned died, so refresh keeps the operator's file.
-	reuse, notes := reuseRoots(rs, claude)
+	reuse, notes, _ := reuseRoots(rs, claude)
 	if !reuse {
 		t.Fatal("operator-owned dead roots must NOT trigger rediscovery — that overwrites hand edits")
 	}
@@ -57,7 +76,7 @@ func TestReuseRoots_AllLiveIsSilent(t *testing.T) {
 	if err := os.MkdirAll(live, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	reuse, notes := reuseRoots([]catalog.Root{{Path: live, Pack: "skills"}}, claude)
+	reuse, notes, _ := reuseRoots([]catalog.Root{{Path: live, Pack: "skills"}}, claude)
 	if !reuse {
 		t.Fatal("a healthy roots.json must be reused")
 	}

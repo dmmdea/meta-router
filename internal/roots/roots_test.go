@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,7 +180,10 @@ func TestStale_PartitionsByOwnership(t *testing.T) {
 		{Path: filepath.Join(claude, "commands"), Pack: catalog.UserPack, Kind: catalog.KindCommands},
 	}
 
-	discovery, operator := Stale(rs, claude)
+	discovery, operator, unknown := Stale(rs, claude)
+	if len(unknown) != 0 {
+		t.Fatalf("provably-absent roots are not unknown: %+v", unknown)
+	}
 
 	if len(discovery) != 1 || discovery[0].Pack != "superpowers" {
 		t.Fatalf("a vanished plugin root under claudeDir is discovery-owned; got %+v", discovery)
@@ -203,9 +208,50 @@ func TestStale_LiveRootsAreNotStale(t *testing.T) {
 	live := filepath.Join(claude, "skills")
 	writeSkill(t, filepath.Join(live, "a"), "a")
 
-	discovery, operator := Stale([]catalog.Root{{Path: live, Pack: catalog.UserPack}}, claude)
-	if len(discovery) != 0 || len(operator) != 0 {
-		t.Fatalf("live root reported stale: %+v %+v", discovery, operator)
+	discovery, operator, unknown := Stale([]catalog.Root{{Path: live, Pack: catalog.UserPack}}, claude)
+	if len(discovery) != 0 || len(operator) != 0 || len(unknown) != 0 {
+		t.Fatalf("live root reported stale: %+v %+v %+v", discovery, operator, unknown)
+	}
+}
+
+// A path that EXISTS but is not a directory is not proof the pack was
+// uninstalled, and must never force rediscovery — rediscovery ends in Save,
+// which would delete the root permanently.
+func TestStale_NonDirectoryIsUnknownNotGone(t *testing.T) {
+	claude := t.TempDir()
+	f := filepath.Join(claude, "plugins", "notadir")
+	if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	discovery, operator, unknown := Stale([]catalog.Root{{Path: f, Pack: "weird"}}, claude)
+	if len(discovery) != 0 {
+		t.Fatalf("an existing path must not be classified as an uninstall: %+v", discovery)
+	}
+	if len(operator) != 0 {
+		t.Fatalf("not operator-owned either: %+v", operator)
+	}
+	if len(unknown) != 1 || unknown[0].Err == nil {
+		t.Fatalf("must be reported as unknown WITH the reason: %+v", unknown)
+	}
+}
+
+// The polarity here is unsafe: judging a claudeDir root "outside" means the
+// decay is never repaired. Plugin paths reach roots.json verbatim from
+// installed_plugins.json, written by another program, so casing is not
+// guaranteed to match os.UserHomeDir on Windows.
+func TestStale_WindowsCasingStillClassifiesAsDiscoveryOwned(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("case-insensitive containment is a Windows concern")
+	}
+	claude := t.TempDir()
+	dead := filepath.Join(strings.ToUpper(claude), "plugins", "cache", "sp", "6.1.1", "skills")
+
+	discovery, operator, _ := Stale([]catalog.Root{{Path: dead, Pack: "superpowers"}}, claude)
+	if len(discovery) != 1 {
+		t.Fatalf("an upper-cased claudeDir path is still inside the tree: discovery=%+v operator=%+v", discovery, operator)
 	}
 }
 
@@ -216,7 +262,7 @@ func TestStale_OwnershipUsesPathBoundaryNotStringPrefix(t *testing.T) {
 	claude := t.TempDir()
 	sibling := claude + "x"
 
-	discovery, operator := Stale([]catalog.Root{
+	discovery, operator, _ := Stale([]catalog.Root{
 		{Path: filepath.Join(sibling, "skills"), Pack: "sibling"},
 	}, claude)
 

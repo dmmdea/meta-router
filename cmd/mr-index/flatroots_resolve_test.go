@@ -76,6 +76,44 @@ func TestRefreshRediscoversWhenADiscoveryRootHasVanished(t *testing.T) {
 	}
 }
 
+// Adversarial review reproduced this end-to-end: a plugin whose old version dir
+// is gone and whose NEW one is not populated yet. Rediscovery finds no
+// replacement, and if we persist that, the pack's root is erased from
+// roots.json — so refresh has nothing left to trip on and the pack never comes
+// back, even once the plugin is healthy. Three consecutive silent ok:true runs.
+// roots.json must therefore be left UNCHANGED when a dead pack did not return.
+func TestRefreshDoesNotPersistWhenRediscoveryDidNotReplaceThePack(t *testing.T) {
+	home := hermeticHome(t)
+	dir := t.TempDir()
+	dead := filepath.ToSlash(filepath.Join(home, ".claude", "plugins", "cache", "mkt", "superpowers", "6.1.1", "skills"))
+	rootsJSON := `{"version":1,"roots":[
+		{"path":"` + filepath.ToSlash(filepath.Join(home, ".claude", "skills")) + `","pack":"skills"},
+		{"path":"` + dead + `","pack":"superpowers"}]}`
+	writeRootsFile(t, dir, rootsJSON)
+	before, err := os.ReadFile(filepath.Join(dir, "roots.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "index.json")
+
+	_, notes, err := resolveRoots(config{cmd: "refresh"}, out)
+	if err != nil {
+		t.Fatalf("resolveRoots(refresh): %v", err)
+	}
+
+	after, err := os.ReadFile(filepath.Join(dir, "roots.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("roots.json was rewritten while pack %q had no replacement — the loss becomes permanent\nbefore: %s\nafter: %s", "superpowers", before, after)
+	}
+	joined := strings.Join(notes, "\n")
+	if !strings.Contains(joined, "did NOT come back") {
+		t.Fatalf("the failed rediscovery must be stated, not implied by an earlier 'rediscovering' note: %q", joined)
+	}
+}
+
 // The counterpart: an operator's out-of-tree root that has vanished must NOT
 // trigger rediscovery, because rediscovery calls roots.Save and would erase the
 // human's entry.
