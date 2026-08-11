@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +29,122 @@ type scoredRetriever interface {
 }
 type lexicalScorer interface {
 	RetrieveScored(prompt string, k int) []retrievers.Scored
+}
+
+// rerankOrEmbed makes the cross-encoder OPTIONAL at surfacing time.
+//
+// retrievers.EmbedRerank propagates every failure by design — correct for the
+// eval, where a silent fallback would score embed-only under the
+// "embed+rerank" label and poison the comparison. In production that same
+// strictness is a regression: decide() turns a primary error into
+// "embedder-down" and surfaces NOTHING, even though the embed ordering was
+// available all along. A reranker outage should cost the ORDERING, never the
+// surfacing.
+//
+// The fallback is recorded, not silent: mode() rewrites the logged mode to
+// "embed" so usage.jsonl never claims a rerank that did not run.
+// It embeds ONCE and then reorders that result in place. An earlier draft
+// called EmbedRerank (which embeds internally) and fell back to a SECOND embed
+// call — review proved that cannot fit the hard deadline: with the rerank call
+// budgeted at deadline-50ms, embed + rerank + embed always overruns, so a SLOW
+// reranker (the likely failure for a CPU-bound cross-encoder under contention)
+// could only ever produce "deadline exceeded" and surface nothing. Reordering a
+// list already in hand makes the degraded path free.
+type rerankOrEmbed struct {
+	embed      scoredRetriever
+	reorderer  reorderer
+	depth      int
+	degraded   bool
+	degradeErr string
+}
+
+// reorderer is the cross-encoder surface: reorder an existing candidate list.
+type reorderer interface {
+	Reorder(prompt string, cands []retrievers.Scored) ([]int, error)
+}
+
+const (
+	// rerankMinTimeoutMs is the smallest hard deadline under which -ranker=rerank
+	// is worth attempting. Measured on the live stack (CPU-bound cross-encoder,
+	// --n-gpu-layers 0), degradation rate by deadline: 5000ms → 7/12 degraded,
+	// 6000ms → 2/12, 8000ms → 0/12. Below 6000 the reranker is mostly not
+	// running at all, so 8000 is the RECOMMENDED value and 6000 the floor.
+	// A deadline it cannot meet is worse than not enabling it: the hook fails
+	// open and surfaces nothing while looking perfectly healthy.
+	rerankMinTimeoutMs = 6000
+	// rerankSurfaceDepth is how many embed candidates the cross-encoder sees.
+	// It must exceed the surfacing cut or reranking cannot rescue a burial.
+	rerankSurfaceDepth = 20
+	// rerankBudgetNum/Den give the rerank call a FRACTION of the deadline, so a
+	// slow cross-encoder is abandoned with time left to surface the embed order.
+	rerankBudgetNum, rerankBudgetDen = 3, 5
+)
+
+// rerankBudget is the slice of the deadline the cross-encoder may spend.
+func rerankBudget(total time.Duration) time.Duration {
+	return total * rerankBudgetNum / rerankBudgetDen
+}
+
+// liveEndpoint returns the first endpoint answering /v1/models, or "" if none
+// do. This is the same probe-before-use discipline the embed path applies to
+// unverified built-in ports — the reranker POSTs raw prompt text, so it must
+// not talk to a port nobody confirmed.
+func liveEndpoint(eps []string) string {
+	c := &http.Client{Timeout: 300 * time.Millisecond}
+	for _, ep := range eps {
+		resp, err := c.Get(ep + "/v1/models")
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return ep
+		}
+	}
+	return ""
+}
+
+func (r *rerankOrEmbed) RetrieveScored(prompt string, k int) ([]retrievers.Scored, float64, error) {
+	// Retrieve the WIDE pool: the reranker's value is rescuing a skill the
+	// embedder buried below the surfacing cut, which requires seeing past it.
+	depth := r.depth
+	if depth < k {
+		depth = k
+	}
+	res, top, err := r.embed.RetrieveScored(prompt, depth)
+	if err != nil {
+		return nil, 0, err // a genuine embedder failure; decide() handles it
+	}
+	if len(res) == 0 {
+		return res, top, nil
+	}
+	order, rerr := r.reorderer.Reorder(prompt, res)
+	if rerr != nil {
+		// The cross-encoder is optional: keep the embed ordering rather than
+		// losing the surfacing, and record WHY so usage.jsonl can tell a
+		// reranker outage from a healthy embed-only deployment.
+		r.degraded = true
+		r.degradeErr = rerr.Error()
+	} else {
+		reordered := make([]retrievers.Scored, len(order))
+		for i, idx := range order {
+			reordered[i] = res[idx] // ID + its own EMBED cosine, reranked position
+		}
+		res = reordered
+	}
+	if k < len(res) {
+		res = res[:k]
+	}
+	return res, top, nil
+}
+
+// mode returns the mode actually achieved: the requested one, or "embed" when
+// the cross-encoder failed and the embed ordering was used instead.
+func (r *rerankOrEmbed) mode(requested string) string {
+	if r.degraded {
+		return "embed"
+	}
+	return requested
 }
 
 // failedRetriever stands in for a primary ranker that could not be built, so
@@ -124,8 +241,13 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 	// gated-empty rows (review 2026-07-30, MAJOR): the exact contamination
 	// class this field exists to prevent. So candidates are logged on the
 	// embed path only; hybrid rows carry none.
+	// "rerank" qualifies alongside "embed": EmbedRerank.RetrieveScored returns
+	// each candidate's own EMBED cosine in .Score (only the ORDER comes from the
+	// cross-encoder), so these rows carry real cosines. Its raw logits are never
+	// exposed here. Hybrid remains excluded — its .Score is an RRF fused rank
+	// score, which is the contamination this field exists to prevent.
 	var cands []usagelog.Cand
-	if primaryMode == "embed" {
+	if primaryMode == "embed" || primaryMode == "rerank" {
 		cands = make([]usagelog.Cand, len(res))
 		for i, s := range res {
 			cands[i] = usagelog.Cand{ID: s.ID, Cos: s.Score}
@@ -219,7 +341,7 @@ func main() {
 	minLen := flag.Int("min-len", 6, "min prompt length (chars, trimmed) to attempt retrieval")
 	k := flag.Int("k", 3, "max skills to surface")
 	timeoutMs := flag.Int("timeout-ms", 300, "hard deadline for the whole retrieve")
-	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only; measured better on the goldset) or "hybrid" (BM25+embed RRF)`)
+	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only), "rerank" (embed then bge-reranker-v2-m3 reorder; measured better on REAL mined prompts) or "hybrid" (BM25+embed RRF)`)
 	quotaHintOn := flag.Bool("quota-hint", true, "append the mr-orchestrate quota+route hint (ledger-direct, fail-open, zero policy)")
 	showVersion := flag.Bool("version", false, "print this binary's build revision and exit (deployed-fleet freshness — a deployed hook that cannot be asked what it is stayed 3 releases stale)")
 	flag.Parse()
@@ -284,7 +406,65 @@ func main() {
 	}
 	primaryMode := *ranker
 	var sr scoredRetriever
+	var degradable *rerankOrEmbed // non-nil only in rerank mode
 	switch *ranker {
+	case "rerank":
+		// W9: embed+rerank is the only retriever that BEATS embed-only on real
+		// mined prompts (recall@3 0.276 vs 0.233; organic 0.340 vs 0.321). It
+		// had been retired twice on the synthetic gold set, which inverts the
+		// ordering because its prompts are description-derived.
+		//
+		// The reranker only REORDERS: RetrieveScored passes the embed max
+		// cosine through as topCos, so the -min-cosine gate admits exactly the
+		// same prompts it does under embed-only, and each candidate keeps its
+		// own cosine so cands stays cosines-only.
+		vecs := idx.Vectors()
+		if len(skills) != len(vecs) {
+			sr = failedRetriever{fmt.Errorf("index: %d skills but %d vectors", len(skills), len(vecs))}
+			break
+		}
+		ids := make([]string, len(skills))
+		for i, s := range skills {
+			ids[i] = s.ID
+		}
+		// The reranker needs enough of the deadline to actually answer. Running
+		// it under a deadline it cannot meet is worse than not running it: the
+		// hard deadline fires, the hook fails open, and NOTHING surfaces — on
+		// every prompt, looking exactly like a healthy hook. Refuse instead,
+		// say so in the row, and serve embed.
+		if *timeoutMs < rerankMinTimeoutMs {
+			rec.Err = fmt.Sprintf("-ranker=rerank needs -timeout-ms >= %d (measured p95 ~2.3s end-to-end); got %d — running embed",
+				rerankMinTimeoutMs, *timeoutMs)
+			primaryMode = "embed"
+			sr = retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO)
+			break
+		}
+		// Embed resolves an empty -endpoint internally (env / machine file /
+		// failover chain) AND refuses to send prompt text to an unverified
+		// built-in port until /v1/models confirms a model server is there.
+		// EmbedRerank does neither — it appends "/v1/rerank" to whatever it is
+		// handed. Handing it eps[0] blind would (a) post the raw prompt to a
+		// port nobody probed, defeating that guard, and (b) silently degrade
+		// forever on any host where the live endpoint is later in the chain.
+		// So probe the chain and use the first endpoint that answers.
+		rerankEP := liveEndpoint(retrievers.ResolveEndpoints(*endpoint))
+		emb := retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO)
+		if rerankEP == "" {
+			rec.Err = "-ranker=rerank: no endpoint answered /v1/models — running embed"
+			primaryMode = "embed"
+			sr = emb
+			break
+		}
+		// The rerank call gets a SUB-budget so the embed leg and the surfacing
+		// still fit inside the hard deadline even when the cross-encoder is
+		// slow; overrunning it degrades to embed order, which is free.
+		ro := &rerankOrEmbed{
+			embed:     emb,
+			reorderer: retrievers.NewEmbedRerank(emb, skills, rerankEP, rerankBudget(embedTO)),
+			depth:     rerankSurfaceDepth,
+		}
+		degradable = ro
+		sr = ro
 	case "hybrid":
 		hyb, herr := retrievers.NewHybridFromIndex(skills, idx.Vectors(), *endpoint, embedTO)
 		if herr != nil {
@@ -293,6 +473,14 @@ func main() {
 			sr = hyb
 		}
 	default: // "embed" — primary ranking is embed-only cosine ordering
+		// A typo must not silently coerce to embed. "mode":"embed" already has
+		// two legitimate causes (configured embed, degraded rerank); a third
+		// silent one — a misspelled flag — is exactly the "production was
+		// running a configuration nobody believed" failure this system has
+		// already paid for once. Still fail-open, but say so in the row.
+		if *ranker != "" && *ranker != "embed" {
+			rec.Err = fmt.Sprintf("unknown -ranker %q — running embed", *ranker)
+		}
 		primaryMode = "embed"
 		vecs := idx.Vectors()
 		if len(skills) != len(vecs) {
@@ -317,22 +505,45 @@ func main() {
 		mode   string
 		cands  []usagelog.Cand // W9 R9.2b: scored candidates (cosine paths only)
 		hint   string          // §6c RS1 quota+route hint ("" on any error / disabled)
+		// degradeErr carries a cross-encoder failure OUT of the goroutine so it
+		// is stamped on EVERY outcome. Reading `degraded` only on the surfaced
+		// path hid the outage on gated-empty / bm25-fallback / embedder-down
+		// rows — roughly half of live traffic — leaving them byte-identical to
+		// healthy ones. A subsystem silently not running, with a log that looks
+		// correct, is the exact failure this system already paid weeks for.
+		degradeErr string
 	}
 	ch := make(chan result, 1)
 	go func() {
 		ids, topCos, mode, cands := decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
+		// If the cross-encoder failed and the embed ordering was used instead,
+		// the row must say "embed" — never claim a rerank that did not run.
+		// Only rewrite the ranker modes; decide's own outcomes (gated-empty,
+		// too-short, bm25-fallback, embedder-down) already describe themselves.
+		var degradeErr string
+		if degradable != nil {
+			if mode == primaryMode {
+				mode = degradable.mode(primaryMode)
+			}
+			// Carried out on EVERY outcome, not just the surfaced one — a
+			// gated-empty row must still show that the reranker was down.
+			degradeErr = degradable.degradeErr
+		}
 		// Quota+route hint computed INSIDE the deadline-bounded goroutine:
 		// ledger-direct, fail-open ("" on any error), zero policy content.
 		var hint string
 		if *quotaHintOn {
 			hint = quotaHint(time.Now().UTC())
 		}
-		ch <- result{ids, topCos, mode, cands, hint}
+		ch <- result{ids, topCos, mode, cands, hint, degradeErr}
 	}()
 
 	select {
 	case r := <-ch:
 		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
+		if r.degradeErr != "" && rec.Err == "" {
+			rec.Err = "ranker degraded to embed: " + r.degradeErr
+		}
 		ctx := formatContext(byID, r.ids)
 		if offloadNudge(in.Prompt) {
 			rec.NudgeOffload = true

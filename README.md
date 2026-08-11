@@ -121,8 +121,8 @@ Tuning flags (pass them in the hook `command`, e.g. `mr-hook -min-cosine 0.60`):
 | `-min-cosine` | `0.55` | Confidence gate: minimum top cosine to surface anything. Raise it if irrelevant skills appear; lower it if relevant ones are missed. |
 | `-k` | `3` | Max skills to surface per prompt. |
 | `-min-len` | `6` | Min trimmed prompt length (chars) before retrieval is attempted. |
-| `-ranker` | `embed` | Primary ranking: `embed` (cosine-only) or `hybrid` (BM25+embed RRF). |
-| `-timeout-ms` | `300` | Hard deadline for the whole retrieve. On overrun, surface nothing. |
+| `-ranker` | `embed` | Primary ranking: `embed` (cosine-only), `rerank` (embed, then a `bge-reranker-v2-m3` reorder — better recall on real prompts, but see the deadline note below), or `hybrid` (BM25+embed RRF). An unrecognized value runs `embed` and records why in `err`. |
+| `-timeout-ms` | `300` | Hard deadline for the whole retrieve. On overrun, surface nothing. **`-ranker=rerank` requires ≥ 6000 and works best at 8000** — the cross-encoder is CPU-bound and costs ~2.1 s p50 / ~4.5 s worst case. Below 6000 the ranker refuses, logs why, and serves `embed`. |
 | `-endpoint` | *(empty)* | Embedding endpoint. Empty = per-machine resolution: `$MR_EMBED_ENDPOINT`, then `~/.meta-router/endpoints.json`, then the `:11436`→`:18793` failover chain. Set it to pin one endpoint exactly. |
 | `-index` | `~/.meta-router/index.json` | Index path (`index.bin` sidecar is used automatically when fresh). |
 | `-log` | `~/.meta-router/usage.jsonl` | Usage-log path. |

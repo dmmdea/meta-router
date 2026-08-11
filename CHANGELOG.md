@@ -4,6 +4,28 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.21.0] — 2026-08-11
+
+### Added
+- **`-ranker=rerank`: `embed+rerank` is now available for PRODUCTION surfacing.** R9.3 retired the cross-encoder twice as a loss, but that verdict was measured on the synthetic gold set, whose prompts are description-derived. On the **real mined prompt set** it is the only retriever that beats embed-only — recall@3 **0.276 vs 0.233** (MRR 0.235 vs 0.181) on 210 mined cases, **0.340 vs 0.321** (MRR 0.282 vs 0.264) on the 53 organic-only cases, and on a live 30-prompt hook probe hit@1 **0.200 vs 0.133** / hit@3 **0.333 vs 0.200**.
+- **The gate does not move.** `EmbedRerank.RetrieveScored` returns the reranked ORDER while each candidate keeps its own **embed cosine** in `.Score`, and passes the primary's max cosine through as `topCos`. So `-min-cosine` admits exactly the same prompts it does under embed-only — reranking changes *which* skills surface, never *whether* anything surfaces. Verified live: embed and rerank both surfaced 15/30 with an identical `gated-empty` split. Returning a cross-encoder logit as `topCos` would have silently re-tuned the production gate to a scale it was never calibrated on (logits are negative — every prompt would gate out).
+- **`cands` stays cosines-or-nothing.** Rerank rows are logged because their `.Score` values are real embed cosines; only the order comes from the cross-encoder, and its raw logits are never exposed. Hybrid remains excluded — its `.Score` is an RRF fused rank score, the contamination this field exists to prevent. Note that rerank rows' cosines are deliberately **not** descending, because the order is the reranker's while the numbers stay the embedder's.
+- **`rerankOrEmbed` makes the cross-encoder optional at surfacing time.** `EmbedRerank` propagates every failure by design (correct for the eval, where a silent fallback would score embed-only under the `embed+rerank` label). In production that strictness is a regression: `decide()` turns a primary error into `embedder-down` and surfaces **nothing**, when the embed ordering was available all along. A reranker outage now costs the ORDERING, never the surfacing — and the logged mode is rewritten to `embed`, so a row never claims a rerank that did not run.
+
+### Measured cost — read this before enabling it
+- **~2.1 s p50, ~4.5 s worst case added per prompt**, against ~72 ms for embed. The reranker is resident (`ttl: -1`) but runs `--n-gpu-layers 0`, i.e. on CPU, so this is compute, not a model swap. `mr-eval`'s ~395 ms median for the same retriever does **not** reproduce end-to-end and must not be used to size the deadline.
+- **`-timeout-ms` must be ≥ 6000, and 8000 is recommended.** Degradation rate measured on the live stack: 5000 ms → 7/12 prompts fell back to embed, 6000 ms → 2/12, 8000 ms → 0/12. `-ranker=rerank` now REFUSES to run below 6000 ms, records why in `err`, and serves embed — because a deadline the reranker cannot meet is worse than leaving it off: the hook fails open and surfaces nothing on every prompt while looking perfectly healthy. Verified: the previously-deployed `-timeout-ms 1000` config would have failed 100% of prompts silently.
+
+### Failure modes are now visible rather than silent
+Every way this can go wrong writes to `err` in `usage.jsonl` — verified end-to-end:
+- deadline too low → `-ranker=rerank needs -timeout-ms >= 6000 …— running embed`
+- misspelled flag → `unknown -ranker "rernak" — running embed` (previously coerced to embed in silence, giving `mode:"embed"` a third indistinguishable cause)
+- no live endpoint → `-ranker=rerank: no endpoint answered /v1/models — running embed`
+- cross-encoder outage → `ranker degraded to embed: <the real error>`, stamped on **every** outcome including `gated-empty`, not only on surfaced rows (roughly half of live traffic is gated, and those rows were previously byte-identical to healthy ones)
+
+### Fixed
+- `EmbedRerank` was only ever constructed with an already-resolved endpoint by `mr-eval`. `Embed` resolves an empty `-endpoint` internally (env / machine file / failover chain) but `EmbedRerank` does not — it appends `/v1/rerank` to whatever it is handed. The hook now resolves first, as `mr-eval` does; without it every rerank call posted to a hostless URL and the whole mode failed closed (measured: 23/30 `embedder-down`, 7/30 `bm25-fallback`).
+
 ## [0.20.0] — 2026-08-11
 
 ### Fixed

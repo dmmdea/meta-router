@@ -63,14 +63,64 @@ func (e *EmbedRerank) Name() string { return "embed+rerank" }
 // EVERY failure propagates. This retriever exists to measure the reranker; a
 // silent fallback to embed order would score embed-only under the
 // "embed+rerank" label and quietly poison the comparison.
-func (e *EmbedRerank) Retrieve(prompt string, k int) ([]string, error) {
-	cands, _, err := e.primary.RetrieveScored(prompt, rerankDepth)
+// RetrieveScored is the PRODUCTION surface: it returns the reranked order
+// while each candidate keeps its own EMBED COSINE in .Score, and topCos is the
+// primary's max cosine, untouched.
+//
+// Both of those are deliberate and load-bearing:
+//
+//   - mr-hook gates on topCos against -min-cosine. Returning a cross-encoder
+//     logit there would silently re-tune the production gate to a scale it was
+//     never calibrated on (logits are negative; every prompt would gate out).
+//     Passing the embed max through means EXACTLY the same prompts pass the
+//     gate as embed-only — reranking changes WHICH skills surface, never
+//     WHETHER anything surfaces.
+//   - usage.jsonl's cands field is cosines-or-nothing (R9.2b). Keeping each
+//     candidate's own cosine preserves that invariant, and the reordering is
+//     still visible because cands is logged in surfaced order.
+//
+// Failures propagate exactly as in Retrieve. mr-hook already degrades a
+// primary-retriever error to the BM25 fallback, so a reranker outage costs the
+// rerank ordering, never the surfacing.
+func (e *EmbedRerank) RetrieveScored(prompt string, k int) ([]Scored, float64, error) {
+	cands, topCos, err := e.primary.RetrieveScored(prompt, rerankDepth)
 	if err != nil {
-		return nil, fmt.Errorf("rerank primary: %w", err)
+		return nil, 0, fmt.Errorf("rerank primary: %w", err)
 	}
 	if len(cands) == 0 {
-		return nil, nil
+		return nil, topCos, nil
 	}
+	order, err := e.rerankOrder(prompt, cands)
+	if err != nil {
+		return nil, 0, err
+	}
+	if k > len(order) {
+		k = len(order)
+	}
+	out := make([]Scored, k)
+	for i := 0; i < k; i++ {
+		out[i] = cands[order[i]] // ID + its EMBED cosine, in reranked position
+	}
+	return out, topCos, nil
+}
+
+// Reorder re-scores an ALREADY-RETRIEVED candidate list with the cross-encoder
+// and returns indices into it, best first.
+//
+// It is exported so a caller that already holds the embed result can reorder it
+// WITHOUT a second retrieval. mr-hook needs that: it runs under one hard
+// deadline, and a fallback that re-embeds cannot fit
+// (embed + rerank + embed > deadline), so a slow reranker would blow the
+// deadline instead of degrading. With Reorder the degraded path costs nothing —
+// the caller simply keeps the order it already has.
+func (e *EmbedRerank) Reorder(prompt string, cands []Scored) ([]int, error) {
+	return e.rerankOrder(prompt, cands)
+}
+
+// rerankOrder re-scores cands with the cross-encoder and returns indices into
+// cands, best first. Shared by Retrieve and RetrieveScored so the two can never
+// disagree about ordering.
+func (e *EmbedRerank) rerankOrder(prompt string, cands []Scored) ([]int, error) {
 	docs := make([]string, len(cands))
 	for i, c := range cands {
 		d, ok := e.docByID[c.ID]
@@ -90,6 +140,21 @@ func (e *EmbedRerank) Retrieve(prompt string, k int) ([]string, error) {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool { return scores[order[a]] > scores[order[b]] })
+	return order, nil
+}
+
+func (e *EmbedRerank) Retrieve(prompt string, k int) ([]string, error) {
+	cands, _, err := e.primary.RetrieveScored(prompt, rerankDepth)
+	if err != nil {
+		return nil, fmt.Errorf("rerank primary: %w", err)
+	}
+	if len(cands) == 0 {
+		return nil, nil
+	}
+	order, err := e.rerankOrder(prompt, cands)
+	if err != nil {
+		return nil, err
+	}
 	if k > len(order) {
 		k = len(order)
 	}
