@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
 )
@@ -101,6 +103,87 @@ func Save(path string, rs []catalog.Root) error {
 		return err
 	}
 	return nil
+}
+
+// Stale partitions the roots whose path no longer exists on disk into the two
+// ownership classes the build carry-over rule already uses.
+//
+// It exists because `refresh` reads roots.json and returns it verbatim — it
+// never re-discovers and never checks that the paths still resolve. Plugin
+// cache roots are VERSIONED (…/superpowers/6.1.1/skills), so a plugin update
+// silently strands every skill in that pack: the root stops existing, harvest
+// finds nothing under it, and the entries leave the index with no diagnostic.
+// Measured in production 2026-08-10 — 7 of 13 roots dead, index 155 → 112
+// entries, the entire superpowers pack gone. index.Refresh's removal guard
+// cannot catch this: the decay arrives in steps below its 30% threshold
+// (155→127 is 18%, 127→112 is 12%).
+//
+//   - discovery: PROVABLY absent (ErrNotExist) and a plain skills root under
+//     claudeDir. Discovery owns that space, so a pack that vanished from it is
+//     an uninstall and SHOULD drop.
+//   - operator: provably absent, but a flat root (Discover can never emit a
+//     Kind) or any root outside claudeDir. Only a human puts those in
+//     roots.json, so they are reported for visibility and never dropped.
+//   - unknown: Stat failed for a reason OTHER than non-existence — a deny ACE,
+//     an unreachable UNC path, an AV handle, a path replaced by a file. These
+//     must NEVER force rediscovery: rediscovery ends in Save, which would
+//     permanently delete a root whose directory is merely unreadable right now.
+//     Review reproduced exactly that — a deny ACE dropped a live 3-skill pack
+//     and it did NOT come back after the ACE was removed. Absence of evidence
+//     is not evidence of absence, so an unknown is reported and kept.
+//
+// Callers decide what to do; Stale itself only classifies.
+func Stale(rs []catalog.Root, claudeDir string) (discovery, operator []catalog.Root, unknown []Unresolved) {
+	for _, r := range rs {
+		fi, err := os.Stat(r.Path)
+		if err == nil && fi.IsDir() {
+			continue // live
+		}
+		if err == nil || !errors.Is(err, fs.ErrNotExist) {
+			// Exists but is not a directory, or Stat failed for an unknown
+			// reason. Either way we do not KNOW the pack is gone.
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			unknown = append(unknown, Unresolved{Root: r, Err: err})
+			continue
+		}
+		if isOperatorOwned(r, claudeDir) {
+			operator = append(operator, r)
+			continue
+		}
+		discovery = append(discovery, r)
+	}
+	return discovery, operator, unknown
+}
+
+// Unresolved is a root whose liveness could not be determined.
+type Unresolved struct {
+	Root catalog.Root
+	Err  error
+}
+
+// isOperatorOwned reports whether only a human could have put this root in
+// roots.json — a flat root, or one outside the claudeDir tree.
+//
+// The containment test is boundary-safe (trailing separator on both sides, so
+// the sibling "<claude>x" is correctly outside) and case-insensitive on
+// Windows. The case-folding matters because the polarity is unsafe here: this
+// predicate is shared with the build carry-over, where deciding "outside" wrongly
+// merely PRESERVES a root (harmless), but here deciding "outside" wrongly means
+// the decay is never repaired. Plugin paths reach roots.json verbatim from
+// installed_plugins.json — a file written by another program — so nothing
+// guarantees they share os.UserHomeDir's casing.
+func isOperatorOwned(r catalog.Root, claudeDir string) bool {
+	if r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents {
+		return true
+	}
+	p := filepath.Clean(r.Path) + string(filepath.Separator)
+	prefix := filepath.Clean(claudeDir) + string(filepath.Separator)
+	if runtime.GOOS == "windows" {
+		return !strings.HasPrefix(strings.ToLower(p), strings.ToLower(prefix))
+	}
+	return !strings.HasPrefix(p, prefix)
 }
 
 // Discover resolves the full root set under a Claude config dir:

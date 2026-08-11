@@ -21,6 +21,12 @@ type refreshStatus struct {
 	OK            bool   `json:"ok"`
 	Error         string `json:"error,omitempty"`
 	Forced        bool   `json:"forced,omitempty"`
+	// StaleRoots records roots.json entries whose path no longer exists. It is
+	// here rather than only on stderr because refresh runs from the
+	// SessionStart hook with nobody watching stderr — refresh.log is the only
+	// channel that actually reaches a human, and it is where the 155→112 index
+	// decay was eventually diagnosed from.
+	StaleRoots []string `json:"stale_roots,omitempty"`
 }
 
 func appendRefreshStatus(path string, st refreshStatus) (err error) {

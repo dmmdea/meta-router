@@ -52,7 +52,9 @@ func parseArgs(argv []string) (config, error) {
 //     (this is what lets the SessionStart hook run `mr-index refresh` with no
 //     flags and still see the full set). A file that exists but is INVALID is
 //     fatal for both commands — see the comment at the Load call.
-func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
+func resolveRoots(cfg config, outPath string) ([]catalog.Root, []string, error) {
+	var staleNotes []string
+	var deadPacks []string
 	if cfg.skillRoots != "" {
 		var rs []catalog.Root
 		for _, p := range strings.Split(cfg.skillRoots, ",") {
@@ -63,9 +65,9 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 			rs = append(rs, catalog.Root{Path: p, Pack: filepath.Base(filepath.Clean(p))})
 		}
 		if len(rs) == 0 {
-			return nil, fmt.Errorf("-skill-roots given but empty")
+			return nil, nil, fmt.Errorf("-skill-roots given but empty")
 		}
-		return rs, nil
+		return rs, nil, nil
 	}
 	rootsPath := roots.ConfigPathFor(outPath)
 	// A roots.json that EXISTS but is invalid (parse error, unknown kind) is
@@ -76,18 +78,44 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 	// Only a genuinely absent file falls through to discovery.
 	existing, loadErr := roots.Load(rootsPath)
 	if loadErr != nil && !os.IsNotExist(loadErr) {
-		return nil, fmt.Errorf("%v — fix or delete %s (refusing to rediscover: that would overwrite your edits)", loadErr, rootsPath)
+		return nil, nil, fmt.Errorf("%v — fix or delete %s (refusing to rediscover: that would overwrite your edits)", loadErr, rootsPath)
 	}
 	if cfg.cmd == "refresh" && loadErr == nil {
-		return existing, nil
+		// Ownership classification needs the claudeDir boundary. If the home
+		// dir cannot be resolved we cannot classify, so keep the historical
+		// behavior (reuse) rather than rediscovering on a guess.
+		cd, cderr := roots.DefaultClaudeDir()
+		if cderr != nil {
+			// Reuse is the safe branch — without the boundary we cannot
+			// classify ownership, and rediscovering on a guess ends in Save
+			// overwriting the operator's file. But it silently reinstates the
+			// pre-fix behavior, so it must not be silent.
+			n := fmt.Sprintf("roots.json: cannot resolve home dir (%v) — reusing roots.json UNCHECKED; root decay cannot be detected this run", cderr)
+			fmt.Fprintln(os.Stderr, n)
+			return existing, []string{n}, nil
+		}
+		reuse, notes, dead := reuseRoots(existing, cd)
+		for _, n := range notes {
+			fmt.Fprintln(os.Stderr, n)
+		}
+		if reuse {
+			return existing, notes, nil
+		}
+		staleNotes = notes
+		deadPacks = dead
+		// Fall through to rediscovery. The carry-over below preserves every
+		// operator-owned root, so this cannot destroy hand edits.
 	}
 	claudeDir, err := roots.DefaultClaudeDir()
 	if err != nil {
-		return nil, fmt.Errorf("cannot resolve home dir: %v", err)
+		return nil, nil, fmt.Errorf("cannot resolve home dir: %v", err)
 	}
 	rs := roots.Discover(claudeDir)
 	if len(rs) == 0 {
-		return nil, fmt.Errorf("no skill roots found under %s", claudeDir)
+		// Carry the notes out with the error: this exit path skips runRefresh
+		// entirely, so main must write the status line or the run leaves NO
+		// durable record — the failure mode this change exists to end.
+		return nil, staleNotes, fmt.Errorf("no skill roots found under %s", claudeDir)
 	}
 	// OWNERSHIP RULE (review 2026-07-30 MAJOR + closure-audit MINOR): discovery
 	// owns the ~/.claude space — a skills root under claudeDir that discovery
@@ -117,12 +145,128 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 			}
 		}
 	}
+	// Rediscovery is a CLAIM until checked. If a pack whose root vanished did
+	// not come back — plugin mid-extraction, a version dir not yet populated,
+	// a stale installed_plugins.json — then persisting this set deletes the
+	// only record that the pack ever existed, and refresh can never notice it
+	// again (no dead root left to trip on). Review reproduced that: three
+	// consecutive silent ok:true runs, the last with the plugin fully healthy
+	// on disk. So: use the rediscovered set for THIS run, but do not persist
+	// it. The next refresh re-detects and retries, which is self-healing.
+	if missing := packsMissing(deadPacks, rs); len(missing) > 0 {
+		note := fmt.Sprintf("roots.json: pack(s) %s did NOT come back from rediscovery — their skills are dropped this run and roots.json is left UNCHANGED so the next refresh retries; run `mr-index build` once the plugin finishes installing",
+			strings.Join(missing, ", "))
+		fmt.Fprintln(os.Stderr, note)
+		return rs, append(staleNotes, note), nil
+	}
 	if err := roots.Save(rootsPath, rs); err != nil {
 		// Persisting is best-effort: an unwritable roots.json must not block
 		// indexing; the next run just rediscovers.
 		fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", rootsPath, err)
 	}
-	return rs, nil
+	// Rediscovery also DROPS roots.json entries that still exist but are no
+	// longer discovered. That is the ownership rule working, but on an
+	// unattended refresh it must not be silent.
+	for _, note := range droppedEntryNotes(existing, rs) {
+		fmt.Fprintln(os.Stderr, note)
+		staleNotes = append(staleNotes, note)
+	}
+	return rs, staleNotes, nil
+}
+
+// packsMissing returns the packs from dead that no root in rs provides.
+func packsMissing(dead []string, rs []catalog.Root) []string {
+	if len(dead) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(rs))
+	for _, r := range rs {
+		have[r.Pack] = true
+	}
+	var out []string
+	for _, p := range dead {
+		if !have[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// droppedEntryNotes reports roots.json entries that rediscovery removed even
+// though their directory still exists — a live hand-added skills root inside
+// ~/.claude is discovery-owned by the ownership rule, so an unrelated pack
+// dying silently takes it with them unless we say so.
+func droppedEntryNotes(before, after []catalog.Root) []string {
+	kept := make(map[string]bool, len(after))
+	for _, r := range after {
+		kept[filepath.Clean(r.Path)] = true
+	}
+	var out []string
+	for _, r := range before {
+		p := filepath.Clean(r.Path)
+		if kept[p] || !isDirPath(p) {
+			continue // already reported as stale, or legitimately gone
+		}
+		out = append(out, fmt.Sprintf("roots.json: entry %q (%s) still exists but is no longer discovered — removed from roots.json and its skills leave the index",
+			r.Pack, r.Path))
+	}
+	return out
+}
+
+func isDirPath(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+// reuseRoots reports whether `refresh` may reuse roots.json verbatim, plus one
+// note per root that no longer exists.
+//
+// Reusing unconditionally is what silently decayed the production index: plugin
+// cache roots carry a VERSION in their path, so an update strands the old path
+// and every skill in that pack leaves the index without a word. Nothing else
+// catches it — index.Refresh's removal guard only trips past 30% and the real
+// decay arrived in smaller steps.
+//
+// Only a vanished DISCOVERY-owned root forces rediscovery. Operator-owned roots
+// (flat roots, anything outside ~/.claude) are reported but never dropped:
+// a human put them there, and rediscovery would overwrite that.
+//
+// The notes are RETURNED rather than printed so the caller can put them in
+// refresh.log as well as stderr. A refresh driven by the SessionStart hook has
+// nobody watching stderr — that is precisely how this decay ran unnoticed for
+// weeks — so the durable log is the channel that actually reaches a human.
+//
+// deadPacks names the discovery-owned packs that vanished, so the caller can
+// check afterwards whether rediscovery actually replaced them.
+func reuseRoots(existing []catalog.Root, claudeDir string) (reuse bool, notes []string, deadPacks []string) {
+	dead, operatorDead, unknown := roots.Stale(existing, claudeDir)
+	for _, u := range unknown {
+		// Report the REAL error. "no longer exists" would send a human hunting
+		// an uninstall that never happened, when the truth is a deny ACE or an
+		// unreachable share.
+		notes = append(notes, fmt.Sprintf("roots.json: root %q could not be read (%s): %v — keeping it and NOT rediscovering; liveness is unknown, not absent",
+			u.Root.Pack, u.Root.Path, u.Err))
+	}
+	for _, r := range operatorDead {
+		// Name the index loss too. "keeping it" describes the roots.json entry
+		// and is the reassuring half: the skills under that root harvest to
+		// nothing and leave the index on this very run.
+		notes = append(notes, fmt.Sprintf("roots.json: %s root %q no longer exists (%s) — its skills leave the index this run; the entry is kept because it is operator-owned, remove it yourself if the pack is gone",
+			ownerLabel(r), r.Pack, r.Path))
+	}
+	for _, r := range dead {
+		notes = append(notes, fmt.Sprintf("roots.json: pack %q root no longer exists (%s) — rediscovering",
+			r.Pack, r.Path))
+		deadPacks = append(deadPacks, r.Pack)
+	}
+	return len(dead) == 0, notes, deadPacks
+}
+
+func ownerLabel(r catalog.Root) string {
+	if r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents {
+		return "flat"
+	}
+	return "out-of-tree"
 }
 
 func main() {
@@ -139,8 +283,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	rs, err := resolveRoots(cfg, outPath)
+	rs, staleNotes, err := resolveRoots(cfg, outPath)
 	if err != nil {
+		// This path exits BEFORE runRefresh, where all the logging lives. Left
+		// alone it would produce a refresh that decays the index and writes
+		// nothing durable — worse than the pre-fix behavior, which at least
+		// reached the removal guard and logged a failure.
+		if cfg.cmd == "refresh" {
+			now := time.Now()
+			_ = appendRefreshStatus(filepath.Join(filepath.Dir(outPath), "refresh.log"), refreshStatus{
+				Ts: now.Format(time.RFC3339), TsUnix: now.Unix(),
+				OK: false, Error: err.Error(), StaleRoots: staleNotes,
+			})
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -166,15 +321,18 @@ func main() {
 		}
 		fmt.Printf("built %d skills (dim %d) from %d roots → %s\n", len(idx.Entries), idx.Dim, len(rs), outPath)
 	case "refresh":
-		runRefresh(cfg, rs, outPath)
+		runRefresh(cfg, rs, outPath, staleNotes)
 	}
 }
 
 // runRefresh is the refresh subcommand body; split out so the status-line and
 // guard logic stay testable and every exit path is logged.
-func runRefresh(cfg config, rs []catalog.Root, outPath string) {
+func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []string) {
 	start := time.Now()
-	st := refreshStatus{TsUnix: start.Unix(), Ts: start.Format(time.RFC3339), Forced: cfg.force}
+	// StaleRoots rides on EVERY status line this run writes, including the
+	// failure paths: a refresh that died after noticing its roots had vanished
+	// is exactly the case where the note matters most.
+	st := refreshStatus{TsUnix: start.Unix(), Ts: start.Format(time.RFC3339), Forced: cfg.force, StaleRoots: staleNotes}
 	logPath := filepath.Join(filepath.Dir(outPath), "refresh.log")
 	fail := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
