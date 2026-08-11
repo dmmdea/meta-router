@@ -43,6 +43,62 @@ func hermeticHome(t *testing.T) string {
 	return home
 }
 
+// End-to-end reproduction of the production decay (2026-08-10): roots.json
+// names a VERSIONED plugin cache path, the plugin updates, the path vanishes,
+// and refresh — which reads roots.json and never re-discovers — keeps handing
+// back the dead root. Index went 155 -> 112 entries with the whole superpowers
+// pack gone, and index.Refresh's removal guard never fired because each decay
+// step was under its 30% threshold.
+func TestRefreshRediscoversWhenADiscoveryRootHasVanished(t *testing.T) {
+	home := hermeticHome(t)
+	dir := t.TempDir()
+	dead := filepath.ToSlash(filepath.Join(home, ".claude", "plugins", "cache", "sp", "6.1.1", "skills"))
+	writeRootsFile(t, dir, `{"version":1,"roots":[
+		{"path":"`+dead+`","pack":"superpowers"}]}`)
+	out := filepath.Join(dir, "index.json")
+
+	rs, notes, err := resolveRoots(config{cmd: "refresh"}, out)
+	if err != nil {
+		t.Fatalf("resolveRoots(refresh): %v", err)
+	}
+	for _, r := range rs {
+		if filepath.ToSlash(r.Path) == dead {
+			t.Fatal("refresh handed back the vanished root — this is the silent decay")
+		}
+	}
+	// The stub skills dir from hermeticHome must have been rediscovered, so the
+	// refresh indexes something real instead of nothing.
+	if len(rs) == 0 {
+		t.Fatal("rediscovery produced no roots")
+	}
+	if len(notes) == 0 {
+		t.Fatal("the vanished root must be reported, not silently repaired")
+	}
+}
+
+// The counterpart: an operator's out-of-tree root that has vanished must NOT
+// trigger rediscovery, because rediscovery calls roots.Save and would erase the
+// human's entry.
+func TestRefreshKeepsVanishedOperatorRootInsteadOfOverwriting(t *testing.T) {
+	hermeticHome(t)
+	dir := t.TempDir()
+	gone := filepath.ToSlash(filepath.Join(t.TempDir(), "handadded-skills"))
+	writeRootsFile(t, dir, `{"version":1,"roots":[
+		{"path":"`+gone+`","pack":"handadded"}]}`)
+	out := filepath.Join(dir, "index.json")
+
+	rs, notes, err := resolveRoots(config{cmd: "refresh"}, out)
+	if err != nil {
+		t.Fatalf("resolveRoots(refresh): %v", err)
+	}
+	if len(rs) != 1 || filepath.ToSlash(rs[0].Path) != gone {
+		t.Fatalf("operator's out-of-tree root must survive verbatim, got %+v", rs)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("it must still be reported, got %q", notes)
+	}
+}
+
 func TestBuildPreservesOperatorFlatRoots(t *testing.T) {
 	hermeticHome(t)
 	dir := t.TempDir()
@@ -54,7 +110,7 @@ func TestBuildPreservesOperatorFlatRoots(t *testing.T) {
 		{"path":"`+flat+`","pack":"commands","kind":"commands"}]}`)
 	out := filepath.Join(dir, "index.json")
 
-	rs, err := resolveRoots(config{cmd: "build"}, out)
+	rs, _, err := resolveRoots(config{cmd: "build"}, out)
 	if err != nil {
 		t.Fatalf("resolveRoots(build): %v", err)
 	}
@@ -101,7 +157,7 @@ func TestBuildOwnershipRuleForHandAddedSkillsRoots(t *testing.T) {
 		{"path":"`+insideGone+`","pack":"uninstalled-pack"}]}`)
 	out := filepath.Join(dir, "index.json")
 
-	rs, err := resolveRoots(config{cmd: "build"}, out)
+	rs, _, err := resolveRoots(config{cmd: "build"}, out)
 	if err != nil {
 		t.Fatalf("resolveRoots(build): %v", err)
 	}
@@ -133,7 +189,7 @@ func TestInvalidRootsFileIsFatalAndUntouched(t *testing.T) {
 			p := writeRootsFile(t, dir, bad)
 			out := filepath.Join(dir, "index.json")
 
-			_, err := resolveRoots(config{cmd: cmd}, out)
+			_, _, err := resolveRoots(config{cmd: cmd}, out)
 			if err == nil {
 				t.Fatal("unknown kind must be fatal, not silently rediscovered")
 			}

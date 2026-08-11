@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.20.0] — 2026-08-11
+
+### Fixed
+- **`mr-index refresh` no longer decays the index silently when a plugin updates.** `refresh` read `roots.json` and returned it verbatim — it never re-discovered and never checked that the paths still resolved. Plugin cache roots carry a VERSION in their path (`…/superpowers/6.1.1/skills`), so every plugin update stranded the old path: harvest found nothing under it and the whole pack left the index with no diagnostic anywhere. Measured in production on 2026-08-10: **7 of 13 roots dead, index 155 → 112 entries, the entire `superpowers` pack (14 skills) gone**, along with `huggingface-skills`, `document-skills`, `agent-talk`, `better-harness` and others. `index.Refresh`'s removal guard could not catch it — the decay arrived in steps below its 30% threshold (155→127 is 18%, then 127→112 is 12%). `roots.Stale` now classifies vanished roots by the SAME ownership rule the build carry-over already used: a dead skills root under `~/.claude` is an uninstalled pack and forces rediscovery; a dead flat root or one outside `~/.claude` is operator-owned, so it is reported and kept, never dropped on a human's behalf. A healthy `roots.json` is still reused verbatim and stays silent.
+
+### Known gaps (recorded, not fixed here)
+- **`mr-eval` and production do not share a catalog.** `mr-eval` calls `roots.Discover` and rebuilds its own catalog (192 skills); `mr-hook` surfaces from the `roots.json`-derived index (112 before this fix). Every W9 number therefore compared two different systems — the gold-set recall@3 of 0.701 was never a measurement of what production does. Making the eval report (or adopt) the production composition is the obvious follow-up.
+- **Pack mis-attribution:** `frontend-design` indexes as `document-skills:frontend-design` because a copy of it ships inside the `document-skills` plugin cache and dedup keeps that one, but the Skill tool invokes `frontend-design:frontend-design`. A surfaced ID that cannot be invoked is worse than an absent one.
+- **Skills outside `~/.claude` are unreachable by discovery:** `code-review`, `commit`, `create-pr`, `merge`, `fix-ci`, `sync` and 7 more ship inside the VS Code extension's own resources dir. That path is itself version-hashed, so hardcoding it would recreate exactly the trap this release fixes.
+
 ## [0.19.0] — 2026-07-30
 
 ### Added

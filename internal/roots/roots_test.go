@@ -152,3 +152,78 @@ func TestConfigPathFor(t *testing.T) {
 		t.Fatalf("roots.json must sit next to the index: %s", got)
 	}
 }
+
+// Stale is what stops the silent index decay: `refresh` reads roots.json and
+// never re-discovers, so when a plugin updates and its VERSIONED cache path
+// disappears, every skill in that pack drops out of the index with no
+// diagnostic. Observed in production 2026-08-10: 7 of 13 roots dead, index
+// 155 -> 112 entries, the whole superpowers pack gone. The removal guard never
+// fired because each decay step was under its 30% threshold.
+//
+// The partition mirrors resolveRoots' ownership rule exactly: discovery owns
+// the ~/.claude skills space (a vanished pack there SHOULD drop), the operator
+// owns flat roots and anything outside claudeDir (dropping those would destroy
+// hand edits).
+func TestStale_PartitionsByOwnership(t *testing.T) {
+	claude := t.TempDir()
+	outside := t.TempDir()
+
+	live := filepath.Join(claude, "skills")
+	writeSkill(t, filepath.Join(live, "a"), "a")
+
+	rs := []catalog.Root{
+		{Path: live, Pack: catalog.UserPack},
+		{Path: filepath.Join(claude, "plugins", "cache", "sp", "6.1.1", "skills"), Pack: "superpowers"},
+		{Path: filepath.Join(outside, "gone"), Pack: "handadded"},
+		{Path: filepath.Join(claude, "commands"), Pack: catalog.UserPack, Kind: catalog.KindCommands},
+	}
+
+	discovery, operator := Stale(rs, claude)
+
+	if len(discovery) != 1 || discovery[0].Pack != "superpowers" {
+		t.Fatalf("a vanished plugin root under claudeDir is discovery-owned; got %+v", discovery)
+	}
+	// A dead flat root and a dead outside root are BOTH operator-owned: only a
+	// human puts them in roots.json, so rediscovery must never silently drop
+	// them.
+	if len(operator) != 2 {
+		t.Fatalf("dead flat + outside roots are operator-owned; got %+v", operator)
+	}
+	for _, r := range operator {
+		if r.Pack != "handadded" && r.Kind != catalog.KindCommands {
+			t.Fatalf("unexpected operator-owned entry %+v", r)
+		}
+	}
+}
+
+// A live root must never be reported stale — otherwise refresh rediscovers on
+// every run and the ownership rule stops meaning anything.
+func TestStale_LiveRootsAreNotStale(t *testing.T) {
+	claude := t.TempDir()
+	live := filepath.Join(claude, "skills")
+	writeSkill(t, filepath.Join(live, "a"), "a")
+
+	discovery, operator := Stale([]catalog.Root{{Path: live, Pack: catalog.UserPack}}, claude)
+	if len(discovery) != 0 || len(operator) != 0 {
+		t.Fatalf("live root reported stale: %+v %+v", discovery, operator)
+	}
+}
+
+// The production failure had a dead path that is a PREFIX-sibling of claudeDir
+// only by string comparison. Ownership must be decided on real path boundaries,
+// not raw HasPrefix: "<claude>x/skills" is OUTSIDE "<claude>".
+func TestStale_OwnershipUsesPathBoundaryNotStringPrefix(t *testing.T) {
+	claude := t.TempDir()
+	sibling := claude + "x"
+
+	discovery, operator := Stale([]catalog.Root{
+		{Path: filepath.Join(sibling, "skills"), Pack: "sibling"},
+	}, claude)
+
+	if len(discovery) != 0 {
+		t.Fatalf("a sibling dir that merely shares a string prefix is NOT under claudeDir: %+v", discovery)
+	}
+	if len(operator) != 1 {
+		t.Fatalf("it is operator-owned and must be preserved: %+v", operator)
+	}
+}

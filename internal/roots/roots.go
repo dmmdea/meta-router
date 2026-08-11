@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
 )
@@ -101,6 +102,46 @@ func Save(path string, rs []catalog.Root) error {
 		return err
 	}
 	return nil
+}
+
+// Stale partitions the roots whose path no longer exists on disk into the two
+// ownership classes the build carry-over rule already uses.
+//
+// It exists because `refresh` reads roots.json and returns it verbatim — it
+// never re-discovers and never checks that the paths still resolve. Plugin
+// cache roots are VERSIONED (…/superpowers/6.1.1/skills), so a plugin update
+// silently strands every skill in that pack: the root stops existing, harvest
+// finds nothing under it, and the entries leave the index with no diagnostic.
+// Measured in production 2026-08-10 — 7 of 13 roots dead, index 155 → 112
+// entries, the entire superpowers pack gone. index.Refresh's removal guard
+// cannot catch this: the decay arrives in steps below its 30% threshold
+// (155→127 is 18%, 127→112 is 12%).
+//
+//   - discovery: a plain skills root under claudeDir. Discovery owns that
+//     space, so a pack that vanished from it is an uninstall and SHOULD drop.
+//   - operator: a flat root (Discover can never emit a Kind) or any root
+//     outside claudeDir. Only a human puts those in roots.json, so they are
+//     reported for visibility and never dropped on their behalf.
+//
+// Callers decide what to do; Stale itself only classifies.
+func Stale(rs []catalog.Root, claudeDir string) (discovery, operator []catalog.Root) {
+	// Boundary-safe containment: compare with a trailing separator on both
+	// sides so a sibling that merely shares a string prefix ("<claude>x") is
+	// correctly treated as outside.
+	prefix := filepath.Clean(claudeDir) + string(filepath.Separator)
+	for _, r := range rs {
+		if isDir(r.Path) {
+			continue
+		}
+		flat := r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents
+		inside := strings.HasPrefix(filepath.Clean(r.Path)+string(filepath.Separator), prefix)
+		if flat || !inside {
+			operator = append(operator, r)
+			continue
+		}
+		discovery = append(discovery, r)
+	}
+	return discovery, operator
 }
 
 // Discover resolves the full root set under a Claude config dir:

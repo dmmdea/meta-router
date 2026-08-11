@@ -52,7 +52,8 @@ func parseArgs(argv []string) (config, error) {
 //     (this is what lets the SessionStart hook run `mr-index refresh` with no
 //     flags and still see the full set). A file that exists but is INVALID is
 //     fatal for both commands — see the comment at the Load call.
-func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
+func resolveRoots(cfg config, outPath string) ([]catalog.Root, []string, error) {
+	var staleNotes []string
 	if cfg.skillRoots != "" {
 		var rs []catalog.Root
 		for _, p := range strings.Split(cfg.skillRoots, ",") {
@@ -63,9 +64,9 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 			rs = append(rs, catalog.Root{Path: p, Pack: filepath.Base(filepath.Clean(p))})
 		}
 		if len(rs) == 0 {
-			return nil, fmt.Errorf("-skill-roots given but empty")
+			return nil, nil, fmt.Errorf("-skill-roots given but empty")
 		}
-		return rs, nil
+		return rs, nil, nil
 	}
 	rootsPath := roots.ConfigPathFor(outPath)
 	// A roots.json that EXISTS but is invalid (parse error, unknown kind) is
@@ -76,18 +77,34 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 	// Only a genuinely absent file falls through to discovery.
 	existing, loadErr := roots.Load(rootsPath)
 	if loadErr != nil && !os.IsNotExist(loadErr) {
-		return nil, fmt.Errorf("%v — fix or delete %s (refusing to rediscover: that would overwrite your edits)", loadErr, rootsPath)
+		return nil, nil, fmt.Errorf("%v — fix or delete %s (refusing to rediscover: that would overwrite your edits)", loadErr, rootsPath)
 	}
 	if cfg.cmd == "refresh" && loadErr == nil {
-		return existing, nil
+		// Ownership classification needs the claudeDir boundary. If the home
+		// dir cannot be resolved we cannot classify, so keep the historical
+		// behavior (reuse) rather than rediscovering on a guess.
+		cd, cderr := roots.DefaultClaudeDir()
+		if cderr != nil {
+			return existing, nil, nil
+		}
+		reuse, notes := reuseRoots(existing, cd)
+		for _, n := range notes {
+			fmt.Fprintln(os.Stderr, n)
+		}
+		if reuse {
+			return existing, notes, nil
+		}
+		staleNotes = notes
+		// Fall through to rediscovery. The carry-over below preserves every
+		// operator-owned root, so this cannot destroy hand edits.
 	}
 	claudeDir, err := roots.DefaultClaudeDir()
 	if err != nil {
-		return nil, fmt.Errorf("cannot resolve home dir: %v", err)
+		return nil, nil, fmt.Errorf("cannot resolve home dir: %v", err)
 	}
 	rs := roots.Discover(claudeDir)
 	if len(rs) == 0 {
-		return nil, fmt.Errorf("no skill roots found under %s", claudeDir)
+		return nil, nil, fmt.Errorf("no skill roots found under %s", claudeDir)
 	}
 	// OWNERSHIP RULE (review 2026-07-30 MAJOR + closure-audit MINOR): discovery
 	// owns the ~/.claude space — a skills root under claudeDir that discovery
@@ -122,7 +139,44 @@ func resolveRoots(cfg config, outPath string) ([]catalog.Root, error) {
 		// indexing; the next run just rediscovers.
 		fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", rootsPath, err)
 	}
-	return rs, nil
+	return rs, staleNotes, nil
+}
+
+// reuseRoots reports whether `refresh` may reuse roots.json verbatim, plus one
+// note per root that no longer exists.
+//
+// Reusing unconditionally is what silently decayed the production index: plugin
+// cache roots carry a VERSION in their path, so an update strands the old path
+// and every skill in that pack leaves the index without a word. Nothing else
+// catches it — index.Refresh's removal guard only trips past 30% and the real
+// decay arrived in smaller steps.
+//
+// Only a vanished DISCOVERY-owned root forces rediscovery. Operator-owned roots
+// (flat roots, anything outside ~/.claude) are reported but never dropped:
+// a human put them there, and rediscovery would overwrite that.
+//
+// The notes are RETURNED rather than printed so the caller can put them in
+// refresh.log as well as stderr. A refresh driven by the SessionStart hook has
+// nobody watching stderr — that is precisely how this decay ran unnoticed for
+// weeks — so the durable log is the channel that actually reaches a human.
+func reuseRoots(existing []catalog.Root, claudeDir string) (reuse bool, notes []string) {
+	dead, operatorDead := roots.Stale(existing, claudeDir)
+	for _, r := range operatorDead {
+		notes = append(notes, fmt.Sprintf("roots.json: %s root %q no longer exists (%s) — keeping it; remove it from roots.json if the pack is gone",
+			ownerLabel(r), r.Pack, r.Path))
+	}
+	for _, r := range dead {
+		notes = append(notes, fmt.Sprintf("roots.json: pack %q root no longer exists (%s) — rediscovering so its skills are not silently dropped",
+			r.Pack, r.Path))
+	}
+	return len(dead) == 0, notes
+}
+
+func ownerLabel(r catalog.Root) string {
+	if r.Kind == catalog.KindCommands || r.Kind == catalog.KindAgents {
+		return "flat"
+	}
+	return "out-of-tree"
 }
 
 func main() {
@@ -139,7 +193,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	rs, err := resolveRoots(cfg, outPath)
+	rs, staleNotes, err := resolveRoots(cfg, outPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -166,15 +220,18 @@ func main() {
 		}
 		fmt.Printf("built %d skills (dim %d) from %d roots → %s\n", len(idx.Entries), idx.Dim, len(rs), outPath)
 	case "refresh":
-		runRefresh(cfg, rs, outPath)
+		runRefresh(cfg, rs, outPath, staleNotes)
 	}
 }
 
 // runRefresh is the refresh subcommand body; split out so the status-line and
 // guard logic stay testable and every exit path is logged.
-func runRefresh(cfg config, rs []catalog.Root, outPath string) {
+func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []string) {
 	start := time.Now()
-	st := refreshStatus{TsUnix: start.Unix(), Ts: start.Format(time.RFC3339), Forced: cfg.force}
+	// StaleRoots rides on EVERY status line this run writes, including the
+	// failure paths: a refresh that died after noticing its roots had vanished
+	// is exactly the case where the note matters most.
+	st := refreshStatus{TsUnix: start.Unix(), Ts: start.Format(time.RFC3339), Forced: cfg.force, StaleRoots: staleNotes}
 	logPath := filepath.Join(filepath.Dir(outPath), "refresh.log")
 	fail := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
