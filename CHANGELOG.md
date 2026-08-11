@@ -12,8 +12,16 @@ Versioning: [SemVer](https://semver.org/).
 - **`cands` stays cosines-or-nothing.** Rerank rows are logged because their `.Score` values are real embed cosines; only the order comes from the cross-encoder, and its raw logits are never exposed. Hybrid remains excluded — its `.Score` is an RRF fused rank score, the contamination this field exists to prevent. Note that rerank rows' cosines are deliberately **not** descending, because the order is the reranker's while the numbers stay the embedder's.
 - **`rerankOrEmbed` makes the cross-encoder optional at surfacing time.** `EmbedRerank` propagates every failure by design (correct for the eval, where a silent fallback would score embed-only under the `embed+rerank` label). In production that strictness is a regression: `decide()` turns a primary error into `embedder-down` and surfaces **nothing**, when the embed ordering was available all along. A reranker outage now costs the ORDERING, never the surfacing — and the logged mode is rewritten to `embed`, so a row never claims a rerank that did not run.
 
-### Measured cost
-- **~1.9 s added per prompt** (p50 1988 ms, p95 2343 ms, max 2576 ms end-to-end through the hook, vs ~72 ms for embed). The reranker is resident (`ttl: -1`) but runs `--n-gpu-layers 0`, i.e. on CPU, so this is compute, not a model swap. A production deployment must therefore raise `-timeout-ms` well past the previous 1000 ms or the hook's hard deadline fails open and surfaces nothing. `mr-eval`'s ~395 ms median for the same retriever does NOT reproduce end-to-end and should not be used to size the deadline.
+### Measured cost — read this before enabling it
+- **~2.1 s p50, ~4.5 s worst case added per prompt**, against ~72 ms for embed. The reranker is resident (`ttl: -1`) but runs `--n-gpu-layers 0`, i.e. on CPU, so this is compute, not a model swap. `mr-eval`'s ~395 ms median for the same retriever does **not** reproduce end-to-end and must not be used to size the deadline.
+- **`-timeout-ms` must be ≥ 6000, and 8000 is recommended.** Degradation rate measured on the live stack: 5000 ms → 7/12 prompts fell back to embed, 6000 ms → 2/12, 8000 ms → 0/12. `-ranker=rerank` now REFUSES to run below 6000 ms, records why in `err`, and serves embed — because a deadline the reranker cannot meet is worse than leaving it off: the hook fails open and surfaces nothing on every prompt while looking perfectly healthy. Verified: the previously-deployed `-timeout-ms 1000` config would have failed 100% of prompts silently.
+
+### Failure modes are now visible rather than silent
+Every way this can go wrong writes to `err` in `usage.jsonl` — verified end-to-end:
+- deadline too low → `-ranker=rerank needs -timeout-ms >= 6000 …— running embed`
+- misspelled flag → `unknown -ranker "rernak" — running embed` (previously coerced to embed in silence, giving `mode:"embed"` a third indistinguishable cause)
+- no live endpoint → `-ranker=rerank: no endpoint answered /v1/models — running embed`
+- cross-encoder outage → `ranker degraded to embed: <the real error>`, stamped on **every** outcome including `gated-empty`, not only on surfaced rows (roughly half of live traffic is gated, and those rows were previously byte-identical to healthy ones)
 
 ### Fixed
 - `EmbedRerank` was only ever constructed with an already-resolved endpoint by `mr-eval`. `Embed` resolves an empty `-endpoint` internally (env / machine file / failover chain) but `EmbedRerank` does not — it appends `/v1/rerank` to whatever it is handed. The hook now resolves first, as `mr-eval` does; without it every rerank call posted to a hostless URL and the whole mode failed closed (measured: 23/30 `embedder-down`, 7/30 `bm25-fallback`).

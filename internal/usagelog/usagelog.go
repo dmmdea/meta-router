@@ -18,11 +18,22 @@ type Record struct {
 	Surfaced     []string `json:"surfaced"`
 	TopCosine    float64  `json:"top_cosine"`
 	LatencyMs    int64    `json:"latency_ms"`
-	Mode         string   `json:"mode"` // embed | hybrid | bm25-fallback | gated-empty | embedder-down | too-short | error
+	Mode         string   `json:"mode"` // embed | rerank | hybrid | bm25-fallback | gated-empty | embedder-down | too-short | error
 	Err          string   `json:"err,omitempty"`
 	NudgeOffload bool     `json:"nudge_offload,omitempty"` // an offload-suitability nudge was appended
 	QuotaHint    bool     `json:"quota_hint,omitempty"`    // a quota+route hint was appended (§6c RS1)
-	// Cands is the ranked candidate list WITH scores from the EMBED path only
+	// Cands is the ranked candidate list WITH cosine scores. It is present on
+	// the embed and rerank paths (including their gated-empty rows) and absent
+	// everywhere else.
+	//
+	// CAVEAT for analysis, added when rerank was wired: on embed rows Cands is
+	// the top-k BY COSINE and Cands[0].Cos == TopCosine. On rerank rows the
+	// VALUES are still embed cosines (only the ORDER is the cross-encoder's),
+	// so the cosine denominator stays uncontaminated — but the list is k of the
+	// top-20 SELECTED by the cross-encoder, in its order, so it is neither
+	// sorted by cosine nor the same population. Do not read Cands[0].Cos as the
+	// event's top cosine without checking Mode.
+	// (original R9.2b note follows)
 	// — present on embed and embed-gated-empty rows, absent everywhere else
 	// (W9 R9.2b). Hybrid is deliberately excluded: its .Score is an RRF fused
 	// rank score, not a cosine, and gated-empty rows carry no ranker

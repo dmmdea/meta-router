@@ -46,8 +46,9 @@ func TestRerankDegradesToEmbedOrderWhenRerankerFails(t *testing.T) {
 		{ID: "b", Score: 0.55},
 	}
 	ro := &rerankOrEmbed{
-		rerank: fakePrimary{err: errors.New("rerank: connection refused")},
-		embed:  fakePrimary{res: embedRes, topCos: 0.61},
+		embed:     fakePrimary{res: embedRes, topCos: 0.61},
+		reorderer: failReorder{errors.New("connection refused")},
+		depth:     20,
 	}
 
 	ids, top, mode, cands := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
@@ -64,6 +65,9 @@ func TestRerankDegradesToEmbedOrderWhenRerankerFails(t *testing.T) {
 	if !ro.degraded {
 		t.Fatal("the degradation must be observable so the mode can tell the truth")
 	}
+	if ro.degradeErr == "" {
+		t.Fatal("the reranker's error must be kept, not dropped — otherwise the outage is invisible in usage.jsonl")
+	}
 	if mode != "rerank" {
 		t.Fatalf("decide reports the requested mode; the caller rewrites it on degradation (mode=%q)", mode)
 	}
@@ -72,11 +76,100 @@ func TestRerankDegradesToEmbedOrderWhenRerankerFails(t *testing.T) {
 	}
 }
 
+// The degradation must be recorded on OUTCOMES OTHER than the surfaced one.
+// Reading it only on the surfaced path hid the outage on gated-empty rows —
+// ~50% of live traffic — making them byte-identical to healthy rows.
+func TestRerankDegradationIsRecordedOnGatedEmptyToo(t *testing.T) {
+	ro := &rerankOrEmbed{
+		// below the 0.40 gate, so decide returns "gated-empty", not "rerank"
+		embed:     fakePrimary{res: []retrievers.Scored{{ID: "a", Score: 0.30}}, topCos: 0.30},
+		reorderer: failReorder{errors.New("HTTP 503")},
+		depth:     20,
+	}
+	_, _, mode, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
+	if mode != "gated-empty" {
+		t.Fatalf("expected the gated outcome, got %q", mode)
+	}
+	if !ro.degraded || ro.degradeErr == "" {
+		t.Fatal("a gated-empty row must still carry the fact that the reranker was down")
+	}
+}
+
+// A genuine EMBEDDER failure must still propagate — degrading only covers the
+// cross-encoder. Swallowing an embedder outage would surface nothing while
+// reporting success.
+func TestRerankOrEmbedPropagatesEmbedderFailure(t *testing.T) {
+	ro := &rerankOrEmbed{
+		embed:     fakePrimary{err: errors.New("embedder down")},
+		reorderer: failReorder{errors.New("unused")},
+		depth:     20,
+	}
+	_, _, mode, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
+	if mode != "embedder-down" && mode != "bm25-fallback" {
+		t.Fatalf("an embedder failure must not be masked by the rerank wrapper, got %q", mode)
+	}
+	if ro.degraded {
+		t.Fatal("an embedder failure is not a cross-encoder degradation")
+	}
+}
+
+// The cross-encoder must see a WIDE pool: reranking only the already-surfaced
+// few cannot rescue a skill the embedder buried, which is the whole point.
+func TestRerankOrEmbedRetrievesDepthNotK(t *testing.T) {
+	spy := &depthSpy{res: []retrievers.Scored{{ID: "a", Score: 0.9}}, topCos: 0.9}
+	ro := &rerankOrEmbed{embed: spy, reorderer: identityReorder{}, depth: 20}
+	if _, _, err := ro.RetrieveScored("q", 3); err != nil {
+		t.Fatal(err)
+	}
+	if spy.lastK != 20 {
+		t.Fatalf("the embed pool must be the rerank depth (20), got %d", spy.lastK)
+	}
+}
+
+// flipReorder reverses the candidate order, standing in for a cross-encoder
+// that disagrees with the embedder.
+type flipReorder struct{}
+
+func (flipReorder) Reorder(_ string, c []retrievers.Scored) ([]int, error) {
+	out := make([]int, len(c))
+	for i := range c {
+		out[i] = len(c) - 1 - i
+	}
+	return out, nil
+}
+
+type failReorder struct{ err error }
+
+func (f failReorder) Reorder(string, []retrievers.Scored) ([]int, error) { return nil, f.err }
+
+type identityReorder struct{}
+
+func (identityReorder) Reorder(_ string, c []retrievers.Scored) ([]int, error) {
+	out := make([]int, len(c))
+	for i := range c {
+		out[i] = i
+	}
+	return out, nil
+}
+
+type depthSpy struct {
+	res    []retrievers.Scored
+	topCos float64
+	lastK  int
+}
+
+func (d *depthSpy) RetrieveScored(_ string, k int) ([]retrievers.Scored, float64, error) {
+	d.lastK = k
+	return d.res, d.topCos, nil
+}
+
 // When the reranker works, nothing is degraded and the mode stands.
 func TestRerankOrEmbedReportsRerankWhenHealthy(t *testing.T) {
+	// embed returns a,b; the reranker flips it to b,a — the reordering must win.
 	ro := &rerankOrEmbed{
-		rerank: fakePrimary{res: []retrievers.Scored{{ID: "b", Score: 0.55}, {ID: "a", Score: 0.61}}, topCos: 0.61},
-		embed:  fakePrimary{err: errors.New("must not be consulted")},
+		embed:     fakePrimary{res: []retrievers.Scored{{ID: "a", Score: 0.61}, {ID: "b", Score: 0.55}}, topCos: 0.61},
+		reorderer: flipReorder{},
+		depth:     20,
 	}
 	ids, _, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
 	if len(ids) != 2 || ids[0] != "b" {

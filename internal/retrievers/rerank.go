@@ -104,6 +104,19 @@ func (e *EmbedRerank) RetrieveScored(prompt string, k int) ([]Scored, float64, e
 	return out, topCos, nil
 }
 
+// Reorder re-scores an ALREADY-RETRIEVED candidate list with the cross-encoder
+// and returns indices into it, best first.
+//
+// It is exported so a caller that already holds the embed result can reorder it
+// WITHOUT a second retrieval. mr-hook needs that: it runs under one hard
+// deadline, and a fallback that re-embeds cannot fit
+// (embed + rerank + embed > deadline), so a slow reranker would blow the
+// deadline instead of degrading. With Reorder the degraded path costs nothing —
+// the caller simply keeps the order it already has.
+func (e *EmbedRerank) Reorder(prompt string, cands []Scored) ([]int, error) {
+	return e.rerankOrder(prompt, cands)
+}
+
 // rerankOrder re-scores cands with the cross-encoder and returns indices into
 // cands, best first. Shared by Retrieve and RetrieveScored so the two can never
 // disagree about ordering.
