@@ -138,6 +138,68 @@ func TestHarvestRootsUnfilteredWhenPackNotDeclared(t *testing.T) {
 	}
 }
 
+// "Authority" must mean authority that RESOLVES. A declaration whose entries
+// match no directory under the root is not permission to empty the root — it is
+// evidence the manifest describes a different layout than the cache holds.
+//
+// Review reproduced both realistic spellings: pointing at the skills dir itself
+// ("./skills") and pointing at the SKILL.md rather than its dir. Either yields a
+// non-empty `owned` that matches nothing, so every skill is filtered out and the
+// pack silently harvests ZERO. Six live roots (agent-talk 15, superpowers 14,
+// atlassian 6, microsoft-docs 3, better-harness 1, skillopt-sleep 1 = 40 skills)
+// currently name their pack with a null skills list and are one upstream
+// manifest edit away from this — and 14/199 is under the 30% removal guard, so
+// nothing would object.
+func TestOwnedSkillDirsIgnoresDeclarationThatResolvesToNothing(t *testing.T) {
+	for _, decl := range []string{`["./skills"]`, `["./skills/a/SKILL.md"]`, `["./nope"]`} {
+		home := t.TempDir()
+		install := filepath.Join(home, "p", "1.0.0")
+		skills := filepath.Join(install, "skills")
+		writeTestSkill(t, filepath.Join(skills, "a"), "a")
+		writeTestSkill(t, filepath.Join(skills, "b"), "b")
+		writeMarketplace(t, install, `{"plugins":[{"name":"p","skills":`+decl+`}]}`)
+
+		got, err := HarvestRoots([]Root{{Path: skills, Pack: "p"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("declaration %s resolves to no directory under the root, so it is not authority; "+
+				"want 2 skills harvested, got %d", decl, len(got))
+		}
+	}
+}
+
+// A sibling plugin using a different schema for `skills` must not disable
+// ownership for the pack we care about. The live huggingface-skills manifest
+// uses a bare string ("skills": "./"), which makes json.Unmarshal fail for the
+// WHOLE document — so one sibling's shape silently re-admits every phantom.
+func TestOwnedSkillDirsToleratesStringSkillsOnASibling(t *testing.T) {
+	home := t.TempDir()
+	install := filepath.Join(home, "p", "1.0.0")
+	skills := filepath.Join(install, "skills")
+	writeTestSkill(t, filepath.Join(skills, "mine"), "mine")
+	writeTestSkill(t, filepath.Join(skills, "theirs"), "theirs")
+	writeMarketplace(t, install, `{"plugins":[
+		{"name":"p","skills":["./skills/mine"]},
+		{"name":"sibling","skills":"./"}]}`)
+
+	got, err := HarvestRoots([]Root{{Path: skills, Pack: "p"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, s := range got {
+		ids[s.ID] = true
+	}
+	if !ids["p:mine"] {
+		t.Fatalf("the pack's own skill must survive; got %v", ids)
+	}
+	if ids["p:theirs"] {
+		t.Fatalf("a sibling's string-shaped skills field must not disable ownership; got %v", ids)
+	}
+}
+
 func writeTestSkill(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

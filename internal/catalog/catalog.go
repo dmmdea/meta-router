@@ -84,20 +84,14 @@ func InvocableID(pack, name string) string {
 // as name-only, which was the dominant cause of weak skill retrieval. Indented
 // children of a non-target key (e.g. a `metadata:` block) are skipped, so they
 // never leak into the description.
-func ParseSkillMD(path string) (Skill, error) {
-	s, err := parseFrontmatterMD(path)
-	if err != nil {
-		return Skill{}, err
-	}
-	if s.Name == "" {
-		return Skill{}, fmt.Errorf("%s: frontmatter has no name", path)
-	}
-	return s, nil
-}
-
-// parseFrontmatterMD is ParseSkillMD without the name requirement: command
-// files legitimately carry only a description (their name IS the filename), so
-// the flat harvesters need the same block-scalar-safe parsing minus that check.
+// parseFrontmatterMD parses the frontmatter without requiring a `name:` field.
+//
+// There is deliberately NO name-requiring variant. One existed (ParseSkillMD)
+// and was used by the skills walk, where it silently dropped every skill whose
+// frontmatter omitted `name:` — 11 live, all of them invocable — while the walk
+// overwrote s.Name with the directory name immediately afterwards, so the rule
+// never changed a result. Both the Skill tool and the flat harvesters identify
+// a skill by its directory or filename; nothing should reintroduce that check.
 func parseFrontmatterMD(path string) (Skill, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -251,9 +245,32 @@ func Dedup(skills []Skill) []Skill {
 // <installPath>/.claude-plugin/marketplace.json. Only the fields we need.
 type marketplaceFile struct {
 	Plugins []struct {
-		Name   string   `json:"name"`
-		Skills []string `json:"skills"`
+		Name   string      `json:"name"`
+		Skills skillsField `json:"skills"`
 	} `json:"plugins"`
+}
+
+// skillsField accepts BOTH shapes seen in the wild: a list of paths, and a bare
+// string (the installed huggingface-skills manifest uses `"skills": "./"`).
+// Decoding it as []string makes json.Unmarshal fail for the WHOLE document, so
+// ONE sibling plugin's schema choice would silently switch ownership filtering
+// off for every pack in that marketplace — re-admitting the phantom IDs with no
+// signal anywhere.
+type skillsField []string
+
+func (s *skillsField) UnmarshalJSON(b []byte) error {
+	var list []string
+	if err := json.Unmarshal(b, &list); err == nil {
+		*s = list
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*s = []string{one}
+		return nil
+	}
+	*s = nil // null, number, object: unknown shape, treated as "no declaration"
+	return nil
 }
 
 // ownedSkillDirs returns the set of skill directory names that `pack` actually
@@ -297,7 +314,20 @@ func ownedSkillDirs(skillsRoot, pack string) map[string]bool {
 	if !declared || len(owned) == 0 {
 		return nil // no authority over this pack — harvest everything
 	}
-	return owned
+	// Authority must RESOLVE. A declaration whose entries match no directory
+	// under this root describes a different layout than the cache holds — e.g.
+	// "./skills" (the dir itself) or a path to the SKILL.md rather than its
+	// dir. Treating that as authority filters out every skill and silently
+	// empties the pack, which is the permanent-silent-loss failure this whole
+	// area exists to prevent (and 14 of 199 sits under the 30% removal guard,
+	// so nothing downstream would object). If nothing resolves, we have no
+	// usable authority: harvest everything, exactly as before.
+	for name := range owned {
+		if fi, err := os.Stat(filepath.Join(skillsRoot, name)); err == nil && fi.IsDir() {
+			return owned
+		}
+	}
+	return nil
 }
 
 // SkipDirName reports whether an entire directory subtree must be excluded
