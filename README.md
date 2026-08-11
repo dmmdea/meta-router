@@ -57,7 +57,9 @@ If that prints a context line (or cleanly prints nothing), you're ready to regis
 
 ### Register the hook
 
-meta-router runs as two Claude Code hooks. **It never edits `settings.json` for you** — registering it is your explicit action. Merge this into `~/.claude/settings.json` (use absolute paths to the binaries you just built):
+meta-router runs as two Claude Code hooks. Register them **by hand** (below), or let `mr-orchestrate install claude` do it — see [Installing into a host](#installing-into-a-host). Nothing is ever wired without you asking: the hook binaries themselves never touch `settings.json`.
+
+Merge this into `~/.claude/settings.json` (use absolute paths to the binaries you just built):
 
 ```json
 {
@@ -126,6 +128,49 @@ Tuning flags (pass them in the hook `command`, e.g. `mr-hook -min-cosine 0.60`):
 | `-endpoint` | *(empty)* | Embedding endpoint. Empty = per-machine resolution: `$MR_EMBED_ENDPOINT`, then `~/.meta-router/endpoints.json`, then the `:11436`→`:18793` failover chain. Set it to pin one endpoint exactly. |
 | `-index` | `~/.meta-router/index.json` | Index path (`index.bin` sidecar is used automatically when fresh). |
 | `-log` | `~/.meta-router/usage.jsonl` | Usage-log path. |
+
+### Installing into a host
+
+Wiring meta-router by hand is fine for one machine and tedious for a fleet, so
+`mr-orchestrate` can do it — under a rule that makes it safe to run twice, and
+safe to undo:
+
+```bash
+mr-orchestrate install claude -dry-run   # print the exact plan, write nothing
+mr-orchestrate install claude            # wire it
+mr-orchestrate uninstall claude          # put everything back
+```
+
+| Host | What gets wired |
+|---|---|
+| `claude` | `UserPromptSubmit` → `mr-hook`, `SessionStart` → `mr-index refresh`, `statusLine` → the quota tee (wrapping whatever statusline you already had), and the `meta-router` MCP server |
+| `codex` | the `meta-router` MCP server (Codex has no hook or statusline surface) |
+
+**Ownership is recorded, never inferred.** Every change is written to a manifest
+at `<home>/.meta-router/orchestrate/install/<host>.json`, and that manifest is
+the *only* authority for what `uninstall` may remove. An entry that merely looks
+like meta-router's but is not in the manifest belongs to whoever wrote it:
+`install` refuses to adopt it and `uninstall` refuses to delete it. A run is
+all-or-nothing — one conflict refuses the whole thing, and a failure part-way
+rolls back what it had already written.
+
+**Uninstall tells you which kind of restore it did.** If a managed file still
+holds exactly what `install` left, the pre-install copy is restored *byte for
+byte* — your formatting and key order included. If you have edited that file
+since, your edits win: only the recorded entries are removed, and the result is
+reported as `restore: surgical` rather than claiming a byte restore it did not
+perform.
+
+Both MCP registries (`~/.claude.json`, `~/.codex/config.toml`) are written by
+each host's **own** CLI (`claude mcp add` / `codex mcp add`), never by us: those
+files are live state the host rewrites while it runs, so a read-modify-write
+from a second process would silently drop whatever it wrote in between.
+
+Useful flags: `-home <dir>` wires a different home and isolates the *entire*
+install under it (config, manifest, backups, tee), which is how the test suite
+exercises this without touching a real machine; `-bin <dir>` points at the
+deployed binaries (default `<home>/.meta-router/bin`); `-json` emits the report
+as JSON.
 
 ### `mr-eval` — measure retrieval quality
 
@@ -212,7 +257,7 @@ Being honest about scope:
 
 - **It does not route or *call* models/agents.** What ships today is the *inward* axis — it surfaces relevant skills and nudges toward free local offload tools, both as injected context text. It does not choose between cloud models, orchestrate multi-agent runs, or do quota/budget accounting (that is the planned v3).
 - **It cannot make Claude Code retrieve MCP tools on demand.** It surfaces *skills* (`SKILL.md` files) as context; it does not filter or page the MCP tool list. The offload feature is a one-line text nudge only — it does not call any tool for you.
-- **It does not auto-edit your `settings.json`.** Registering and removing the hooks is always your explicit action.
+- **It does not edit your `settings.json` behind your back.** The hook binaries never write to it. `mr-orchestrate install` does — that is its whole job — but only when you run it, only to entries it records in a manifest, and never over anything it did not write. Run it with `-dry-run` first; it prints the exact plan and writes nothing.
 - **It does not install, modify, or recommend installing skills.** It only ranks and surfaces what you already have.
 - **It does not guarantee a suggestion every prompt.** By design it stays silent when nothing clears the confidence gate — empty output is correct, not a failure.
 - **It depends on a local embedder for the semantic ranking.** If that endpoint is down, the hook only surfaces the single top lexical match when the BM25 evidence is overwhelming (a gate tuned for precision on the gold-set) — otherwise it surfaces nothing rather than guessing.

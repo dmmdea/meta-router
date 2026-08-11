@@ -4,6 +4,29 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.24.0] — 2026-08-11
+
+### Added
+- **`mr-orchestrate install <claude|codex>` and `uninstall <host>` (W7a).** Wires the `UserPromptSubmit` / `SessionStart` hooks, the statusline tee and the `meta-router` MCP server into a host, and reverses exactly that. `-dry-run` reports the plan and writes nothing; `-home` isolates the whole install (config, manifest, backups, tee and delegate all live under it) so it can be exercised on a scratch home.
+- **Ownership is recorded, never inferred.** `<home>/.meta-router/orchestrate/install/<host>.json` is the only authority for what may later be removed. An entry that merely *looks* like ours but is absent from the manifest belongs to whoever wrote it: install refuses to adopt it, uninstall refuses to delete it. The run is all-or-nothing — one conflict refuses everything, and a failure part-way rolls back.
+- **Byte-identical uninstall, and honesty when it is not possible.** A managed file still holding exactly what install left is restored from its pre-install copy byte for byte. A file the operator has since edited keeps their edits and gets only the recorded entries removed, reported as `restore: surgical` — never a byte restore claimed but not performed.
+- **`internal/orch/hostcfg`** — an order-preserving JSON config editor. Untouched members keep their bytes, order, key spelling and scalar spelling; only the edited subtree is re-encoded. Indentation, line terminator (CRLF stays CRLF) and a UTF-8 BOM are all reproduced from the source. Duplicate keys are refused rather than silently collapsed, because which one wins is parser-dependent.
+
+### Fixed / hardened during adversarial review
+Three fresh-context specialists reproduced these against the running code; every one ended in a damaged or unrecoverable operator config.
+- **The host rewrites `settings.json` behind us.** Any `claude` invocation — including a read-only `claude mcp list` — normalises `model` and re-indents the file. Hashing the bytes we wrote recorded a hash that was stale before install returned, so the byte-identical path would have been dead code on every real machine. Hashes are now taken from disk after all steps.
+- **A second install poisoned every later uninstall.** The pre-install backup was overwritten with already-installed bytes while the manifest kept the first install's hash, so the integrity check could never match again and uninstall hard-failed permanently with the config still wired.
+- **An unparseable entry of ours read as "already gone"** — uninstall reported success, deleted the manifest, and left the hook wired with nothing claiming ownership. Absence must be *proved*, so the lookup now has a third answer.
+- **A statusLine present but unreadable blanked the status bar.** The tee needs a command to delegate to; wiring it over a `static` statusLine or the bare-string form recorded an empty delegate and rendered nothing. Both now skip, and say why.
+- **`-home` only isolated the host config**, so a scratch install wrote its manifest, backups, tee and delegate into the operator's real `~/.meta-router` — planting an ownership claim that made the real install refuse.
+- Rollback restores in reverse order (a config referencing a file we created is put back before that file is deleted), reports what it could not undo instead of only warning to stderr, and the report is emitted on failure paths too. The registry undo is probed before it runs, array entries are re-located by ident at removal time rather than by a stale index, and a manifest is validated per step kind before it is acted on.
+
+### Removed
+- `scripts/mr-statusline-tee.js` — the tee is now embedded in `mr-orchestrate` and written out by `install`, so there is one copy instead of a repo script that had to be hand-copied to each machine. It also takes its state dir as an argument rather than reading an environment variable the host process need not carry.
+
+### Complexity
+- B12 budget raised 19560 → 21920. See `docs/complexity-budget.json` for the accounting.
+
 ## [0.23.0] — 2026-08-11
 
 ### Added

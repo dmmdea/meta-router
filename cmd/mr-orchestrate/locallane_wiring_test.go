@@ -22,7 +22,17 @@ func TestMain(m *testing.M) {
 		os.Stdout.WriteString(`{"ok":true,"deferred":false,"result":{"summary":"a gist"},"meta":{}}` + "\n")
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	// The W7a installer delegates every MCP-registry change to the HOST's own
+	// cli. Re-exec of this binary under the name `claude` / `codex` stands in
+	// for those, so the install path is exercised end to end without the real
+	// tools — and, critically, without any chance of a test writing into the
+	// operator's live registry.
+	if os.Getenv("MR_TEST_HOST_STUB") == "1" {
+		os.Exit(runHostStub(os.Args[1:]))
+	}
+	code := m.Run()
+	cleanupHostStub()
+	os.Exit(code)
 }
 
 // TestRunLocalLaneDryRunDoorSelection: a verify-gate node dry-runs through the
