@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.25.0] — 2026-08-11
+
+### Added
+- **`mr-orchestrate report` (W7b)** — the receipts-driven operator dashboard: a pure render of `dispatch.jsonl`. No network, no ledger transaction, no clock. `-days N` windows the view **anchored to the newest receipt's timestamp, never `time.Now()`**, so a fixed log renders byte-identically on every run — the acceptance contract. `-lane` restricts to one lane; `-json` emits the same structure machine-readably.
+- **What it renders:** span + totals (receipts / consults / runs / strategy steps + distinct strategy runs / retries / egress refusals), a per-lane table (runs, strategy steps, tokens in/out, notional and cash USD, deviations, good/bad verdicts, egress denials — strategy steps count into token/spend columns because burn is the table's point), outcome classes, requested-model counts, **the silent-fallback table** (`requested→actual` pairs from `AttributedModels` — the detection signal the dispatch log was designed to carry and until now nothing rendered), rotation reasons, spend-down provenance, unrated-run count, the S2R-10 adherence block (audit definitions, same implementation), and a per-UTC-day activity list.
+- **Honesty about the log itself:** unparseable JSONL lines are counted and rendered as a `WARN` — never silently skipped; an absent log is reported as the normal "no receipts yet" state; an unreadable or torn-read log is a real error, not an empty-but-healthy dashboard (the absent-vs-undetermined trichotomy from W7a, applied at the read layer).
+
+### Complexity
+- B12 budget raised 21920 → 22300 (+387 measured). See `docs/complexity-budget.json` for the accounting.
+
 ## [0.24.0] — 2026-08-11
 
 ### Added
