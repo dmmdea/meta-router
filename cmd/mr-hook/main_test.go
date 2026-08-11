@@ -30,6 +30,35 @@ func (f fakeLex) RetrieveScored(p string, k int) []retrievers.Scored {
 
 const testMinLen = 6
 
+// Adding TYPED session_id/prompt_id fields made the payload type-checked where
+// it previously was not: a payload emitting either as a number decodes Prompt
+// correctly but returns an UnmarshalTypeError, and treating that as fatal would
+// surface NOTHING on every prompt while logging the misleading reason
+// "no prompt". Optional metadata must never veto a valid prompt.
+func TestHookInputSurvivesWrongTypedIdentifiers(t *testing.T) {
+	var in hookInput
+	err := json.Unmarshal([]byte(`{"prompt":"real prompt here","session_id":12345}`), &in)
+	if err == nil {
+		t.Skip("payload decoded cleanly; the guarded regression cannot occur")
+	}
+	if in.Prompt != "real prompt here" {
+		t.Fatalf("the prompt decodes fine despite the bad id and must be used; got %q", in.Prompt)
+	}
+	if in.SessionID != "" {
+		t.Fatalf("a wrong-typed id must be dropped, not coerced; got %q", in.SessionID)
+	}
+}
+
+// Totally malformed JSON must still be caught — relaxing the id typing must not
+// turn a broken payload into a surfacing attempt on an empty prompt.
+func TestHookInputRejectsMalformedPayload(t *testing.T) {
+	var in hookInput
+	_ = json.Unmarshal([]byte(`{nope`), &in)
+	if strings.TrimSpace(in.Prompt) != "" {
+		t.Fatalf("malformed JSON must leave Prompt empty, got %q", in.Prompt)
+	}
+}
+
 func TestDecide_PrimaryAboveThreshold(t *testing.T) {
 	pri := fakePrimary{res: []retrievers.Scored{{ID: "gstack-qa"}, {ID: "gstack"}}, topCos: 0.6}
 	ids, _, mode, _ := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{})

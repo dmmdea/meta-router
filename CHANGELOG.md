@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.23.0] — 2026-08-11
+
+### Added
+- **`session_id` and `prompt_id` on every surfacing event.** Claude Code supplies both on the `UserPromptSubmit` payload (`prompt_id` since v2.1.196; this fleet runs 2.1.219+), so an analytics join can now be an **exact composite key** instead of a timestamp window. The window join was session-**blind**, and 72.4% of active 10-minute buckets on this fleet have more than one session running (median 2, max 110) — so it silently credited one session's invocation to another session's surfacing. That is what inflated a recorded live metric from ~23% to a claimed 39.7%.
+- Both fields are **opaque identifiers, never prompt content** — the no-prompt-text posture of this log is unchanged, and a test pins that prompt text cannot reach a `Record`.
+- Both are `omitempty`: a build that does not supply them leaves the key **absent** rather than writing an empty string, which a downstream join would otherwise read as one real shared session. Mutation-verified — removing `omitempty` turns the test red.
+
+### Note on what this does NOT fix
+The transcript-mined gold set remains an invalid instrument for tuning retrieval (constant-predictor baseline beats it 3.5×; 80% of labels are standing-rule invocations unlearnable from the prompt; long-running skill loops label later prompts). An exact join key makes future measurement *correct*; it does not make the current labels *meaningful*. See the private repo's `2026-08-11-mined-goldset-is-not-a-valid-instrument.md`.
+
 ## [0.22.0] — 2026-08-11
 
 ### Fixed

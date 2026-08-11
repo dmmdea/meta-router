@@ -12,7 +12,22 @@ import (
 )
 
 type Record struct {
-	TsUnix       int64    `json:"ts_unix"`
+	TsUnix int64 `json:"ts_unix"`
+	// SessionID and PromptID make analytics joins EXACT. Without them the only
+	// key was a timestamp window, which is session-blind: measured on this
+	// fleet, 72.4% of active 10-minute buckets have more than one session
+	// running (median 2, max 110), so a window join silently credits one
+	// session's invocation to another session's surfacing — that inflated a
+	// recorded live metric from ~23% to a claimed 39.7%.
+	//
+	// Claude Code supplies both on the UserPromptSubmit payload (prompt_id
+	// since v2.1.196). They are OPAQUE IDENTIFIERS, never prompt content, so
+	// the no-prompt-text posture of this log is unchanged. Both are omitempty:
+	// a build that does not supply them must leave the field ABSENT rather than
+	// write an empty string, which a downstream join would otherwise treat as
+	// one real shared session.
+	SessionID    string   `json:"session_id,omitempty"`
+	PromptID     string   `json:"prompt_id,omitempty"`
 	PromptHash   string   `json:"prompt_hash"`
 	PromptLen    int      `json:"prompt_len"`
 	Surfaced     []string `json:"surfaced"`

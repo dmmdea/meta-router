@@ -61,6 +61,17 @@ func main() {
 	}
 
 	rep := usagelog.JoinOutcomes(recs, outs, time.Duration(*windowMin)*time.Minute)
+	// The hit-rate below is a TIME-WINDOW join and is session-BLIND: outcomes.jsonl
+	// carries no session id, so an invocation in one session can be credited to a
+	// surfacing in another. Measured on a real fleet, 72.4% of active 10-minute
+	// buckets had more than one session running (median 2, max 110), and this
+	// inflated a recorded figure from ~23% to a claimed 39.7%. mr-hook now logs
+	// session_id/prompt_id, but the outcome side does not yet, so the exact join
+	// cannot be formed here. Say so where the number is printed, not only in a
+	// changelog nobody reads while reading output.
+	fmt.Printf("NOTE: hit-rate below is a session-BLIND time-window join and reads HIGH when\n" +
+		"      sessions run concurrently. Treat it as an upper bound until outcomes.jsonl\n" +
+		"      carries a session id.\n\n")
 	fmt.Printf("usage records: %d\nsurfacings (>=1 skill): %d\ninvocations logged: %d\nhits (surfaced skill invoked within %dm): %d\nhit-rate: %.3f\n",
 		rep.Records, rep.Surfacings, len(outs), *windowMin, rep.Hits, rep.HitRate())
 
