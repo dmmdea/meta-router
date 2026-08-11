@@ -22,6 +22,11 @@ import (
 
 type hookInput struct {
 	Prompt string `json:"prompt"`
+	// Claude Code supplies these on the UserPromptSubmit payload (prompt_id
+	// since v2.1.196). Logging them turns a session-blind timestamp join into
+	// an exact composite key — see usagelog.Record. Opaque ids, not content.
+	SessionID string `json:"session_id"`
+	PromptID  string `json:"prompt_id"`
 }
 
 type scoredRetriever interface {
@@ -381,6 +386,7 @@ func main() {
 	}
 	rec.PromptHash = usagelog.HashPrompt(in.Prompt)
 	rec.PromptLen = len(in.Prompt)
+	rec.SessionID, rec.PromptID = in.SessionID, in.PromptID
 
 	ip := *indexPath
 	if ip == "" {
