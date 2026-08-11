@@ -4,6 +4,24 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.0] — 2026-08-11
+
+### Fixed
+- **Skills with no `name:` in frontmatter are no longer silently dropped.** The skills walk called `ParseSkillMD`, which errors when frontmatter has no `name` — while the walk overwrites `s.Name` with the DIRECTORY name three lines later. So the requirement never changed a result; it only excluded valid skills. The Skill tool resolves a skill by its directory, and now the catalog agrees. Measured: this dropped **all 11 `searchfit-seo` skills**, every one of them invocable. A file with no frontmatter fence at all still errors and is still skipped.
+- **A pack no longer mints IDs for skills it does not own.** A marketplace cache dir routinely holds the WHOLE marketplace's skills while the installed plugin owns a subset — `anthropic-agent-skills/document-skills/<ver>/skills` holds 17, but the installed `document-skills` plugin owns only 4 (`xlsx`, `docx`, `pptx`, `pdf`). Harvesting the dir under one pack minted 13 `document-skills:*` IDs the Skill tool cannot invoke, and because they sort alphabetically ahead of the real owners they won description-dedup and **suppressed** `frontend-design:frontend-design` and `skill-creator:skill-creator`. `ownedSkillDirs` now reads the authoritative `.claude-plugin/marketplace.json`. It is deliberately conservative: it filters only when that manifest exists, parses, and names this pack — no manifest, unreadable manifest, or a pack the manifest never mentions all mean "no authority", so those roots behave exactly as before.
+
+### Measured effect on the live index
+Same total (199 → 199), completely different composition — **13 uninvocable IDs replaced by 13 real ones**:
+
+| out (cannot be invoked) | in (real, invocable) |
+|---|---|
+| `document-skills:` algorithmic-art, brand-guidelines, canvas-design, claude-api, doc-coauthoring, frontend-design, internal-comms, mcp-builder, skill-creator, slack-gif-creator, theme-factory, web-artifacts-builder, webapp-testing | `frontend-design:frontend-design`, `skill-creator:skill-creator`, and the 11 `searchfit-seo:*` skills |
+
+`frontend-design:frontend-design` alone accounts for 7 invocations in the mined transcript corpus — it was being invoked while the router structurally could not surface it.
+
+### Known gaps (recorded, not fixed here)
+- **Commands and agents are still unindexed.** `code-review` and its siblings are plugin *commands* (`commands/*.md`), not skills, so the skills walk correctly cannot see them. The flat-root harvest capability shipped in v0.17.0 but is not enabled in `roots.json` — enabling it is an operator composition decision, not a code change.
+
 ## [0.21.0] — 2026-08-11
 
 ### Added

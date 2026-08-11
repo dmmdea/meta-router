@@ -3,9 +3,11 @@ package catalog
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -245,6 +247,59 @@ func Dedup(skills []Skill) []Skill {
 	return DedupByID(DedupByDescription(skills))
 }
 
+// marketplaceFile is the per-plugin ownership manifest a marketplace ships at
+// <installPath>/.claude-plugin/marketplace.json. Only the fields we need.
+type marketplaceFile struct {
+	Plugins []struct {
+		Name   string   `json:"name"`
+		Skills []string `json:"skills"`
+	} `json:"plugins"`
+}
+
+// ownedSkillDirs returns the set of skill directory names that `pack` actually
+// owns, or nil when there is no authoritative data (meaning: do not filter).
+//
+// A marketplace cache dir routinely holds the WHOLE marketplace's skills while
+// the installed plugin owns only a subset. Harvesting the dir under one pack
+// name mints IDs the Skill tool cannot invoke — and because those phantoms are
+// harvested under an alphabetically-earlier pack, they win description-dedup
+// and SUPPRESS the correctly-attributed copies. Measured 2026-08-11: 13 phantom
+// `document-skills:*` IDs, with the real `frontend-design:frontend-design` and
+// `skill-creator:skill-creator` lost to them.
+//
+// Deliberately conservative — it filters ONLY when the manifest exists, parses,
+// and names this pack. No manifest, unreadable manifest, or a manifest that
+// never mentions this pack all mean "no authority", so nothing is filtered and
+// behavior is exactly as before.
+func ownedSkillDirs(skillsRoot, pack string) map[string]bool {
+	// The manifest sits beside the skills dir, at the plugin's install root.
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(skillsRoot), ".claude-plugin", "marketplace.json"))
+	if err != nil {
+		return nil
+	}
+	var mf marketplaceFile
+	if json.Unmarshal(data, &mf) != nil {
+		return nil
+	}
+	owned := make(map[string]bool)
+	declared := false
+	for _, pl := range mf.Plugins {
+		if pl.Name != pack {
+			continue
+		}
+		declared = true
+		for _, s := range pl.Skills {
+			if b := path.Base(strings.TrimSuffix(strings.ReplaceAll(s, "\\", "/"), "/")); b != "" && b != "." {
+				owned[b] = true
+			}
+		}
+	}
+	if !declared || len(owned) == 0 {
+		return nil // no authority over this pack — harvest everything
+	}
+	return owned
+}
+
 // SkipDirName reports whether an entire directory subtree must be excluded
 // from harvest: hidden dirs (".agents", ".git", …) hold pack-internal copies
 // never exposed to the Skill tool; temp_git_*/temp_subdir_* are the plugin
@@ -315,6 +370,7 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 			continue
 		}
 		cleanRoot := filepath.Clean(root.Path)
+		owned := ownedSkillDirs(cleanRoot, root.Pack)
 		var hs []harvested
 		_ = filepath.WalkDir(cleanRoot, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -329,7 +385,23 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 			if d.Name() != "SKILL.md" {
 				return nil
 			}
-			s, perr := ParseSkillMD(p)
+			// Ownership filter: skip a skill this pack does not own.
+			if owned != nil {
+				dn := filepath.Base(filepath.Dir(p))
+				if !owned[dn] {
+					return nil
+				}
+			}
+			// parseFrontmatterMD, NOT ParseSkillMD: a `name:` field is not
+			// required for a skill to be real or invocable. The Skill tool
+			// resolves a skill by its DIRECTORY, and this walk agrees — it
+			// overwrites s.Name with dirName a few lines below regardless. So
+			// the name requirement changed nothing about the result and only
+			// ever excluded valid skills: measured 2026-08-11, it silently
+			// dropped all 11 searchfit-seo skills, every one of them invocable.
+			// A file with no frontmatter fence at all still errors here and is
+			// still skipped.
+			s, perr := parseFrontmatterMD(p)
 			if perr != nil {
 				return nil // skip bad
 			}
