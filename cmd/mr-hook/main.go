@@ -380,7 +380,17 @@ func main() {
 		return
 	}
 	var in hookInput
-	if err := json.Unmarshal(raw, &in); err != nil || strings.TrimSpace(in.Prompt) == "" {
+	// Gate on the PROMPT, not on the decode error. session_id/prompt_id are
+	// optional metadata and must never be able to veto a valid prompt: they are
+	// typed `string`, so a payload emitting either as a number or object yields
+	// an UnmarshalTypeError even though Prompt decoded fine — and treating that
+	// as fatal would surface NOTHING on every prompt while logging the
+	// misleading reason "no prompt". Before these fields existed they were
+	// unknown keys and were skipped untyped, so making them fatal would be a
+	// regression introduced by the very change that adds them. Totally
+	// malformed JSON still leaves Prompt empty and is still caught below.
+	_ = json.Unmarshal(raw, &in)
+	if strings.TrimSpace(in.Prompt) == "" {
 		rec.Err = "no prompt"
 		return
 	}

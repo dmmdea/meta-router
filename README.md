@@ -183,7 +183,7 @@ Key properties:
 - **The gate uses the top raw cosine** as a confidence floor: a prompt with no good semantic match surfaces nothing, which is what keeps the hook quiet and trustworthy.
 - **Fail-open is absolute.** No index, malformed input, or blown deadline resolve to "inject nothing, exit 0." A cold/dead embedder fails the dial in ~200 ms and drops to the precision-gated BM25 fallback — tuned on the gold-set for zero wrong surfacings (a wrong fallback surfacing is worse than silence).
 - **Hash-diff refresh** keeps the index current: each entry stores a hash of exactly the embedded text, so `refresh` re-embeds only what changed — with a status line per run in `refresh.log`, a >30% mass-removal guard, and a single dated `.bak` of the replaced index.
-- **Privacy:** the usage log (`~/.meta-router/usage.jsonl`) records a SHA-256 hash of the prompt, its length, which skills were surfaced, the top cosine, latency, and the decision mode — never the raw prompt.
+- **Privacy:** the usage log (`~/.meta-router/usage.jsonl`) records a SHA-256 hash of the prompt, its length, the `session_id`/`prompt_id` Claude Code supplies on the hook payload, which skills were surfaced, the top cosine, latency, and the decision mode — never the raw prompt. Note that `session_id` is the filename of the session transcript, which does contain prompt text: see [SECURITY.md](SECURITY.md) before sharing the log.
 
 ## Requirements
 

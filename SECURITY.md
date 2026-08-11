@@ -19,8 +19,17 @@ This repo ships **two** tools with different data boundaries. Read the one you r
 
 - **It runs entirely on your machine.** Prompt text is sent only to the local embedding
   endpoint you configure — never to any third-party or cloud service.
-- **No raw prompts are persisted.** The usage log (`~/.meta-router/usage.jsonl`) stores only a
-  SHA-256 hash of the prompt plus its length — never the raw text.
+- **No raw prompts are persisted.** The usage log (`~/.meta-router/usage.jsonl`) stores a
+  SHA-256 hash of the prompt plus its length — never the raw text. It also records the
+  `session_id` and `prompt_id` that Claude Code supplies on the hook payload, the skills
+  surfaced, the top cosine, latency and the decision mode. Those two identifiers are opaque
+  and carry no prompt content.
+  **Know what `session_id` is before you share this file, though:** Claude Code names each
+  session transcript `~/.claude/projects/<project>/<session_id>.jsonl`, and those transcripts
+  DO contain verbatim prompt text. So the log still holds no prompt text, but it now holds a
+  key into text stored elsewhere on the same machine. On your own machine that changes
+  nothing — the transcript is already readable. If you export or share `usage.jsonl`, strip
+  `session_id` unless you intend the recipient to be able to look prompts up.
 - **Fail-open by design.** On any error, timeout, or cold embedder the hook surfaces nothing
   and exits cleanly, so it can never block or break a prompt.
 - **It does not edit your `settings.json`.** Registering and removing the hooks is always your

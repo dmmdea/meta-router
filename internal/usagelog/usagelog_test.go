@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -78,19 +79,33 @@ func TestRecordCarriesSessionAndPromptID(t *testing.T) {
 }
 
 // The privacy posture is the reason this log is trustworthy: names, numbers and
-// opaque ids only. A Record must never be able to carry prompt text.
-func TestRecordStillCarriesNoPromptText(t *testing.T) {
-	b, err := json.Marshal(Record{
-		PromptHash: HashPrompt("a very secret prompt"),
-		PromptLen:  20,
-		SessionID:  "sess-1",
-		PromptID:   "prompt-1",
-	})
-	if err != nil {
-		t.Fatal(err)
+// opaque ids only, never prompt text.
+//
+// This is an ALLOWLIST over Record's json tags, not an assertion that some
+// sample string is absent. A value-based version is tautological — nothing ever
+// set the field it looks for, so no change to Record can turn it red, and the
+// one thing it claims to prevent (someone adding a `Prompt` field) sails
+// straight past it. Adding ANY field to Record must fail this test and force a
+// deliberate decision about whether it can carry content.
+func TestRecordFieldsAreAllowlisted(t *testing.T) {
+	allowed := map[string]bool{
+		"ts_unix": true, "session_id": true, "prompt_id": true,
+		"prompt_hash": true, "prompt_len": true, "surfaced": true,
+		"top_cosine": true, "latency_ms": true, "mode": true, "err": true,
+		"nudge_offload": true, "quota_hint": true, "cands": true,
 	}
-	if strings.Contains(string(b), "a very secret prompt") {
-		t.Fatalf("prompt text must never reach the log: %s", b)
+	rt := reflect.TypeOf(Record{})
+	for i := 0; i < rt.NumField(); i++ {
+		tag := rt.Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		if !allowed[name] {
+			t.Fatalf("new Record field %q (%s) is not allowlisted — confirm it cannot carry prompt text, "+
+				"update SECURITY.md and README.md, then add it here",
+				name, rt.Field(i).Name)
+		}
 	}
 }
 
