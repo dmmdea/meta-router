@@ -92,3 +92,29 @@ func TestGLMPacingDefaultsAndGate(t *testing.T) {
 		t.Fatalf("explicit operator off-switch must be honored: %+v", c)
 	}
 }
+
+// W6: the local_max_per_min three-way sentinel — absent → 20, hand-edit 0 →
+// 20 (damage, not intent), negative → limiter explicitly OFF. Review proved
+// losing the backfill turned the limiter off fleet-wide with a green suite
+// (every deployed config predates the field).
+func TestLocalMaxPerMinBackfill(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load(p).LocalMaxPerMin; got != 20 {
+		t.Fatalf("absent field must default 20, got %d", got)
+	}
+	if err := os.WriteFile(p, []byte(`{"local_max_per_min":0}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load(p).LocalMaxPerMin; got != 20 {
+		t.Fatalf("hand-edit 0 must backfill to 20, got %d", got)
+	}
+	if err := os.WriteFile(p, []byte(`{"local_max_per_min":-1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load(p).LocalMaxPerMin; got != -1 {
+		t.Fatalf("negative = explicit OFF must survive Load, got %d", got)
+	}
+}

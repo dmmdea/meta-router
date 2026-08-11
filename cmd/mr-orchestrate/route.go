@@ -95,8 +95,18 @@ func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now 
 		}
 		for lane, ls := range out {
 			if on, until := exclusion.Excluded(exc, lane, now); on {
-				ls.State = "unavailable"
-				if ls.ResumeAt.IsZero() || until.Before(ls.ResumeAt) {
+				// Never downgrade a STRONGER masked state's label: a 1313
+				// hard_stop rendered as a transient "unavailable" hides the
+				// account-loss signal from the route JSON. Both are masked
+				// either way; only the surfaced name differs.
+				if ls.State != "hard_stop" && ls.State != "exhausted" {
+					ls.State = "unavailable"
+				}
+				// The lane must satisfy BOTH constraints to resume: an
+				// admission-exhausted lane that is also health-excluded cannot
+				// come back before the LATER of the two — advertising the
+				// earlier one would relegate work to a premature retry time.
+				if until.After(ls.ResumeAt) {
 					ls.ResumeAt = until
 				}
 				out[lane] = ls

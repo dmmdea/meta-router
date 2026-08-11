@@ -40,6 +40,9 @@ func Exclusions() string  { return filepath.Join(StateDir(), "exclusions.json") 
 func LocalLimiter() string {
 	return filepath.Join(StateDir(), "local-limiter.json") // W6: local-lane sliding-window stamps
 }
+func ResilAlert() string {
+	return filepath.Join(StateDir(), "resil-alert.json") // W6: persistence-failure latch (stderr is null-wired on the strategy path)
+}
 
 // Strategy state (slice 3): per-dispatch dirs under StateDir()/strategy/<id>/
 // hold state.json (durable state-as-bus + crash-resume), journal.jsonl (event

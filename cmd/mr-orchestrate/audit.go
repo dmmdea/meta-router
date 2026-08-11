@@ -30,7 +30,12 @@ type ReceiptsSummary struct {
 	EgressDenied       int            `json:"egress_denied"`        // exports the data-boundary gate refused
 	EgressDeniedByLane map[string]int `json:"egress_denied_by_lane,omitempty"`
 	Consults           int            `json:"consults"` // route_recommendation receipts (context)
-	Note               string         `json:"note"`
+	// LocalDenials counts sliding-window limiter refusals (W6): nothing ran,
+	// so — exactly like the egress carve-out — counting them as run receipts
+	// would credit the local lane with work it never did and dilute
+	// coverage_pct. Identified by rate_limit + rate_limit_origin "local".
+	LocalDenials int    `json:"local_denials,omitempty"`
+	Note         string `json:"note"`
 }
 
 // originTagged reports whether an origin counts toward S2R-1 coverage. Valid
@@ -69,6 +74,13 @@ func summarizeReceipts(recs []dispatch.Record) ReceiptsSummary {
 				s.EgressDeniedByLane = map[string]int{}
 			}
 			s.EgressDeniedByLane[r.Lane]++
+			continue
+		}
+		// W6: a local limiter denial ran nothing — same carve-out as a refused
+		// export (audit 2026-07-25's premise: nothing-ran receipts must not
+		// enter the run aggregates OR the coverage denominator).
+		if r.OutcomeClass == "rate_limit" && r.RateLimitOrigin == "local" {
+			s.LocalDenials++
 			continue
 		}
 		// S3R-4: a strategy DAG step is INTERNAL orchestration, not an

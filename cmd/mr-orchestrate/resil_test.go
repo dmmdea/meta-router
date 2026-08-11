@@ -18,6 +18,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/router"
 	"github.com/dmmdea/meta-router/internal/orch/slidewin"
 )
 
@@ -131,6 +132,163 @@ func TestLocalLimiterDeniesAndRelegates(t *testing.T) {
 	}
 	if recs[0].OutcomeClass != "rate_limit" || recs[0].RateLimitOrigin != "local" {
 		t.Fatalf("receipt must be typed local: %+v", recs[0])
+	}
+}
+
+// W6 canary (breaker PRODUCER side): the class→action mapping of the
+// breaker's only writer. Review proved the entire noteLaneHealth wiring could
+// be deleted with a green suite — the arming path had zero coverage.
+func TestNoteLaneHealthClassRouting(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+
+	noteLaneHealth(false, "codex", "spawn_error", wnow)
+	s, _ := exclusion.Load(exclusionsPath())
+	if s["codex"].Fails != 1 {
+		t.Fatal("spawn_error must record a qualifying failure on any lane")
+	}
+
+	noteLaneHealth(false, "claude", "api_error", wnow)
+	s, _ = exclusion.Load(exclusionsPath())
+	if _, tracked := s["claude"]; tracked {
+		t.Fatal("cloud api_error is the VENDOR's incident and must never arm the infra breaker")
+	}
+
+	noteLaneHealth(false, "local", "api_error", wnow)
+	s, _ = exclusion.Load(exclusionsPath())
+	if s["local"].Fails != 1 {
+		t.Fatal("local api_error is a harness fault and must arm")
+	}
+
+	noteLaneHealth(false, "codex", "rate_limit", wnow)
+	s, _ = exclusion.Load(exclusionsPath())
+	if s["codex"].Fails != 1 {
+		t.Fatal("rate_limit is quota, never an adapter failure")
+	}
+
+	noteLaneHealth(false, "codex", "ok", wnow)
+	s, _ = exclusion.Load(exclusionsPath())
+	if _, tracked := s["codex"]; tracked {
+		t.Fatal("ok must clear the entry")
+	}
+
+	// ok on an untracked lane skips the write entirely.
+	before, _ := os.ReadFile(exclusionsPath())
+	noteLaneHealth(false, "glm", "ok", wnow)
+	after, _ := os.ReadFile(exclusionsPath())
+	if !bytes.Equal(before, after) {
+		t.Fatal("ok on an untracked lane must skip the write")
+	}
+
+	// The kill-switch disarms RECORDING, not just consumption.
+	noteLaneHealth(true, "glm", "spawn_error", wnow)
+	s, _ = exclusion.Load(exclusionsPath())
+	if _, tracked := s["glm"]; tracked {
+		t.Fatal("exclusion_off must disarm the recorder")
+	}
+
+	// A corrupt state file is re-materialized CLEAN by the next update — even
+	// one that changes nothing — never left to warn forever.
+	if err := os.WriteFile(exclusionsPath(), []byte("{corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	noteLaneHealth(false, "glm", "ok", wnow) // untracked + no-op, but corrupt → repair
+	if _, warn := exclusion.Load(exclusionsPath()); warn != "" {
+		t.Fatalf("corrupt state must be repaired by the next update: %q", warn)
+	}
+}
+
+// W6 canary (breaker end-to-end): two real spawn_errors through runLocalLane
+// arm the breaker and mask the lane — the producer wiring itself, not a
+// hand-seeded state file.
+func TestAdapterFailuresArmBreakerEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MR_ORCH_STATE", dir)
+	cb, _ := json.Marshal(map[string]any{
+		"local_offload_bin": filepath.Join(dir, "no-such-binary-w6"), "local_max_per_min": -1})
+	if err := os.WriteFile(configPath(), cb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	for i := 0; i < 2; i++ { // threshold 2
+		if _, err := runLocalLane(&out, "p", "doc-summarize", "gemma4-cascade", "", 5, true, "cli", "", recFields{}, strategyFields{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ls := laneStates(nil, fuses.Seed(), orchcfg.Defaults(), time.Now().UTC().Add(time.Second))
+	if ls["local"].State != "unavailable" {
+		t.Fatalf("two spawn_errors through runLocalLane must arm the breaker: %+v", ls["local"])
+	}
+}
+
+// W6 canary (limiter PRODUCER side): the stamp an allowed dispatch persists is
+// what denies the next one — review proved dropping the Save left the suite
+// green, making the limiter a production no-op.
+func TestLimiterPersistsStampsAcrossRuns(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MR_ORCH_STATE", dir)
+	cb, _ := json.Marshal(map[string]any{
+		"local_offload_bin": filepath.Join(dir, "no-such-binary-w6"), "local_max_per_min": 1})
+	if err := os.WriteFile(configPath(), cb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code, err := runLocalLane(&out, "p", "doc-summarize", "gemma4-cascade", "", 5, true, "cli", "", recFields{}, strategyFields{}); err != nil || code == exitDeferred {
+		t.Fatalf("first dispatch must be allowed (spawn_error is fine): code=%d err=%v", code, err)
+	}
+	out.Reset()
+	code, err := runLocalLane(&out, "p", "doc-summarize", "gemma4-cascade", "", 5, true, "cli", "", recFields{}, strategyFields{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != exitDeferred || !strings.Contains(out.String(), `"rate_limit"`) {
+		t.Fatalf("second dispatch must be denied by the stamp the FIRST persisted: code=%d out=%s", code, out.String())
+	}
+}
+
+// The exhausted+excluded merge takes the LATER resume: a lane must satisfy
+// BOTH constraints, and advertising the earlier one sends a scheduled resumer
+// to a premature retry (review 2026-08-12). The stronger masked label also
+// survives — an exclusion must not rename hard_stop/exhausted.
+func TestExclusionResumeMergeTakesLater(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	short := wnow.Add(time.Minute)
+	s := exclusion.Set{"codex": {Fails: 2, Until: short, LastFail: wnow, LastNote: "parse_error"}}
+	if err := exclusion.Save(exclusionsPath(), s); err != nil {
+		t.Fatal(err)
+	}
+	far := wnow.Add(5 * time.Hour)
+	snap := []ledger.Bucket{{Lane: "codex", Window: ledger.Win5h, UsedPct: 100,
+		Source: "provider", ResetsAt: far}}
+	ls := laneStates(snap, fuses.Seed(), orchcfg.Defaults(), wnow)
+	if ls["codex"].State != "exhausted" {
+		t.Fatalf("exclusion must not downgrade the exhausted label: %+v", ls["codex"])
+	}
+	if !ls["codex"].ResumeAt.Equal(far) {
+		t.Fatalf("resume must be the LATER of admission and exclusion: got %v want %v", ls["codex"].ResumeAt, far)
+	}
+}
+
+// W6 canary (knob wiring): incident_mode_on must actually reach the router
+// through buildRouteDecision — review proved severing `Incident:
+// cfg.IncidentModeOn` left the suite green, and a knob that ships OFF is
+// discovered dead exactly when the operator needs it. Seed-table Workhorse
+// candidates are glm+claude; both throttled = a strict candidate majority.
+func TestIncidentKnobReachesRouter(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	far := wnow.Add(4 * time.Hour)
+	snap := []ledger.Bucket{
+		{Lane: "glm", Window: ledger.Win5h, UsedPct: 85, Source: "provider", ResetsAt: far},
+		{Lane: "claude", Window: ledger.Win5h, UsedPct: 85, Source: "provider", ResetsAt: far},
+	}
+	off := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.Workhorse, 0, wnow, spendDownReq{})
+	if off.Incident {
+		t.Fatalf("knob off must never engage incident mode: %+v", off)
+	}
+	on := orchcfg.Defaults()
+	on.IncidentModeOn = true
+	d := buildRouteDecision(on, fuses.Seed(), snap, router.Workhorse, 0, wnow, spendDownReq{})
+	if !d.Incident {
+		t.Fatalf("incident_mode_on with a pressured candidate majority must engage and be recorded: %+v", d)
 	}
 }
 

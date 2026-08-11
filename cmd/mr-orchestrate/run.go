@@ -499,7 +499,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	}
 	sf.stamp(&drec)
 	warnIf(dispatch.Append(dispatchPath(), drec), "dispatch append")
-	noteLaneHealth("claude", o.Class, now) // W6 breaker
+	noteLaneHealth(cfg.ExclusionOff, "claude", o.Class, now) // W6 breaker
 	if len(raw) > 0 {
 		fmt.Fprintln(out, string(raw))
 	} else {

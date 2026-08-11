@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/orch/lockfile"
 )
 
 // Entry is one lane's breaker state.
@@ -37,16 +39,23 @@ type Entry struct {
 // Set maps lane → breaker state.
 type Set map[string]Entry
 
-// Options are the backoff priors. Config data, never constants of nature:
-// zero values fall back to Defaults() (the no-blog-lore-constants rule).
+// Options are the backoff priors. Zero values fall back to Defaults(). Today
+// every production caller passes Defaults() verbatim — the struct exists so a
+// future orchcfg knob is a field addition, not a signature change; it is not
+// yet operator-configurable.
 type Options struct {
 	Threshold int           // failures before the first exclusion (a single transient must not brake a lane)
 	Base      time.Duration // first exclusion length
 	Cap       time.Duration // backoff ceiling
+	// DecayAfter: a failure older than this no longer counts toward the
+	// consecutive streak — "consecutive" means within a bounded span of
+	// wall-time, not across months on a rarely-used lane (one January
+	// spawn_error plus one in June must not instantly exclude).
+	DecayAfter time.Duration
 }
 
 func Defaults() Options {
-	return Options{Threshold: 2, Base: time.Minute, Cap: 30 * time.Minute}
+	return Options{Threshold: 2, Base: time.Minute, Cap: 30 * time.Minute, DecayAfter: 6 * time.Hour}
 }
 
 func (o Options) normalized() Options {
@@ -59,6 +68,9 @@ func (o Options) normalized() Options {
 	}
 	if o.Cap <= 0 {
 		o.Cap = d.Cap
+	}
+	if o.DecayAfter <= 0 {
+		o.DecayAfter = d.DecayAfter
 	}
 	return o
 }
@@ -86,6 +98,9 @@ func RecordFailure(s Set, lane, note string, now time.Time, opt Options) Set {
 	}
 	opt = opt.normalized()
 	e := s[lane]
+	if !e.LastFail.IsZero() && now.Sub(e.LastFail) > opt.DecayAfter {
+		e.Fails = 0 // the streak went quiet — this failure starts a new one
+	}
 	e.Fails++
 	e.LastFail = now
 	e.LastNote = note
@@ -118,9 +133,13 @@ func Excluded(s Set, lane string, now time.Time) (bool, time.Time) {
 	return false, time.Time{}
 }
 
-// Reason is the human string surfaced on a masked lane.
+// Reason is the human string surfaced for a lane's breaker state — the one
+// place the fail count, failing class, and self-heal instant are legible.
 func Reason(s Set, lane string) string {
-	e := s[lane]
+	e, ok := s[lane]
+	if !ok {
+		return lane + " is not breaker-tracked"
+	}
 	return fmt.Sprintf("excluded after %d adapter failure(s) (last: %s); self-heals at %s",
 		e.Fails, e.LastNote, e.Until.UTC().Format(time.RFC3339))
 }
@@ -157,8 +176,10 @@ func Load(path string) (Set, string) {
 	return s, ""
 }
 
-// Save persists the set atomically (tmp + rename) so a torn write can never
-// produce the corrupt-state warning path on the next load.
+// Save persists the set atomically. The tmp name is pid-unique (two
+// concurrent writers must never share one), and the rename retries briefly:
+// on Windows a rename fails with "Access is denied" while ANY reader holds
+// the destination open, and this file is read on every route consult.
 func Save(path string, s Set) error {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -167,9 +188,41 @@ func Save(path string, s Set) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	var rerr error
+	for i := 0; i < 5; i++ {
+		if rerr = os.Rename(tmp, path); rerr == nil {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = os.Remove(tmp)
+	return rerr
+}
+
+// Update is the LOCKED read-modify-write for the breaker state — the only
+// safe way to mutate it when parallel dispatches run (strategy concurrency
+// defaults to 2; an unlocked Load-mutate-Save loses updates silently, e.g. a
+// concurrent heal being overwritten by a stale armed set). fn returns the new
+// set and whether it changed anything. A corrupt/unreadable existing file is
+// re-materialized CLEAN on the next Update even when fn changed nothing —
+// otherwise the healthy path never repairs it and the corrupt-state warning
+// repeats forever. The load warning (if any) is returned either way.
+func Update(path string, fn func(Set) (Set, bool)) (string, error) {
+	release, err := lockfile.Acquire(path+".lock", 2*time.Second, 30*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	s, warn := Load(path)
+	out, changed := fn(s)
+	if changed || warn != "" {
+		if err := Save(path, out); err != nil {
+			return warn, err
+		}
+	}
+	return warn, nil
 }

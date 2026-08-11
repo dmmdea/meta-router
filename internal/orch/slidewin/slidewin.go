@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/orch/lockfile"
 )
 
 // Window is the persisted state: dispatch instants inside the sliding span.
@@ -67,7 +69,8 @@ func Load(path string) (Window, string) {
 	return w, ""
 }
 
-// Save persists atomically (tmp + rename), like exclusion.Save.
+// Save persists atomically. Pid-unique tmp + brief rename retry, for the same
+// Windows rename-under-reader reason as exclusion.Save.
 func Save(path string, w Window) error {
 	b, err := json.Marshal(w)
 	if err != nil {
@@ -76,9 +79,39 @@ func Save(path string, w Window) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	var rerr error
+	for i := 0; i < 5; i++ {
+		if rerr = os.Rename(tmp, path); rerr == nil {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = os.Remove(tmp)
+	return rerr
+}
+
+// Decide is the LOCKED admit-or-deny for one dispatch: load, prune, decide,
+// and persist the new stamp — all under the cross-process lock, so two
+// concurrent dispatches can never both pass at limit−1 (the lost-update race
+// an unlocked read-modify-write allows is precisely a burst, the limiter's
+// target case). The load warning (if any) is returned for surfacing; a
+// corrupt file is replaced by clean state on the next allowed dispatch.
+func Decide(path string, now time.Time, limit int, span time.Duration) (ok bool, retryAt time.Time, warn string, err error) {
+	release, lerr := lockfile.Acquire(path+".lock", 2*time.Second, 30*time.Second)
+	if lerr != nil {
+		return false, time.Time{}, "", lerr
+	}
+	defer release()
+	w, warn := Load(path)
+	ok, retryAt, next := Allow(w, now, limit, span)
+	if ok || warn != "" {
+		if serr := Save(path, next); serr != nil {
+			return ok, retryAt, warn, serr
+		}
+	}
+	return ok, retryAt, warn, nil
 }

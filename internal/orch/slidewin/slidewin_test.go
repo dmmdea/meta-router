@@ -35,10 +35,12 @@ func TestSlidingWindowLimiter(t *testing.T) {
 	if len(w.Stamps) != limit {
 		t.Fatalf("a denial must not record a stamp: %d", len(w.Stamps))
 	}
-	// SLIDING: at retryAt the oldest has aged out — admitted again.
-	ok, _, w = Allow(w, retryAt.Add(time.Millisecond), limit, span)
+	// SLIDING: retryAt is documented as "the earliest moment a retry can
+	// succeed" — probe at EXACTLY retryAt, not a tick later, so a boundary
+	// inversion in the prune cannot make the API's own contract lie.
+	ok, _, w = Allow(w, retryAt, limit, span)
 	if !ok {
-		t.Fatal("after the oldest stamp ages out the window must admit")
+		t.Fatal("a retry at exactly retryAt must be admitted (the contract's own words)")
 	}
 	// And stamps older than span are pruned from persisted state.
 	for _, s := range w.Stamps {
