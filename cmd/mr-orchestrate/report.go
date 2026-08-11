@@ -23,6 +23,13 @@ import (
 // identical report on every run, forever. That is the acceptance contract:
 // renders from real receipts; no network; deterministic on fixed input.
 //
+// The second contract is that the dashboard's CLEAN states are falsifiable
+// (silent-failure review, 2026-08-11): unparseable lines are counted and
+// rendered, timestamp-less receipts are counted rather than silently
+// window-filtered, and the silent-fallback detector reports its own coverage
+// (how many executed receipts even carry attribution) so a broken capture
+// pipeline cannot render as "all clear".
+//
 // Taxonomy is audit.go's (S2R-1/S3R-4): runs exclude consults, egress
 // refusals, and strategy steps. The LANE table is deliberately broader — it
 // aggregates everything that consumed tokens (runs AND strategy steps),
@@ -45,51 +52,75 @@ type LaneReport struct {
 
 // Report is the full dashboard. Maps marshal with sorted keys (Go JSON), and
 // the text renderer sorts explicitly, so both outputs are deterministic.
+// The attestation counters (skipped_lines, untimed_receipts,
+// unattributed_executed) are always present in JSON — "0" is a claim about
+// the log, not an absence.
 type Report struct {
-	From       time.Time `json:"from"`        // oldest rendered receipt
-	To         time.Time `json:"to"`          // newest receipt — the window anchor
-	WindowDays int       `json:"window_days"` // 0 = whole log
+	LogAbsent  bool      `json:"log_absent,omitempty"` // no dispatch log exists yet (a normal state)
+	From       time.Time `json:"from,omitzero"`        // oldest TIMED rendered receipt
+	To         time.Time `json:"to,omitzero"`          // newest TIMED receipt — the window anchor
+	WindowDays int       `json:"window_days"`          // 0 = whole log
 	Lane       string    `json:"lane,omitempty"`
 
-	Receipts     int `json:"receipts"`                // rendered (post window/lane filter)
-	SkippedLines int `json:"skipped_lines,omitempty"` // unparseable JSONL lines — surfaced, never silent
+	Receipts     int `json:"receipts"`      // rendered (post window/lane filter)
+	SkippedLines int `json:"skipped_lines"` // unparseable JSONL lines — surfaced, never silent
+
+	// UntimedReceipts counts parseable receipts whose ts is missing/zero. They
+	// cannot be windowed, so -days EXCLUDES them (counted here, never silent);
+	// the whole-log view includes them in aggregates but not span/activity.
+	UntimedReceipts int `json:"untimed_receipts"`
 
 	Consults      int `json:"consults"`
 	Runs          int `json:"runs"`
 	StrategySteps int `json:"strategy_steps"`
-	StrategyRuns  int `json:"strategy_runs"` // distinct dispatch_ids
+	StrategyRuns  int `json:"strategy_runs"` // distinct dispatch_ids on EXECUTED receipts
 	Retries       int `json:"retries"`       // receipts with attempt > 0
 	EgressDenied  int `json:"egress_denied"`
 
 	Lanes    map[string]*LaneReport `json:"lanes"`
-	Outcomes map[string]int         `json:"outcomes"` // outcome_class → count (runs+steps)
-	Models   map[string]int         `json:"models"`   // requested model → count (runs+steps)
+	Outcomes map[string]int         `json:"outcomes"` // outcome_class → count (runs+steps; "(none)" bucketed)
+	Models   map[string]int         `json:"models"`   // requested model → count (runs+steps; "(none)" bucketed)
 
 	// Silent-fallback signal: receipts whose AttributedModels answer set is not
 	// exactly the requested model. Pairs are "requested→actual" for the table.
+	// Unattributed is the detector's own blind spot made visible: executed
+	// receipts carrying NO attribution at all — if capture regresses, this
+	// number is what stops "0 fallbacks" from reading as health.
 	SilentFallbacks int            `json:"silent_fallbacks"`
 	FallbackPairs   map[string]int `json:"fallback_pairs,omitempty"`
+	Unattributed    int            `json:"unattributed_executed"`
 
 	RotationsByReason map[string]int `json:"rotations_by_reason,omitempty"` // W2 typed-limit rotations
 	BatchConsults     int            `json:"batch_consults,omitempty"`      // E2 spend-down
 	BoostInfluenced   int            `json:"boost_influenced,omitempty"`
 
 	Unrated int            `json:"unrated_runs"` // runs with no operator quality verdict
-	ByDay   map[string]int `json:"by_day"`       // UTC date → receipts rendered
+	ByDay   map[string]int `json:"by_day"`       // UTC date → timed receipts rendered
 
 	Adherence ReceiptsSummary `json:"adherence"` // S2R-10 coverage/obedience block
 }
 
 // fallbackPair reports whether the answering models differ from the request,
-// and the "requested→actual" label when they do.
+// and the "requested→actual" label when they do. An EMPTY attribution is not
+// evidence of a fallback — it is counted separately (Report.Unattributed) so
+// its prevalence is visible.
 func fallbackPair(r dispatch.Record) (string, bool) {
 	if len(r.AttributedModels) == 0 {
-		return "", false // no attribution recorded — not evidence of a fallback
+		return "", false
 	}
 	if len(r.AttributedModels) == 1 && r.AttributedModels[0] == r.Model {
 		return "", false
 	}
 	return r.Model + "→" + strings.Join(r.AttributedModels, "+"), true
+}
+
+// laneMatches applies the -lane filter; the literal "(none)" selects receipts
+// with an empty lane, mirroring how the table renders them.
+func laneMatches(recLane, filter string) bool {
+	if filter == "(none)" {
+		return recLane == ""
+	}
+	return recLane == filter
 }
 
 // buildReport is the pure core (unit-tested directly). days=0 means the whole
@@ -109,7 +140,7 @@ func buildReport(recs []dispatch.Record, skipped, days int, lane string) Report 
 		rep.Adherence = summarizeReceipts(nil)
 		return rep
 	}
-	anchor := recs[0].TS
+	anchor := time.Time{}
 	for _, r := range recs {
 		if r.TS.After(anchor) {
 			anchor = r.TS
@@ -121,10 +152,18 @@ func buildReport(recs []dispatch.Record, skipped, days int, lane string) Report 
 	}
 	var in []dispatch.Record
 	for _, r := range recs {
-		if days > 0 && r.TS.Before(cutoff) {
+		if lane != "" && !laneMatches(r.Lane, lane) {
 			continue
 		}
-		if lane != "" && r.Lane != lane {
+		if r.TS.IsZero() {
+			// A parseable receipt with no timestamp cannot be windowed. Count
+			// it ALWAYS; include it in whole-log aggregates; exclude it from a
+			// -days view (the render says so) — never drop it silently.
+			rep.UntimedReceipts++
+			if days > 0 {
+				continue
+			}
+		} else if days > 0 && r.TS.Before(cutoff) {
 			continue
 		}
 		in = append(in, r)
@@ -133,22 +172,20 @@ func buildReport(recs []dispatch.Record, skipped, days int, lane string) Report 
 	if len(in) == 0 {
 		return rep
 	}
-	rep.From, rep.To = in[0].TS, in[0].TS
 	strategyIDs := map[string]bool{}
 	for _, r := range in {
-		if r.TS.Before(rep.From) {
-			rep.From = r.TS
-		}
-		if r.TS.After(rep.To) {
-			rep.To = r.TS
+		if !r.TS.IsZero() {
+			if rep.From.IsZero() || r.TS.Before(rep.From) {
+				rep.From = r.TS
+			}
+			if r.TS.After(rep.To) {
+				rep.To = r.TS
+			}
+			rep.ByDay[r.TS.UTC().Format("2006-01-02")]++
 		}
 		rep.Receipts++
-		rep.ByDay[r.TS.UTC().Format("2006-01-02")]++
 		if r.Attempt > 0 {
 			rep.Retries++
-		}
-		if r.DispatchID != "" {
-			strategyIDs[r.DispatchID] = true
 		}
 		switch {
 		case r.OutcomeClass == "route_recommendation":
@@ -168,23 +205,25 @@ func buildReport(recs []dispatch.Record, skipped, days int, lane string) Report 
 		}
 		// Everything below EXECUTED (interactive run or strategy step): it
 		// consumed tokens, so it enters the lane/model/outcome aggregates.
+		if r.DispatchID != "" {
+			strategyIDs[r.DispatchID] = true
+		}
 		lr := laneRep(rep.Lanes, r.Lane)
 		lr.TokensIn += r.TokensIn
 		lr.TokensOut += r.TokensOut
 		lr.NotionalUSD += r.NotionalUSD
 		lr.CashUSD += r.CashUSD
-		if r.Model != "" {
-			rep.Models[r.Model]++
-		}
-		if r.OutcomeClass != "" {
-			rep.Outcomes[r.OutcomeClass]++
-		}
+		rep.Models[orNone(r.Model)]++
+		rep.Outcomes[orNone(r.OutcomeClass)]++
 		if pair, ok := fallbackPair(r); ok {
 			rep.SilentFallbacks++
 			if rep.FallbackPairs == nil {
 				rep.FallbackPairs = map[string]int{}
 			}
 			rep.FallbackPairs[pair]++
+		}
+		if len(r.AttributedModels) == 0 {
+			rep.Unattributed++
 		}
 		if r.RotationReason != "" {
 			if rep.RotationsByReason == nil {
@@ -216,13 +255,21 @@ func buildReport(recs []dispatch.Record, skipped, days int, lane string) Report 
 }
 
 func laneRep(m map[string]*LaneReport, lane string) *LaneReport {
-	if lane == "" {
-		lane = "(none)"
-	}
+	lane = orNone(lane)
 	if m[lane] == nil {
 		m[lane] = &LaneReport{}
 	}
 	return m[lane]
+}
+
+// orNone buckets an empty field as "(none)" so receipts predating a field
+// never silently vanish from an aggregate (they still count in the header's
+// totals, and a table whose numbers don't reconcile is a defect).
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 // sortedKeys returns map keys sorted so the text render is deterministic.
@@ -244,9 +291,39 @@ func countLine(m map[string]int) string {
 	return strings.Join(parts, " · ")
 }
 
+// pctOrNA renders a percentage whose zero-denominator state is "n/a", never a
+// 0.0% that reads as maximal failure (review 2026-08-11).
+func pctOrNA(pct float64, denom int) string {
+	if denom == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f%%", pct)
+}
+
+// errWriter latches the first write error so renderReport can report a
+// truncated dashboard instead of exiting 0 on a full disk — completeness is
+// this tool's acceptance contract.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+	n, err := e.w.Write(p)
+	if err != nil {
+		e.err = err
+	}
+	return n, err
+}
+
 // renderReport writes the human dashboard (pure; unit-tested against fixed
-// input for byte-stable output).
-func renderReport(w io.Writer, r Report) {
+// input for byte-stable output). The returned error is the first write
+// failure, if any — a partial dashboard must not exit 0.
+func renderReport(out io.Writer, r Report) error {
+	w := &errWriter{w: out}
 	span := "whole log"
 	if r.WindowDays > 0 {
 		span = fmt.Sprintf("last %dd (anchored to newest receipt)", r.WindowDays)
@@ -256,19 +333,29 @@ func renderReport(w io.Writer, r Report) {
 		scope = " · lane " + r.Lane
 	}
 	fmt.Fprintf(w, "mr-orchestrate report — %s%s\n", span, scope)
-	if r.Receipts == 0 {
-		fmt.Fprintln(w, "no receipts in scope")
+	warnLines := func() {
 		if r.SkippedLines > 0 {
 			fmt.Fprintf(w, "WARN: %d unparseable line(s) skipped — the log holds data this report cannot read\n", r.SkippedLines)
 		}
-		return
+		if r.UntimedReceipts > 0 {
+			note := "counted in aggregates, absent from span/activity"
+			if r.WindowDays > 0 {
+				note = "EXCLUDED from this -days window (they cannot be windowed)"
+			}
+			fmt.Fprintf(w, "WARN: %d receipt(s) carry no timestamp — %s\n", r.UntimedReceipts, note)
+		}
 	}
-	fmt.Fprintf(w, "%s → %s\n", r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339))
+	if r.Receipts == 0 {
+		fmt.Fprintln(w, "no receipts in scope")
+		warnLines()
+		return w.err
+	}
+	if !r.From.IsZero() {
+		fmt.Fprintf(w, "%s → %s\n", r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339))
+	}
 	fmt.Fprintf(w, "receipts %d · consults %d · runs %d · strategy %d step(s) in %d run(s) · retries %d · egress denied %d\n",
 		r.Receipts, r.Consults, r.Runs, r.StrategySteps, r.StrategyRuns, r.Retries, r.EgressDenied)
-	if r.SkippedLines > 0 {
-		fmt.Fprintf(w, "WARN: %d unparseable line(s) skipped — the log holds data this report cannot read\n", r.SkippedLines)
-	}
+	warnLines()
 	fmt.Fprintf(w, "\n%-10s %6s %6s %10s %10s %9s %8s %5s %5s %9s\n",
 		"LANE", "RUNS", "STEPS", "TOK-IN", "TOK-OUT", "NOTIONAL", "CASH", "DEV", "G/B", "EGR-DENY")
 	for _, lane := range sortedKeys(r.Lanes) {
@@ -283,8 +370,17 @@ func renderReport(w io.Writer, r Report) {
 	if len(r.Models) > 0 {
 		fmt.Fprintf(w, "models:    %s\n", countLine(r.Models))
 	}
-	if r.SilentFallbacks > 0 {
-		fmt.Fprintf(w, "SILENT FALLBACKS: %d — %s\n", r.SilentFallbacks, countLine(r.FallbackPairs))
+	// The fallback line always renders alongside its own coverage: "0
+	// fallbacks" with attribution on 0 executed receipts is a broken detector,
+	// not a healthy fleet, and the two must never render identically.
+	if executed := r.Runs + r.StrategySteps; executed > 0 {
+		line := fmt.Sprintf("fallbacks: %d silent (attribution present on %d/%d executed)",
+			r.SilentFallbacks, executed-r.Unattributed, executed)
+		if r.SilentFallbacks > 0 {
+			line = fmt.Sprintf("SILENT FALLBACKS: %d — %s (attribution present on %d/%d executed)",
+				r.SilentFallbacks, countLine(r.FallbackPairs), executed-r.Unattributed, executed)
+		}
+		fmt.Fprintln(w, line)
 	}
 	if len(r.RotationsByReason) > 0 {
 		fmt.Fprintf(w, "rotations: %s\n", countLine(r.RotationsByReason))
@@ -293,15 +389,20 @@ func renderReport(w io.Writer, r Report) {
 		fmt.Fprintf(w, "spend-down: %d batch consult(s), %d boost-influenced\n", r.BatchConsults, r.BoostInfluenced)
 	}
 	fmt.Fprintf(w, "quality:   %d unrated run(s)\n", r.Unrated)
-	fmt.Fprintf(w, "adherence: coverage %.1f%% · obedience %.1f%% (consulted %d of %d runs)\n",
-		r.Adherence.CoveragePct, r.Adherence.ObediencePct, r.Adherence.ConsultedRuns, r.Adherence.RunReceipts)
+	fmt.Fprintf(w, "adherence: coverage %s · obedience %s (consulted %d of %d runs)\n",
+		pctOrNA(r.Adherence.CoveragePct, r.Adherence.RunReceipts),
+		pctOrNA(r.Adherence.ObediencePct, r.Adherence.ConsultedRuns),
+		r.Adherence.ConsultedRuns, r.Adherence.RunReceipts)
 	if len(r.Adherence.DeviationsByReason) > 0 {
 		fmt.Fprintf(w, "deviations: %s\n", countLine(r.Adherence.DeviationsByReason))
 	}
-	fmt.Fprintf(w, "\nactivity (UTC):\n")
-	for _, day := range sortedKeys(r.ByDay) {
-		fmt.Fprintf(w, "  %s %5d\n", day, r.ByDay[day])
+	if len(r.ByDay) > 0 {
+		fmt.Fprintf(w, "\nactivity (UTC):\n")
+		for _, day := range sortedKeys(r.ByDay) {
+			fmt.Fprintf(w, "  %s %5d\n", day, r.ByDay[day])
+		}
 	}
+	return w.err
 }
 
 // loadReceiptsCounted reads dispatch.jsonl distinguishing the three states the
@@ -310,6 +411,9 @@ func renderReport(w io.Writer, r Report) {
 // an unreadable file or torn read returns the real error — the caller must
 // NOT render a partial dashboard as if it were the whole log; unparseable
 // individual lines are counted and surfaced, never silently dropped.
+// (A single line over the 4MB scanner cap lands in the torn-read class by
+// design: the scanner cannot safely resynchronize past it, so a loud error
+// beats a dashboard silently missing the log's tail.)
 func loadReceiptsCounted(path string) (recs []dispatch.Record, skipped int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -336,32 +440,50 @@ func loadReceiptsCounted(path string) (recs []dispatch.Record, skipped int, err 
 	return recs, skipped, nil
 }
 
+// lanesPresent lists the distinct lane labels in the log (render form), for
+// the -lane miss hint.
+func lanesPresent(recs []dispatch.Record) []string {
+	set := map[string]bool{}
+	for _, r := range recs {
+		set[orNone(r.Lane)] = true
+	}
+	return sortedKeys(set)
+}
+
 func runReport(args []string) error {
 	fs2 := flag.NewFlagSet("report", flag.ExitOnError)
 	days := fs2.Int("days", 0, "window in days, anchored to the newest receipt (0 = whole log)")
-	lane := fs2.String("lane", "", "restrict to one lane")
+	lane := fs2.String("lane", "", "restrict to one lane; \"(none)\" selects receipts with no lane")
 	asJSON := fs2.Bool("json", false, "emit the report as JSON instead of the text dashboard")
 	_ = fs2.Parse(args)
 	if *days < 0 {
 		return errors.New("-days must be >= 0")
 	}
 	recs, skipped, err := loadReceiptsCounted(dispatchPath())
+	logAbsent := false
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			fmt.Println("no receipts yet: dispatch log absent at", dispatchPath())
-			return nil
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
 		}
-		return err
+		logAbsent = true // a normal state — render the empty report, honestly labeled
 	}
 	rep := buildReport(recs, skipped, *days, *lane)
+	rep.LogAbsent = logAbsent
 	if *asJSON {
 		out, jerr := json.MarshalIndent(rep, "", "  ")
 		if jerr != nil {
 			return jerr
 		}
-		fmt.Println(string(out))
+		_, werr := fmt.Println(string(out))
+		return werr
+	}
+	if logAbsent {
+		fmt.Println("no receipts yet: dispatch log absent at", dispatchPath())
 		return nil
 	}
-	renderReport(os.Stdout, rep)
-	return nil
+	if *lane != "" && rep.Receipts == 0 && len(recs) > 0 {
+		fmt.Fprintf(os.Stderr, "hint: no receipts for lane %q; lanes in the log: %s\n",
+			*lane, strings.Join(lanesPresent(recs), ", "))
+	}
+	return renderReport(os.Stdout, rep)
 }

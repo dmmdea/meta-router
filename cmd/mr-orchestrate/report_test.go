@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -65,6 +66,10 @@ func TestReportAggregates(t *testing.T) {
 	if r.Unrated != 1 { // codex run has no verdict; good+bad are rated
 		t.Fatalf("unrated: %d", r.Unrated)
 	}
+	// detector coverage: strategy step + glm run carry no AttributedModels
+	if r.Unattributed != 2 {
+		t.Fatalf("unattributed: %d", r.Unattributed)
+	}
 	cl := r.Lanes["claude"]
 	if cl.Runs != 1 || cl.StrategySteps != 1 || cl.TokensIn != 130 || cl.TokensOut != 70 {
 		t.Fatalf("claude lane (steps must count into tokens): %+v", cl)
@@ -116,13 +121,134 @@ func TestReportDeterministicOnFixedInput(t *testing.T) {
 		t.Fatal("JSON render differs across runs")
 	}
 	var ra, rb bytes.Buffer
-	renderReport(&ra, a)
-	renderReport(&rb, b)
+	if err := renderReport(&ra, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := renderReport(&rb, b); err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(ra.Bytes(), rb.Bytes()) {
 		t.Fatal("text render differs across runs")
 	}
 	if !strings.Contains(ra.String(), "WARN: 1 unparseable line(s) skipped") {
 		t.Fatalf("skipped lines must be surfaced in the render:\n%s", ra.String())
+	}
+	if !strings.Contains(ra.String(), "attribution present on 2/4 executed") {
+		t.Fatalf("fallback line must always carry detector coverage:\n%s", ra.String())
+	}
+}
+
+// A parseable receipt with a missing/zero ts must never be silently
+// window-filtered (review MAJOR 2): whole-log counts it into aggregates but
+// not span/activity; -days excludes it but the counter + WARN surface it.
+func TestReportUntimedReceipts(t *testing.T) {
+	recs := append(repFixture(), dispatch.Record{ // no TS at all
+		Lane: "claude", Model: "opus", OutcomeClass: "ok", TokensIn: 5})
+	whole := buildReport(recs, 0, 0, "")
+	if whole.UntimedReceipts != 1 || whole.Receipts != 7 || whole.Runs != 4 {
+		t.Fatalf("whole log must count the untimed receipt: %+v", whole)
+	}
+	if whole.From != repT0 {
+		t.Fatalf("From must come from timed receipts only, got %v", whole.From)
+	}
+	if _, ok := whole.ByDay["0001-01-01"]; ok {
+		t.Fatal("untimed receipts must not mint a year-1 activity bucket")
+	}
+	var buf bytes.Buffer
+	if err := renderReport(&buf, whole); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "WARN: 1 receipt(s) carry no timestamp") {
+		t.Fatalf("untimed must be surfaced:\n%s", buf.String())
+	}
+	windowed := buildReport(recs, 0, 2, "")
+	if windowed.UntimedReceipts != 1 {
+		t.Fatalf("-days must still count the untimed receipt: %+v", windowed)
+	}
+	if windowed.Receipts != 1 { // only the day-9 receipt is in window
+		t.Fatalf("untimed must be excluded from a -days window, got %d receipts", windowed.Receipts)
+	}
+	var wb bytes.Buffer
+	if err := renderReport(&wb, windowed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wb.String(), "EXCLUDED from this -days window") {
+		t.Fatalf("windowed render must say untimed were excluded:\n%s", wb.String())
+	}
+}
+
+// Receipts predating the model/outcome_class fields must not vanish from the
+// aggregate lines (review MINOR 5) — they bucket as "(none)" like the lane
+// table.
+func TestReportNoneBuckets(t *testing.T) {
+	recs := []dispatch.Record{{TS: repT0, OutcomeClass: "", Model: "", Lane: ""}}
+	r := buildReport(recs, 0, 0, "")
+	if r.Models["(none)"] != 1 || r.Outcomes["(none)"] != 1 || r.Lanes["(none)"] == nil {
+		t.Fatalf("empty fields must bucket as (none): %+v", r)
+	}
+	// and the "(none)" lane is selectable with -lane
+	f := buildReport(recs, 0, 0, "(none)")
+	if f.Receipts != 1 {
+		t.Fatalf("-lane \"(none)\" must select empty-lane receipts: %+v", f)
+	}
+}
+
+// A zero denominator renders n/a, never a 0.0% that reads as maximal failure
+// (review MINOR 6).
+func TestReportAdherenceNA(t *testing.T) {
+	recs := []dispatch.Record{{TS: repT0, Lane: "claude", OutcomeClass: "route_recommendation"}}
+	r := buildReport(recs, 0, 0, "")
+	var buf bytes.Buffer
+	if err := renderReport(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	// no runs at all → the summary line renders, adherence says n/a
+	if !strings.Contains(buf.String(), "coverage n/a · obedience n/a") {
+		t.Fatalf("zero-denominator adherence must render n/a:\n%s", buf.String())
+	}
+}
+
+// failWriter fails after n bytes — a truncated dashboard must not exit 0
+// (review MINOR 4).
+type failWriter struct{ left int }
+
+func (f *failWriter) Write(p []byte) (int, error) {
+	if len(p) > f.left {
+		n := f.left
+		f.left = 0
+		return n, errors.New("disk full")
+	}
+	f.left -= len(p)
+	return len(p), nil
+}
+
+func TestRenderReportPropagatesWriteError(t *testing.T) {
+	if err := renderReport(&failWriter{left: 10}, buildReport(repFixture(), 0, 0, "")); err == nil {
+		t.Fatal("a failed write must surface, not exit 0")
+	}
+}
+
+// The -json contract holds on the absent-log path (review MAJOR 1): valid
+// JSON with log_absent=true, not prose. Exercised at the runReport level via
+// the MR_ORCH_STATE override, capturing stdout.
+func TestRunReportJSONAbsentLog(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	old := os.Stdout
+	pr, pw, _ := os.Pipe()
+	os.Stdout = pw
+	err := runReport([]string{"-json"})
+	pw.Close()
+	os.Stdout = old
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(pr)
+	var rep Report
+	if jerr := json.Unmarshal(out, &rep); jerr != nil {
+		t.Fatalf("-json on an absent log must emit valid JSON, got: %s", out)
+	}
+	if !rep.LogAbsent || rep.Receipts != 0 {
+		t.Fatalf("absent log must be labeled: %+v", rep)
 	}
 }
 
