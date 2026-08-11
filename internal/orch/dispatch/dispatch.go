@@ -64,6 +64,11 @@ type Record struct {
 	// Both omitempty: old JSONL lines keep unmarshalling.
 	Batch          bool `json:"batch,omitempty"`
 	SpendDownBoost int  `json:"spend_down_boost,omitempty"`
+	// RateLimitOrigin (W6): "upstream" = the vendor's own 429; "local" = a
+	// limit our software imposed (sliding-window limiter). Only upstream
+	// observations may drive ledger exhaustion; the receipt records which this
+	// was so the distinction is countable. Omitempty — old lines unmarshal.
+	RateLimitOrigin string `json:"rate_limit_origin,omitempty"`
 
 	// Replay substrate (S2R-9): without desc, slice-4 replay and gold-set
 	// harvesting from receipts are amputated at birth; quality is the operator

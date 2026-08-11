@@ -79,6 +79,33 @@ type Opts struct {
 	// priority. Ships OFF — a routing-visible change that promotes only
 	// through a budget-state eval (Bible B8).
 	PaceRank bool
+	// Incident enables W6 incident mode: when MOST lanes are pressured
+	// (IncidentActive), the shadow prices (+1 throttle, +1 downshift) are
+	// suspended and selection runs on pure rank among the lanes that still
+	// admit. Rationale: the shadow price exists to shed load onto calmer
+	// lanes; in a system-wide incident there are no calmer lanes, so the
+	// demotion only shuffles work onto WORSE models for zero relief —
+	// exploitation-only beats exploration when the whole field is pressured.
+	// Ships OFF behind config (incident_mode_on), same B8 posture as PaceRank:
+	// a routing-visible change that promotes only through eval evidence.
+	Incident bool
+}
+
+// IncidentActive reports the W6 most-lanes-pressured condition: a strict
+// majority of the lanes in states are throttled, exhausted, or otherwise
+// unable to take normal load. Masked states count as pressured — a dead lane
+// is the strongest form of pressure on the survivors.
+func IncidentActive(states map[string]LaneState) bool {
+	if len(states) == 0 {
+		return false
+	}
+	pressured := 0
+	for _, st := range states {
+		if st.State == "throttled" || masked(st.State) {
+			pressured++
+		}
+	}
+	return pressured*2 > len(states)
 }
 
 type Masked struct{ Lane, Model, Reason string }
@@ -176,6 +203,9 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 	for lane, st := range states {
 		d.QuotaState[lane] = st.State
 	}
+	// W6 incident mode: opt-in AND condition-derived — the knob arms the
+	// mechanism, the live lane states decide whether it engages.
+	incident := opt.Incident && IncidentActive(states)
 
 	// 1. candidates = t[c]; unknown class → HardRepo ordering (quality-first
 	//    default, R14a — the reason marks it, S2R-11 keeps rank-1 = Opus).
@@ -207,9 +237,11 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 		}
 		// 3. Shadow price (R14-compliant): +1 rank when the lane is throttled —
 		//    the ONLY demotion trigger is the existing 80% real-consumption
-		//    threshold (an account fact, not a reserve).
+		//    threshold (an account fact, not a reserve). SUSPENDED under W6
+		//    incident mode: with most lanes pressured the price cannot shed
+		//    load onto a calmer lane, only onto a worse model.
 		eff := e.Rank
-		if st.State == "throttled" {
+		if st.State == "throttled" && !incident {
 			eff = e.Rank + 1
 		}
 		// 3b. E1 burn-rate downshift (slice-4): +1 rank when the lane's measured
@@ -217,8 +249,8 @@ func Route(t Table, c Class, states map[string]LaneState, ctxTokens int64, now t
 		//     (Downshift >= burnrate.LevelMedium). Same R14 justification: a
 		//     measured over-pace is an account fact; with a nominal burn or an
 		//     empty trace this is a no-op. Stacks with the throttle price — they
-		//     are independent facts.
-		if st.Downshift >= 2 {
+		//     are independent facts. Suspended under incident mode with it.
+		if st.Downshift >= 2 && !incident {
 			eff++
 		}
 		// 3c. E2 spend-down boost (slice-4): a bounded rank RAISE for tagged

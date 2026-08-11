@@ -19,6 +19,13 @@ type Outcome struct {
 	DurationAPIMs  int64
 	StopReason     string
 	TerminalReason string
+	// RateLimitOrigin types a rate_limit's SOURCE (W6): "upstream" — the
+	// vendor said no (a real provider observation, ledger-eligible); "local" —
+	// a limit OUR software imposed (the sliding-window limiter), which must
+	// NEVER be recorded as vendor exhaustion or it poisons quota truth.
+	// "" on non-rate_limit outcomes and on pre-W6 producers; the ledger gate
+	// treats "" as upstream (fail-safe toward the pre-W6 behavior).
+	RateLimitOrigin string
 }
 
 // TotalTokens sums fresh input + output across attributed models — the shadow
@@ -69,6 +76,7 @@ func Parse(raw []byte) Outcome {
 		o.Class = "refusal"
 	case r.APIErrorStatus == 429:
 		o.Class = "rate_limit"
+		o.RateLimitOrigin = "upstream" // parsed off the vendor's own status
 	case r.IsError || r.APIErrorStatus >= 400:
 		o.Class = "api_error"
 	case r.Result == "" && o.TotalTokens() > 0:

@@ -16,11 +16,13 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/codexlane"
 	"github.com/dmmdea/meta-router/internal/orch/dispatch"
 	"github.com/dmmdea/meta-router/internal/orch/egress"
+	"github.com/dmmdea/meta-router/internal/orch/exclusion"
 	"github.com/dmmdea/meta-router/internal/orch/fuses"
 	"github.com/dmmdea/meta-router/internal/orch/glmlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/locallane"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
+	"github.com/dmmdea/meta-router/internal/orch/slidewin"
 )
 
 // laneGate is the non-claude lane admission: pure ledger admission only —
@@ -157,6 +159,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")
+	noteLaneHealth("codex", o.Class, now) // W6 breaker
 	if len(raw) > 0 {
 		fmt.Fprintln(out, string(raw))
 	} else {
@@ -183,6 +186,41 @@ func applyLocalOutcome(o claudelane.Outcome, now time.Time) {
 	// (S2R-4, R14) and metered by the receipt alone. No lock acquired.
 	_ = o
 	_ = now
+}
+
+// noteLaneHealth feeds the W6 self-healing breaker from a dispatch outcome.
+// Qualifying failures are ADAPTER classes only — spawn_error and parse_error
+// on every lane (our binary/contract broke), plus api_error on the free local
+// lane (a harness tier fault; on cloud lanes api_error can be the vendor's
+// incident, which quota/admission owns). ok and deferred are HEALTHY (an
+// honest defer is the local lane working as designed) and clear the breaker.
+// Everything else (rate_limit, refusal, empty_result, incomplete) is neither:
+// quota and policy signals never open an infrastructure breaker.
+func noteLaneHealth(lane, class string, now time.Time) {
+	if orchcfg.Load(configPath()).ExclusionOff {
+		return
+	}
+	s, warn := exclusion.Load(exclusionsPath())
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "warn:", warn)
+	}
+	switch class {
+	case "spawn_error", "parse_error":
+		s = exclusion.RecordFailure(s, lane, class, now, exclusion.Defaults())
+	case "api_error":
+		if lane != "local" {
+			return
+		}
+		s = exclusion.RecordFailure(s, lane, class, now, exclusion.Defaults())
+	case "ok", "deferred":
+		if _, tracked := s[lane]; !tracked {
+			return // nothing to clear — skip the write
+		}
+		s = exclusion.RecordSuccess(s, lane)
+	default:
+		return
+	}
+	warnIf(exclusion.Save(exclusionsPath(), s), "exclusion save")
 }
 
 // runLocalLane dispatches `run --lane local` through the S3R-1 TWO-DOOR
@@ -224,6 +262,36 @@ func runLocalLane(out io.Writer, prompt, class, model, cwd string, timeoutSec in
 		return 0, nil
 	}
 
+	// W6 sliding-window limiter: the local box serves interactive work too; a
+	// headless burst must not wedge it. A denial is a LOCAL rate limit — typed
+	// so it can never read as vendor exhaustion — and relegates (exit 3) like
+	// an honest defer, so the DAG escalates to a cloud alternative. Negative
+	// local_max_per_min disables; state failures fail OPEN (warned).
+	if lim := cfg.LocalMaxPerMin; lim > 0 {
+		w, warn := slidewin.Load(localLimiterPath())
+		if warn != "" {
+			fmt.Fprintln(os.Stderr, "warn:", warn)
+		}
+		allow, retryAt, next := slidewin.Allow(w, now, lim, time.Minute)
+		if !allow {
+			o := claudelane.Outcome{Class: "rate_limit", RateLimitOrigin: "local",
+				Result: fmt.Sprintf("local lane sliding-window limit (%d/60s) reached; earliest retry %s", lim, retryAt.UTC().Format(time.RFC3339))}
+			rec := dispatch.Record{
+				TS: now, Lane: "local", Model: model, OutcomeClass: o.Class, RateLimitOrigin: o.RateLimitOrigin,
+				Admit: false, AdmitState: "open", AdmitReason: o.Result,
+				Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
+				RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
+			}
+			sf.stamp(&rec)
+			warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (local limiter)")
+			b, _ := json.Marshal(map[string]string{"outcome_class": o.Class, "rate_limit_origin": o.RateLimitOrigin, "detail": o.Result})
+			fmt.Fprintln(out, string(b))
+			fmt.Fprintf(os.Stderr, "local limiter: %s (exit %d, relegation)\n", o.Result, exitDeferred)
+			return exitDeferred, nil
+		}
+		warnIf(slidewin.Save(localLimiterPath(), next), "local limiter save")
+	}
+
 	var o claudelane.Outcome
 	var raw []byte
 	var err error
@@ -235,6 +303,8 @@ func runLocalLane(out io.Writer, prompt, class, model, cwd string, timeoutSec in
 	if err != nil {
 		return 1, err // reserved for nothing: the adapter is fail-open (classified Outcome)
 	}
+	// W6: feed the self-healing breaker (ok/deferred heal; adapter classes arm).
+	noteLaneHealth("local", o.Class, now)
 	// S3R-10: free lane — meter without any ledger lock (no-op seam).
 	applyLocalOutcome(o, now)
 	rec := dispatch.Record{
@@ -524,6 +594,7 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	}
 	sf.stamp(&rec)
 	warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append")
+	noteLaneHealth("glm", o.Class, now) // W6 breaker
 	if len(raw) > 0 {
 		fmt.Fprintln(out, string(raw))
 	} else {

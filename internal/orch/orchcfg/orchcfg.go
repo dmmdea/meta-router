@@ -77,6 +77,14 @@ type Config struct {
 
 	PollMinIntervalMin int  `json:"poll_min_interval_min"` // W1: min minutes between usage polls (status-triggered); default 5
 	PaceRankOn         bool `json:"pace_rank_on"`          // W1: slack tie-break in the router; default OFF (B8 — promotes only via a budget-state eval)
+
+	// W6 resilience knobs.
+	IncidentModeOn bool `json:"incident_mode_on"` // default OFF (B8 posture: routing-visible, promotes via eval); arms router incident mode (engages only when most lanes are pressured)
+	ExclusionOff   bool `json:"exclusion_off"`    // kill-switch for the self-healing lane breaker; ships ON (resilience, not routing policy)
+	// LocalMaxPerMin caps local-lane dispatches over a 60s SLIDING window.
+	// 0 = absent field → default 20; negative = limiter OFF (explicit
+	// operator intent, distinguishable from hand-edit zero damage).
+	LocalMaxPerMin int `json:"local_max_per_min"`
 }
 
 func Defaults() Config {
@@ -85,7 +93,7 @@ func Defaults() Config {
 		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
-		QuotaStaleHours: 48, PollMinIntervalMin: 5,
+		QuotaStaleHours: 48, PollMinIntervalMin: 5, LocalMaxPerMin: 20,
 	}
 }
 
@@ -139,6 +147,9 @@ func Load(path string) Config {
 	}
 	if c.QuotaStaleHours == 0 {
 		c.QuotaStaleHours = 48
+	}
+	if c.LocalMaxPerMin == 0 {
+		c.LocalMaxPerMin = 20 // absent field / hand-edit zero → default; negative = explicitly off
 	}
 	return c
 }

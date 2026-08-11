@@ -4,6 +4,19 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.26.0] — 2026-08-12
+
+### Added — W6 resilience remainder (charter queue item 3)
+Each feature carries a canary test verified RED when the feature is reverted (the acceptance gate).
+- **Self-healing lane exclusion with progressive backoff** (`internal/orch/exclusion`). Adapter failures — `spawn_error`/`parse_error` on any lane, `api_error` on the local lane — arm a per-lane breaker: below the threshold (2) nothing happens; at it, the lane masks as `unavailable` for 1m, doubling per further failure, capped at 30m. Expiry re-admits the lane structurally (a natural half-open probe — no probe scheduler to break); one healthy dispatch (`ok` — or `deferred`, which is the local lane working as designed) deletes the entry. Deliberately NOT wired to quota classes: `rate_limit`/`refusal`/exhaustion belong to admission and the lanes — excluding on them would double-count pressure the router already prices. Kill-switch: `exclusion_off`. Canary: `TestExclusionMasksLaneInLaneStates`, `TestBreakerProgressionAndSelfHeal`.
+- **Router incident mode — most-lanes-pressured ⇒ exploitation-only** (`router.Opts.Incident` + `router.IncidentActive`). When a strict majority of lanes are throttled/masked, the +1 shadow prices (throttle, burn-downshift) are suspended: they exist to shed load onto calmer lanes, and with no calmer lanes they only shuffle work onto worse models for zero relief. Masking still applies — a dead lane never wins. **Ships OFF** behind `incident_mode_on` (the `pace_rank_on`/B8 posture: routing-visible, promotes only through eval evidence; the canary proves the mechanism, not the policy). Canary: `TestIncidentModeExploitationOnly`, `TestIncidentRequiresPressuredMajority`.
+- **Typed local-vs-upstream 429** (`Outcome.RateLimitOrigin`, receipt field `rate_limit_origin`). The vendor's own 429 (`upstream`, parsed off `api_error_status`) remains ledger-eligible; a limit OUR software imposed (`local`) must never mark the vendor's window exhausted — a self-inflicted denial recorded as vendor truth poisons quota calibration from the inside. `""` from pre-W6 producers stays upstream (fail-safe toward existing behavior). Canary: `TestLocalRateLimitNeverExhaustsLedger`.
+- **Sliding-window limiter for the local lane** (`internal/orch/slidewin`, default 20 dispatches / 60s sliding, `local_max_per_min`; negative disables). The local box serves the operator's interactive work too, and a fixed window would allow a 2N burst straddling its reset instant. A denial is a typed **local** rate limit that RELEGATES (exit 3, like an honest defer) so the DAG escalates to a cloud alternative, with a receipt — never a vendor observation. Canary: `TestLocalLimiterDeniesAndRelegates`, `TestSlidingWindowLimiter`.
+- All new state files (`exclusions.json`, `local-limiter.json`) fail OPEN with a warning when unreadable or corrupt: a breaker or limiter that cannot read its state must not invent exclusions or denials — and must say so (absent-vs-undetermined discipline).
+
+### Complexity
+- B12 budget raised 22420 → 22900 (+431 measured). See `docs/complexity-budget.json` for the accounting.
+
 ## [0.25.0] — 2026-08-11
 
 ### Added
