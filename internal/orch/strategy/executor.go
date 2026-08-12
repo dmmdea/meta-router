@@ -3,8 +3,11 @@ package strategy
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
 // ── Seams (fake-injectable here; prod-wired in Group E) ─────────────────────
@@ -220,9 +223,14 @@ func Execute(dir string, run NodeRunner, resolve Resolve, alt Alternatives, cfg 
 			}
 			if saved > 0 {
 				// The R14 side-effect metric: savings are REPORTED, never the
-				// goal. Best-effort — a journal hiccup must not fail the step.
-				_ = JournalDetail(dir, "ctx_compacted", s.ID,
-					fmt.Sprintf("lossless dep-context compaction saved %d bytes (W5; stored artifacts untouched)", saved), ts)
+				// goal — a journal hiccup must not fail the step. But it must
+				// not vanish either (Journal's own contract is fail-loud, and
+				// stderr is null-wired on the detached strategy path): a
+				// persistent failure latches the W6 resil alert.
+				if jerr := JournalDetail(dir, "ctx_compacted", s.ID,
+					fmt.Sprintf("lossless dep-context compaction saved %d bytes (W5; stored artifacts untouched)", saved), ts); jerr != nil {
+					noteJournalMiss(jerr)
+				}
 			}
 			// S3R-10a: a root/solo node with NO dep context gets the BARE instruction
 			// — never a dangling "\n" separator — so the 1-node solo DAG is
@@ -273,11 +281,27 @@ func buildHandoff(r NodeResult, attempt int) string {
 	if r.ResultContent != "" {
 		h["result_excerpt"] = runeExcerpt(r.ResultContent, 600)
 	}
+	// json.Marshal's default HTML escaping is LOAD-BEARING here: it escapes
+	// any literal "</handoff>" inside the excerpt, so the fence the prompt
+	// builder wraps this in can never be closed early by hostile or unlucky
+	// result content. Do NOT switch this to a non-escaping encoder in any
+	// escaping cleanup — the fence-containment canary goes red.
 	b, err := json.Marshal(h)
 	if err != nil {
 		return "" // a handoff is advisory; the retry still runs cold
 	}
 	return string(b)
+}
+
+// noteJournalMiss surfaces a metric-journal write failure on the one durable
+// channel the detached strategy path has (stderr is null-wired there): the
+// W6 resil-alert latch, best-effort by construction, plus stderr for the
+// interactive case. Never fails the step — the metric ranks below the work.
+func noteJournalMiss(err error) {
+	fmt.Fprintln(os.Stderr, "warn: ctx_compacted journal:", err)
+	b, _ := json.Marshal(map[string]string{
+		"ts": time.Now().UTC().Format(time.RFC3339), "what": "ctx_compacted journal", "err": err.Error()})
+	_ = os.WriteFile(statepaths.ResilAlert(), b, 0o644)
 }
 
 // runeExcerpt caps s at n runes without splitting a UTF-8 sequence.

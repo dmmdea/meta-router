@@ -4,6 +4,19 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.27.1] — 2026-08-12
+
+### Fixed — the lossless contract now actually holds (W5 review round)
+Two fresh-context specialists **confirmed live** that v0.27.0's compaction was lossy in its two re-encode paths; the fix round was authored, then nearly lost — a compound command was denied whole by the account guard, its commit+push never ran, v0.27.0 merged without the fixes, and the worktree holding them was force-removed. Recovered from session context; this entry is the surviving record.
+- **CRITICAL — int64 corruption**: the `any`-decode rewrote integers above 2^53 through float64 (`9007199254740993` → `…992`, reproduced on the rotation's own target archetype), and the round-trip judge was blind to it — `Equal` canonicalized through the same float64, so the proof shared the defect. Fixed: `json.Number` decode end-to-end and a number-literal-aware `Equal` (exact rationals). Pinned with adversarial cases including the judge-must-differ check.
+- **HIGH — duplicate-key deletion**: rotation collapsed dup keys last-wins while minify preserved them — and deletion *shrinks*, so the corrupted form tended to win the length contest (the dup-key class `hostcfg` refuses and the adjudication ledger already closed once). Dup-key documents are now token-stream-detected and minify-only.
+- **HIGH — HTML-escape mangling**: winning rotations showed the model escape sequences instead of code strings. Re-encode paths now use `SetEscapeHTML(false)`; `buildHandoff` deliberately KEEPS default escaping — it is load-bearing (a literal closing fence in hostile result content cannot break out of the handoff block) and is pinned by a fence-containment canary so an escaping cleanup goes red.
+- **The @-escape never ships to the model**: nothing in production calls `Decompact`, so a marker-family document would have shown the model a key its source never contained. `EmbedSafe` embeds such documents untouched; the escape now exists solely for the round-trip contract.
+- Smaller: a `ctx_compacted` journal miss latches the W6 resil alert instead of being discarded (stderr is null-wired on the strategy path); the unreachable family-marshal-error fallback declines rather than emitting an unescaped form; the package doc states the preservation/exclusion list explicitly; `compaction_off`'s doc states its scope (compaction only — the handoff is not compression).
+
+### Complexity
+- B12 budget raised 23520 → 23690 (+178 review round, measured 23672). See `docs/complexity-budget.json` for the accounting.
+
 ## [0.27.0] — 2026-08-12
 
 ### Added — W5: lossless compaction + context handoff (charter queue item 4)
