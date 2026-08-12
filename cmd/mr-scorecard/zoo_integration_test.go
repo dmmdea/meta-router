@@ -43,10 +43,17 @@ const zooOracle = `{"task":"T-01","class":"research","lane":"codex","model":"cod
 {"task":"T-03","class":"research","lane":"local","model":"gemma4-cascade","effort":"unrecorded","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true}
 `
 
-// Every class the shipped classifier can emit is ranked identically: the
-// scorecard probes with no --class, so classify.go picks, and an unranked
-// class makes `route` refuse (exit 3) and the zoo abort with no baseline.
-// The lane ORDER is what this fixture is about, not the class mapping.
+// Every class classify.go can EMIT is ranked identically (13 of the 15
+// declared classes; hard-case-reclaim is never emitted, and doc-summarize is
+// ranked below). The scorecard probes with no --class, so classify.go picks.
+//
+// Ranking them IDENTICALLY is the load-bearing part, and the reason is not
+// the one an earlier version of this comment gave: an unranked class does NOT
+// refuse loudly — route falls back silently and still returns a lane, so a
+// fixture that differentiated the rows would produce a silently wrong
+// BaseLane, changing what diverged() counts with no failure anywhere. Uniform
+// rows make the classifier's pick irrelevant to what these tests measure,
+// which is lane ORDER (review round 5).
 const zooRankTable = `{
   "hard-repo":               [{"Lane":"local","Model":"gemma4-cascade","Effort":"unrecorded","Rank":1},{"Lane":"codex","Model":"codex-TUNING","Effort":"high","Rank":2},{"Lane":"codex","Model":"codex-HELDOUT","Effort":"high","Rank":3},{"Lane":"claude","Model":"claude-sonnet-5","Effort":"high","Rank":4}],
   "terminal-bounded":        [{"Lane":"local","Model":"gemma4-cascade","Effort":"unrecorded","Rank":1},{"Lane":"codex","Model":"codex-TUNING","Effort":"high","Rank":2},{"Lane":"codex","Model":"codex-HELDOUT","Effort":"high","Rank":3},{"Lane":"claude","Model":"claude-sonnet-5","Effort":"high","Rank":4}],
@@ -84,14 +91,24 @@ func TestIntegrationZooTunesWithTuningEvidence(t *testing.T) {
 	if ctx == nil {
 		t.Fatalf("no ctx-floor zoo entry in the artifact\nstderr: %s", se)
 	}
-	// The fixture must actually make the candidate diverge on tuning, or the
-	// resolver is never consulted and the test pins nothing.
-	if ctx.TuningDiverged == 0 {
-		t.Fatalf("fixture is vacuous: the ctx-floor winner never diverges on the tuning split (%+v)", *ctx)
+	// The WINNER is the load-bearing assertion, because it is what actually
+	// changes under the revert. With the tuning-frozen resolver the L=1500
+	// candidate's diverged tuning task lands on the MEASURED codex-TUNING
+	// cell and scores; with the eval-set resolver it lands on codex-HELDOUT
+	// (no tuning rows), that candidate's objective drops, and SelectBest
+	// falls back to a candidate that never diverges. Asserting on
+	// TuningPassRate alone was dead: under the real revert the run trips the
+	// vacuity guard below first, telling the engineer their FIXTURE broke
+	// rather than that they removed the fix (review round 5).
+	if ctx.Chosen != "L=1500,floor=codex" {
+		t.Fatalf("expected the diverging candidate to win the tuning split; got %q (%+v).\n"+
+			"This is what a revert of the tuning-frozen resolver looks like: the diverged task is scored at a cell "+
+			"with no TUNING evidence, so its objective collapses and a non-diverging candidate wins instead.", ctx.Chosen, *ctx)
 	}
-	// With the tuning-frozen resolver the diverged tuning task lands on the
-	// MEASURED codex-TUNING cell and passes. With the eval-set resolver it
-	// lands on codex-HELDOUT (no tuning rows) and the objective collapses to 0.
+	if ctx.TuningDiverged == 0 {
+		t.Fatalf("the winning candidate does not diverge on the tuning split, so the resolver was never consulted — "+
+			"either the fixture is broken OR the tuning-frozen resolver was reverted (%+v)", *ctx)
+	}
 	if ctx.TuningPassRate == 0 {
 		t.Fatalf("the zoo's tuning objective collapsed to 0 — its changed lane resolved to a cell with no TUNING evidence, "+
 			"which is what happens when the eval-set resolver drives SelectBest (%+v)", *ctx)
@@ -100,15 +117,41 @@ func TestIntegrationZooTunesWithTuningEvidence(t *testing.T) {
 
 // The zoo's heldout rows and its tuning selection must use the SAME resolver:
 // scoring the two with different rulers is the two-rulers defect SelectBest's
-// doc comment warns about. Observable in the artifact: every zoo policy row's
-// configs must be drawable from the tuning-frozen resolution, never from the
-// eval-set one — here, codex-TUNING and never codex-HELDOUT.
+// doc comment warns about. Observable in the artifact: a zoo row that CHANGED
+// the router's lane must be scored at the tuning-frozen cell (codex-TUNING),
+// never the eval-set one (codex-HELDOUT).
+//
+// The heldout task must therefore DIVERGE — otherwise `PolicyOf` takes its
+// `lane == BaseLane -> base(id)` branch for every scored task, the resolver is
+// never consulted, and "codex-HELDOUT" is unreachable by construction. The
+// first version of this test had exactly that hole: mutating the verdict call
+// site alone left it green, i.e. it stayed passing under the very defect it
+// names (review round 5, the same vacuity class round 5 fixed elsewhere).
+// T-03 (heldout) is 2000 chars here so the ctx-floor candidate bumps it too.
 func TestIntegrationZooScoresHeldoutWithTheSameResolver(t *testing.T) {
 	goldset, oracle, state := scFixture(t, zooOracle, zooRankTable)
 	a, _ := scRun(t, state,
 		"-oracle", oracle, "-goldset", goldset, "-split", "-zoo",
 		"-route", orchestrateBin(t))
 
+	var ctx *struct {
+		Family          string  `json:"family"`
+		Chosen          string  `json:"chosen_config"`
+		TuningPassRate  float64 `json:"tuning_pass_rate"`
+		TuningDiverged  int     `json:"tuning_diverged"`
+		HeldoutDiverged int     `json:"heldout_diverged"`
+	}
+	for i := range a.Zoo {
+		if a.Zoo[i].Family == "ctx-floor" {
+			ctx = &a.Zoo[i]
+		}
+	}
+	if ctx == nil || ctx.HeldoutDiverged == 0 {
+		t.Fatalf("fixture is vacuous: the winning candidate must CHANGE the router's lane on the heldout task, "+
+			"or no zoo row ever consults the resolver and this test cannot fail (%+v)", ctx)
+	}
+
+	sawChanged := false
 	for _, p := range a.Policies {
 		if !strings.HasPrefix(p.Policy, "zoo:") {
 			continue
@@ -118,7 +161,14 @@ func TestIntegrationZooScoresHeldoutWithTheSameResolver(t *testing.T) {
 				t.Fatalf("zoo row %s scored at %s — the heldout verdict used the EVAL-SET resolver while "+
 					"selection used the tuning-frozen one (two rulers)", p.Policy, c)
 			}
+			if strings.Contains(c, "codex-TUNING") {
+				sawChanged = true
+			}
 		}
+	}
+	if !sawChanged {
+		t.Fatal("no zoo row was scored at a CHANGED lane's cell, so the resolver was never exercised on the " +
+			"heldout split — the assertion above cannot fail and this test pins nothing")
 	}
 }
 

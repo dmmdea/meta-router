@@ -313,10 +313,12 @@ type FrontierPoint struct {
 // to its measured claude pass) exceeded the curve's own maximum — the
 // envelope the frontier exists to draw (review 2026-08-12, round 4). Their
 // free-lane base is UNKNOWN and enters the sweep as 0 — an imputation,
-// COUNTED and named in the artifact: when this count is nonzero, low-budget
-// points are "at least this", not measurements. (The claude-only-vs-
-// measured-free-failure distinction lives in this counter, not in the curve
-// shape.)
+// COUNTED and named in the artifact: when this count is nonzero, EVERY point
+// on the curve is "at least this", not a measurement. The imputed 0 works
+// twice — it depresses the base, and it caps that task's withClaude through
+// the max(claude, free) clamp below — so the max-budget point can understate
+// the truth as well. (The claude-only-vs-measured-free-failure distinction
+// lives in this counter, not in the curve shape.)
 //
 // A sweepable task whose CLAUDE side is unmeasured contributes a zero claude
 // DELTA — "no known gain", which never fabricates a failure: it holds the

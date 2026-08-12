@@ -572,8 +572,11 @@ func TestLoadDoneNamesAModellessRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs := loadDone(p)
-	if !rs.modelsByIdent[identKey("T-01", "local", 1)][modelUnrecorded] {
-		t.Fatalf("a model-less row must index under the sentinel: %v", rs.modelsByIdent)
+	// Indexed RAW (unmatchable, since an empty pin is rejected); the sentinel
+	// is a display form applied at the formatting boundary only — see
+	// TestSentinelIsNotPinnable for why that distinction is load-bearing.
+	if !rs.modelsByIdent[identKey("T-01", "local", 1)][""] {
+		t.Fatalf("a model-less row must index under the raw empty model: %v", rs.modelsByIdent)
 	}
 	d := detectDrift([]plannedCell{driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)}, rs)
 	if len(d.modelDrift) != 1 {
@@ -581,6 +584,9 @@ func TestLoadDoneNamesAModellessRow(t *testing.T) {
 	}
 	if len(d.recordedModels) != 1 || d.recordedModels[0] != modelUnrecorded {
 		t.Fatalf("the refusal must NAME the condition, got %v", d.recordedModels)
+	}
+	if !d.blankRecordedModel {
+		t.Fatal("the blank-model case must be flagged so the refusal can drop its 'never measured at' claim")
 	}
 }
 
@@ -771,5 +777,81 @@ func TestLooksLikeOracleRefusalThreshold(t *testing.T) {
 	}
 	if err := looksLikeOracle([]byte("\n\n")); err == nil {
 		t.Fatal("a file with no JSON rows must be refused")
+	}
+}
+
+// The two drift tiers say DIFFERENT things because they are different facts,
+// and the blank-model case says a third. Reverting any of the three to the
+// generic "re-spend" sentence left the suite green (review round 5), so the
+// message text is pinned here — it is the whole output of a guard whose only
+// product is advice on a tool with money attached.
+func TestDriftMessagesAreTierAccurate(t *testing.T) {
+	effortOnly := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+		},
+		modelsByIdent: map[string]map[string]bool{identKey("T-01", "claude", 1): {"m": true}},
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, effortOnly)
+	msg := driftRefusal(d)
+	if !strings.Contains(msg, "RE-SPENDS") {
+		t.Fatalf("the effort tier DOES re-spend and must say so: %s", msg)
+	}
+
+	modelOnly := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{identKey("T-01", "claude", 1): {"other": true}},
+	}
+	d = detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, modelOnly)
+	msg = driftRefusal(d)
+	if strings.Contains(msg, "RE-SPENDS") {
+		t.Fatalf("a model-tier cell was never recorded at this model — it ADDS a measurement, it does not re-spend: %s", msg)
+	}
+	if !strings.Contains(msg, "ADDS a first measurement") {
+		t.Fatalf("the model tier must say what it actually does: %s", msg)
+	}
+
+	// The blank-model branch: an unlabeled row does NOT say which model
+	// produced it, so "never measured at this model" would be a lie and
+	// -re-measure may re-buy recorded work.
+	blank := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{identKey("T-01", "local", 1): {"": true}},
+	}
+	d = detectDrift([]plannedCell{driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)}, blank)
+	msg = driftRefusal(d)
+	if strings.Contains(msg, "never measured at") {
+		t.Fatalf("an unlabeled row may BE a measurement at the pin; the message must not claim otherwise: %s", msg)
+	}
+	if !strings.Contains(msg, "could re-buy") || !strings.Contains(msg, modelUnrecorded) {
+		t.Fatalf("the blank-model branch must name the condition and the re-buy risk: %s", msg)
+	}
+}
+
+// The sentinel is a DISPLAY string, never an index key. Indexing it alongside
+// real pins made it selectable: pinning it literally matched a model-less row,
+// silenced BOTH drift tiers, and appended evidence under a fabricated model —
+// a message fix that opened a hole in the money guard (review round 5).
+func TestSentinelIsNotPinnable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"local","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs := loadDone(p)
+	if !rs.modelsByIdent[identKey("T-01", "local", 1)][""] {
+		t.Fatalf("a blank recorded model must index under the RAW empty string: %v", rs.modelsByIdent)
+	}
+	if rs.modelsByIdent[identKey("T-01", "local", 1)][modelUnrecorded] {
+		t.Fatal("the display sentinel must NOT be in the matching namespace — pinning it would disarm the guard")
+	}
+	// Pinning the sentinel string must still trip the guard.
+	d := detectDrift([]plannedCell{driftCell("T-01", "local", modelUnrecorded, policyeval.EffortUnrecorded, 1)}, rs)
+	if len(d.modelDrift) != 1 {
+		t.Fatalf("pinning the sentinel must NOT match a blank recorded model: %+v", d)
+	}
+	// ...and the message still names the condition via the display form.
+	if len(d.recordedModels) != 1 || d.recordedModels[0] != modelUnrecorded {
+		t.Fatalf("the refusal must display the blank as the sentinel: %v", d.recordedModels)
 	}
 }

@@ -684,7 +684,7 @@ func main() {
 	// either repo computes, records, or reads, on the artifact whose design
 	// brief names cap-blow accounting as one of the two facts that must hold
 	// (Q6 explicitly forbids asserting it uninstrumented; review 2026-08-12).
-	note := "Q6 quota gate: throttles/defers during replay are graceful degradation, not violations (cap-blow accounting is not instrumented here; this artifact asserts nothing about it). Unknown cells are holes (e.g. a lane's unfilled window), counted and never imputed IN THE POLICY ROWS. The frontier is the ONE exception and says so: a task measured only on the claude side is swept with an imputed free base of 0, because excluding it would drop its measured claude evidence and break the curve's envelope over the policy rows — frontier_free_unmeasured_tasks counts exactly those, and while it is nonzero the low-budget points are a LOWER BOUND, not a measurement."
+	note := "Q6 quota gate: throttles/defers during replay are graceful degradation, not violations (cap-blow accounting is not instrumented here; this artifact asserts nothing about it). Unknown cells are holes (e.g. a lane's unfilled window), counted and never imputed IN THE POLICY ROWS. The frontier is the ONE exception and says so: a task measured only on the claude side is swept with an imputed free base of 0, because excluding it would drop its measured claude evidence and break the curve's envelope over the policy rows — frontier_free_unmeasured_tasks counts exactly those, and while it is nonzero EVERY point on the curve is a LOWER BOUND, not a measurement — the max-budget point included, because the imputed 0 both depresses the base AND caps that task's withClaude, which is max(claude, free)."
 	var splitInfo *SplitInfo
 	if *split {
 		var notRankable []string
@@ -728,7 +728,7 @@ func main() {
 	if frontierFreeUnmeasured > 0 {
 		// The artifact's one imputation, said out loud on the noisy channel
 		// too — a counter nobody reads discharges nothing (review round 4).
-		fmt.Fprintf(os.Stderr, "WARNING: the frontier imputes a free-lane base of 0 for %d task(s) measured only on the claude side — its low-budget points are a LOWER BOUND, not a measurement (frontier_free_unmeasured_tasks)\n", frontierFreeUnmeasured)
+		fmt.Fprintf(os.Stderr, "WARNING: the frontier imputes a free-lane base of 0 for %d task(s) measured only on the claude side — EVERY point on the curve is a LOWER BOUND, not a measurement (frontier_free_unmeasured_tasks)\n", frontierFreeUnmeasured)
 	}
 	out := struct {
 		Margin    float64 `json:"margin"`
@@ -762,9 +762,11 @@ func main() {
 		// let a policy row exceed the curve's own maximum (the envelope the
 		// frontier exists to draw). The imputation is the price of the
 		// envelope, and THIS COUNT is what discharges it: when it is nonzero,
-		// the low-budget points are a LOWER BOUND ("at least this"), not a
-		// measurement, because each such task's free side could only score
-		// higher than the 0 assumed for it.
+		// EVERY point on the curve is a LOWER BOUND ("at least this"), not a
+		// measurement — the max-budget point included. The imputed 0 works
+		// twice: it depresses the base, AND it caps that task's withClaude,
+		// which is max(claude, free) — so even the "spend claude everywhere"
+		// end of the curve can understate the truth.
 		FrontierFreeUnmeasured int    `json:"frontier_free_unmeasured_tasks"`
 		Note                   string `json:"note"`
 	}{*margin, "always-claude", refCfg.Key(), tblProvenance, malformed, nonEvidence, unranked, refUnmeasured, splitInfo, zooEntries, reports, cov, frontier, frontierUnmeasured, frontierFreeUnmeasured, note}
