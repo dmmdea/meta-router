@@ -99,7 +99,9 @@ func resolveContext(dir string, deps []int, st map[int]*StepState, compactOn boo
 		}
 		content := a.Content
 		if compactOn {
-			if c, applied := compact.Compact(content); applied && len(c) < len(content) {
+			// EmbedSafe, not Compact: the consumer is a MODEL that never
+			// decompacts, so a marker-family document embeds untouched.
+			if c, ok := compact.EmbedSafe(content); ok && len(c) < len(content) {
 				saved += len(content) - len(c)
 				content = c
 			}

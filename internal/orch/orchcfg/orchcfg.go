@@ -89,6 +89,8 @@ type Config struct {
 	// CompactionOff (W5) disables the LOSSLESS embed-time dep-context
 	// compaction in strategy DAGs. Ships ON: the transform is provably
 	// round-trippable (DG-3 lossless-first; nothing lossy exists here).
+	// Scope: compaction ONLY — the W5 re-lane context handoff is not
+	// compression and has no switch.
 	CompactionOff bool `json:"compaction_off"`
 }
 

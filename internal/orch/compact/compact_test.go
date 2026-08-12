@@ -84,6 +84,88 @@ func TestCompactionSaves(t *testing.T) {
 	}
 }
 
+// Review 2026-08-12 reproduced three silent losses in the re-encode pipeline;
+// each is pinned here against its exact archetype.
+
+// Loss 1 (CRITICAL, confirmed live): the any-decode rewrote int64s above 2^53
+// through float64 on the rotation's own target shape, with the old
+// float64-based Equal blind to it. UseNumber preserves the literal; the
+// number-aware Equal catches a regression.
+func TestLargeIntegersSurviveExactly(t *testing.T) {
+	raw := `[{"span_id":9007199254740993,"lane":"claude"},{"span_id":1723400000000000001,"lane":"codex"},{"span_id":3,"lane":"glm"}]`
+	out, _ := Compact(raw)
+	for _, lit := range []string{"9007199254740993", "1723400000000000001"} {
+		if !strings.Contains(out, lit) {
+			t.Fatalf("int64 literal %s must survive compaction exactly:\n%s", lit, out)
+		}
+	}
+	back, ok := Decompact(out)
+	if !ok || !Equal(raw, back) {
+		t.Fatalf("round-trip: %s", back)
+	}
+	if Equal(`{"a":9007199254740993}`, `{"a":9007199254740992}`) {
+		t.Fatal("Equal must compare number literals exactly, never through float64")
+	}
+	if !Equal(`{"a":1}`, `{"a":1.0}`) {
+		t.Fatal("Equal must still treat 1 and 1.0 as the same rational")
+	}
+}
+
+// Loss 2 (HIGH, confirmed live): a duplicate key made the decode drop all but
+// the last value, and deletion SHRINKS, so the corrupted form tended to win
+// the contest. Dup-key documents are minify-only (both duplicates survive;
+// the repo already adjudicated dup-key collapse as a MAJOR in hostcfg).
+func TestDuplicateKeysForceMinifyOnly(t *testing.T) {
+	raw := `[{"amount": 1, "amount": 0, "k": "a"},{"amount": 1, "amount": 0, "k": "b"},{"amount": 1, "amount": 0, "k": "c"}]`
+	out, _ := Compact(raw)
+	if strings.Contains(out, marker) {
+		t.Fatalf("dup-key document must never rotate:\n%s", out)
+	}
+	if strings.Count(out, `"amount"`) != 6 {
+		t.Fatalf("minify must preserve BOTH duplicates per object:\n%s", out)
+	}
+}
+
+// Loss 3 (HIGH, confirmed live): the default Marshal HTML-escaped < > & so a
+// winning rotation showed the model escape sequences instead of code.
+func TestHTMLContentNotMangledInRotation(t *testing.T) {
+	var rows []string
+	for i := 0; i < 8; i++ {
+		rows = append(rows, fmt.Sprintf(`{"snippet": "unclosed <div> & <span> tag", "row_number_key": %d, "another_long_key": "v"}`, i))
+	}
+	raw := "[" + strings.Join(rows, ",") + "]"
+	out, _ := Compact(raw)
+	if !strings.Contains(out, marker) {
+		t.Fatalf("this shape must rotate: %s", out)
+	}
+	if strings.Contains(out, `\u003c`) {
+		t.Fatalf("rotation must not HTML-escape code strings for the model:\n%s", out)
+	}
+	if !strings.Contains(out, "<div>") {
+		t.Fatalf("code strings must stay readable:\n%s", out)
+	}
+	back, ok := Decompact(out)
+	if !ok || !Equal(raw, back) {
+		t.Fatal("readability must not cost fidelity")
+	}
+}
+
+// EmbedSafe never ships the escape to a consumer that cannot decode it: a
+// marker-family document embeds UNTOUCHED (the model would otherwise read a
+// key the source never contained). Everything else matches Compact exactly.
+func TestEmbedSafeNeverShipsTheEscape(t *testing.T) {
+	family := `{"@columnar": "mine", "other": 1}`
+	if _, ok := EmbedSafe(family); ok {
+		t.Fatal("a marker-family document must embed untouched")
+	}
+	doc := `[{"lane": "claude", "n": 1}, {"lane": "codex", "n": 2}, {"lane": "glm", "n": 3}]`
+	out, ok := EmbedSafe(doc)
+	want, _ := Compact(doc)
+	if !ok || out != want {
+		t.Fatalf("non-family documents must compact exactly like Compact:\ngot:  %s\nwant: %s", out, want)
+	}
+}
+
 // Non-JSON is never touched — prose compaction would be LOSSY by definition.
 func TestNonJSONUntouched(t *testing.T) {
 	if out, applied := Compact("a prose answer, not JSON {maybe"); applied || out != "" {
