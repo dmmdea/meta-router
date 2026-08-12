@@ -65,7 +65,7 @@ func TestSelectBestPicksByTuningPassRateThenCheaper(t *testing.T) {
 		{Family: "f", Desc: "stay", Route: func(t Task) string { return t.BaseLane }},
 		{Family: "f", Desc: "bump", Route: func(t Task) string { return "codex" }},
 	}
-	best, ev := SelectBest(cands, tb, tasks, zlc)
+	best, ev := SelectBest(cands, tb, tasks, nil, zlc)
 	if best.Desc != "stay" {
 		t.Fatalf("tie must break to lower summed lane cost (glm < codex) before lexical Desc: got %s", best.Desc)
 	}
@@ -83,15 +83,63 @@ func TestSelectBestPrefersHigherPassRate(t *testing.T) {
 		{Family: "f", Desc: "stay", Route: func(t Task) string { return t.BaseLane }},
 		{Family: "f", Desc: "bump", Route: func(t Task) string { return "codex" }},
 	}
-	best, _ := SelectBest(cands, tb, tasks, zlc)
+	best, _ := SelectBest(cands, tb, tasks, nil, zlc)
 	if best.Desc != "bump" {
 		t.Fatalf("higher tuning pass-rate must win: got %s", best.Desc)
 	}
 }
 
 func TestPolicyOfAbstainsOnUnknownTask(t *testing.T) {
-	p := PolicyOf(Candidate{Family: "f", Desc: "x", Route: func(t Task) string { return "glm" }}, map[string]Task{}, zlc)
+	p := PolicyOf(Candidate{Family: "f", Desc: "x", Route: func(t Task) string { return "glm" }}, map[string]Task{}, nil, zlc)
 	if got := p("never-seen"); got != (policyeval.Config{}) {
 		t.Fatalf("unknown task must abstain (zero Config), got %v", got)
 	}
+}
+
+// The W3 symmetry rule: a candidate that leaves the router's lane unchanged
+// scores at the router's OWN emitted config — the same cell router-live
+// scores at — and resolve() is consulted only for a lane the candidate
+// CHANGED. Scoring the two arms at different cells certified a provably
+// no-op wrapper as pareto_vs_router: true.
+func TestPolicyOfScoresUnchangedLaneAtTheRouterConfig(t *testing.T) {
+	routerCfg := policyeval.Config{Lane: "glm", Model: "glm-5.2", Effort: "high"} // the router's OWN pick
+	base := func(string) policyeval.Config { return routerCfg }
+	byID := map[string]Task{"t1": mkTask("t1", "glm", "short")}
+
+	noop := PolicyOf(Candidate{Family: "f", Desc: "noop", Route: func(t Task) string { return t.BaseLane }}, byID, base, zlc)
+	if got := noop("t1"); got != routerCfg {
+		t.Fatalf("an unchanged lane must score at the router's own config %s, got %s (resolve's pick)", routerCfg.Key(), got.Key())
+	}
+
+	bump := PolicyOf(Candidate{Family: "f", Desc: "bump", Route: func(t Task) string { return "codex" }}, byID, base, zlc)
+	if got := bump("t1"); got != zlc("codex") {
+		t.Fatalf("a CHANGED lane has no router-emitted config and must go through resolve, got %s", got.Key())
+	}
+}
+
+// SelectBest must thread the base policy into its tuning evaluation — an
+// unchanged lane scores at the router's own cell DURING SELECTION too, or the
+// grid is tuned against a different ruler than the heldout verdict uses.
+// Dropping the base argument inside SelectBest survived the whole suite
+// (round 4, mutation-verified), so this pins it: the router's cell for t1 is
+// MEASURED (pass) while resolve's cell for the same lane is UNMEASURED, and
+// only a base-respecting evaluation can score the stay-candidate 1.0.
+func TestSelectBestScoresUnchangedLanesAtTheBaseConfig(t *testing.T) {
+	routerCfg := policyeval.Config{Lane: "glm", Model: "glm-ROUTER", Effort: "high"}
+	tb := policyeval.NewTable()
+	tb.Add("t1", routerCfg, true) // evidence exists ONLY at the router's own cell
+
+	base := func(string) policyeval.Config { return routerCfg }
+	tasks := []Task{mkTask("t1", "glm", "short")}
+	cands := []Candidate{{Family: "f", Desc: "stay", Route: func(t Task) string { return t.BaseLane }}}
+
+	_, ev := SelectBest(cands, tb, tasks, base, zlc)
+	if !almostZoo(ev.PassRate, 1.0) || ev.Unknown != 0 {
+		t.Fatalf("the stay-candidate must score at the router's measured cell: PassRate=%v Unknown=%d", ev.PassRate, ev.Unknown)
+	}
+}
+
+func almostZoo(a, b float64) bool {
+	d := a - b
+	return d < 1e-9 && d > -1e-9
 }

@@ -79,7 +79,15 @@ A concept change that arrives as a quiet test edit is a review-blocking defect.
   carries `effort: unrecorded`, so gating the full key today would flag all 18
   ranked configs and isolate nothing. Full-cell coverage ships as
   `config_coverage` in the scorecard — reported now, gated once the
-  re-baseline fills it. Deferred rows are holes, never evidence.
+  re-baseline fills it. A hole is never evidence — the one shared definition
+  is `policyeval.IsEvidence` (not dispatched / deferred / error / exit-N /
+  verify_error are all holes). The gate reads the ACTIVE rank table (the
+  operator's override when present, the compiled seed otherwise): gating the
+  seed while the router routes on an override measures a policy nobody runs.
+  Known-uncovered pairs awaiting the re-baseline live in an explicit
+  SHRINKING allowlist (`knownUncovered`): still reported loudly on every run,
+  any NEW uncovered pair fails, and a pair that gains evidence must leave the
+  list or the canary fails on the stale entry. Acknowledged, never excused.
   verify: `TestCanaryB15RankedModelsHaveEvidence`
 <!-- invariants:end -->
 

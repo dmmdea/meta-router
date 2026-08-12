@@ -6,11 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/dmmdea/meta-router/internal/orch/router"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
+	"github.com/dmmdea/meta-router/internal/policyeval"
 )
 
 // oraclePath resolves the replay oracle. It lives in the PRIVATE repo, so a
@@ -71,15 +71,10 @@ func loadOracleModels(t *testing.T) map[string]bool {
 		// missing/stale binary writes `dispatched:false, outcome_class:error`
 		// for every cell, and B15 turned GREEN for a model that was never
 		// dispatched once (review 2026-08-12, reproduced on a synthetic
-		// oracle). Evidence means the dispatch happened and returned a verdict.
-		if !r.Dispatched {
-			continue
-		}
-		switch r.OutcomeClass {
-		case "deferred", "error", "spawn_error", "config_error", "parse_error", "api_error":
-			continue
-		}
-		if strings.HasPrefix(r.OutcomeClass, "exit-") {
+		// oracle). The definition lives in policyeval.IsEvidence — ONE list
+		// shared with the scorecard and the replay's resume set; this used to
+		// be the third byte-identical copy, and copies drift.
+		if !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
 			continue
 		}
 		out[r.Lane+"|"+r.Model] = true

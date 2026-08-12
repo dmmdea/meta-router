@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -47,7 +50,7 @@ func TestLoadDoneDoesNotCreditADifferentModel(t *testing.T) {
 	if err := os.WriteFile(p, []byte(row), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := loadDone(p)
+	done := loadDone(p).done
 	if !done[rowKey("RS-01", "claude", "claude-sonnet-5", "high", 1)] {
 		t.Fatal("the recorded sonnet cell must be marked done")
 	}
@@ -284,7 +287,7 @@ func TestLoadDoneNormalizesBlankEffort(t *testing.T) {
 	if err := os.WriteFile(p, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := loadDone(p)
+	done := loadDone(p).done
 	if !done[rowKey("AC-10", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)] {
 		t.Fatalf("a legacy row must resume under the normalized unrecorded effort: %v", done)
 	}
@@ -339,7 +342,7 @@ not json — torn line survives
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := loadDone(p)
+	done := loadDone(p).done
 	if !done[rowKey("AC-04", "local", "m", "e", 1)] || !done[rowKey("RS-03", "claude", "m", "e", 2)] {
 		t.Fatalf("resume set wrong: %v", done)
 	}
@@ -348,14 +351,14 @@ not json — torn line survives
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
 	f.WriteString(deferredLine)
 	f.Close()
-	if loadDone(p)[rowKey("EX-01", "glm", "m", "e", 1)] {
+	if d := loadDone(p).done; d[rowKey("EX-01", "glm", "m", "e", 1)] {
 		t.Fatal("deferred row wrongly counted as done — the window-reopen refill would no-op")
 	}
 	if done[rowKey("AC-04", "local", "m", "e", 2)] || len(done) != 2 {
 		t.Fatalf("resume set has phantom rows: %v", done)
 	}
-	if loadDone(filepath.Join(t.TempDir(), "absent.jsonl")) == nil {
-		t.Fatal("missing file must return empty set, not nil")
+	if rs := loadDone(filepath.Join(t.TempDir(), "absent.jsonl")); rs.done == nil || rs.effortsByCell == nil || rs.modelsByIdent == nil {
+		t.Fatal("missing file must return empty sets, not nil")
 	}
 }
 
@@ -409,5 +412,502 @@ func TestRouterClass(t *testing.T) {
 		if got := routerClass(in); got != want {
 			t.Errorf("routerClass(%s)=%q want %q", in, got, want)
 		}
+	}
+}
+
+// ── effort-drift guard (review 2026-08-12, round 3) ─────────────────────────
+//
+// The previous guard keyed on the AGGREGATE plan.Skipped == 0, which was wrong
+// in both directions: it refused every legitimate first measurement of new
+// cells against a populated oracle, and it was silent on PARTIAL drift (pin
+// one lane's real effort while another lane still matches). Drift is per-cell:
+// a planned cell whose (task,lane,model,trial) identity is already recorded
+// under some OTHER effort.
+
+// driftFixture builds a plan + effort index from terse cell descriptions.
+func driftCell(task, lane, model, effort string, trial int) plannedCell {
+	return plannedCell{Task: task, Trial: trial,
+		Config: policyeval.Config{Lane: lane, Model: model, Effort: effort}}
+}
+
+func TestDetectEffortDrift_LegacyRepinDrifts(t *testing.T) {
+	// The 476-cell incident shape: rows recorded pre-effort-capture resume as
+	// "unrecorded"; the operator pins a real effort; every cell re-keys.
+	effs := map[string]map[string]bool{
+		cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+		cellKey("T-02", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "claude", "m", "high", 1),
+		driftCell("T-02", "claude", "m", "high", 1),
+	}
+	d := detectDrift(run, resumeState{effortsByCell: effs})
+	if len(d.effortDrift) != 2 {
+		t.Fatalf("both re-keyed cells must drift, got %d", len(d.effortDrift))
+	}
+	if len(d.recordedEfforts) != 1 || d.recordedEfforts[0] != policyeval.EffortUnrecorded {
+		t.Fatalf("the recorded efforts must be named for the error message, got %v", d.recordedEfforts)
+	}
+}
+
+func TestDetectDrift_NewCellsDoNotDrift(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "local", "m", 1): {policyeval.EffortUnrecorded: true},
+		},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "local", 1): {"m": true},
+		},
+	}
+	for name, run := range map[string][]plannedCell{
+		"new lane":  {driftCell("T-01", "glm", "glm-5.2", policyeval.EffortUnrecorded, 1)},
+		"new task":  {driftCell("T-99", "local", "m", policyeval.EffortUnrecorded, 1)},
+		"new trial": {driftCell("T-01", "local", "m", policyeval.EffortUnrecorded, 2)},
+	} {
+		if d := detectDrift(run, rs); d.any() {
+			t.Fatalf("%s: a cell with no recorded (task,lane,trial) counterpart is a first measurement, not drift: %+v", name, d)
+		}
+	}
+}
+
+// A planned cell whose (task,lane,trial) is recorded only under OTHER models
+// is MODEL drift: a pin typo re-dispatches (and mislabels) the whole table if
+// nothing refuses, and a deliberate new-model measurement is the -re-measure
+// override, not a silent pass — v0.31.0's aggregate guard refused this shape
+// and dropping it without a replacement was the round-4 MAJOR.
+func TestDetectDrift_ModelRekeyDrifts(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "claude-sonnet-5", 1): {policyeval.EffortUnrecorded: true},
+		},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "claude", 1): {"claude-sonnet-5": true},
+		},
+	}
+	// The typo shape: claude-sonnet-55 was never recorded at any effort, so
+	// the effort tier is blind to it — the model tier must catch it.
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "claude-sonnet-55", policyeval.EffortUnrecorded, 1)}, rs)
+	if len(d.modelDrift) != 1 || len(d.effortDrift) != 0 {
+		t.Fatalf("a model re-key must be caught by the model tier: %+v", d)
+	}
+	if len(d.recordedModels) != 1 || d.recordedModels[0] != "claude-sonnet-5" {
+		t.Fatalf("the recorded models must be named for the error message, got %v", d.recordedModels)
+	}
+}
+
+// A cell that drifts on effort is reported ONCE, by the effort tier — never
+// double-counted into both.
+//
+// From a loadDone-built state the two tiers are mutually exclusive by
+// construction: a non-empty effortsByCell entry for the PLANNED model implies
+// loadDone also indexed that model, which silences the model tier. The
+// `continue` is therefore defensive, not load-bearing — so this test builds
+// the INCONSISTENT state loadDone cannot produce (effort recorded for the
+// planned model, the model index missing it) and pins that the cell is still
+// counted exactly once, in the effort tier. Without the fixture the test named
+// a precedence it could not reach (review round 4).
+func TestDetectDrift_EffortTierTakesPrecedence(t *testing.T) {
+	inconsistent := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+		},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "claude", 1): {"other-model": true}, // does NOT contain "m"
+		},
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, inconsistent)
+	if len(d.effortDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("a cell satisfying BOTH tiers must be reported once, by the effort tier: %+v", d)
+	}
+
+	// And the ordinary consistent case still reports effort drift alone.
+	consistent := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+		},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "claude", 1): {"m": true},
+		},
+	}
+	d = detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, consistent)
+	if len(d.effortDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("same-model different-effort is effort drift, once: %+v", d)
+	}
+}
+
+// The recorded-value lists reach an operator-facing refusal, so their order is
+// part of the contract: map iteration must never decide it. Removing either
+// sort.Strings left the whole suite green (review round 4).
+func TestDetectDriftRecordedListsAreSorted(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "m", 1): {"xhigh": true, "high": true, "low": true, "medium": true},
+		},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-02", "claude", 1): {"zeta": true, "alpha": true, "mu": true, "beta": true},
+		},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "claude", "m", policyeval.EffortUnrecorded, 1),
+		driftCell("T-02", "claude", "omega", policyeval.EffortUnrecorded, 1),
+	}
+	for i := 0; i < 40; i++ {
+		d := detectDrift(run, rs)
+		if strings.Join(d.recordedEfforts, ",") != "high,low,medium,xhigh" {
+			t.Fatalf("efforts not sorted: %v", d.recordedEfforts)
+		}
+		if strings.Join(d.recordedModels, ",") != "alpha,beta,mu,zeta" {
+			t.Fatalf("models not sorted: %v", d.recordedModels)
+		}
+	}
+}
+
+// A recorded row with NO model indexes under the named sentinel, so the
+// refusal says what the rows carry instead of naming nothing — and it points
+// at the only escape, since no pin can match an empty recorded model.
+func TestLoadDoneNamesAModellessRow(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"local","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs := loadDone(p)
+	// Indexed RAW (unmatchable, since an empty pin is rejected); the sentinel
+	// is a display form applied at the formatting boundary only — see
+	// TestSentinelIsNotPinnable for why that distinction is load-bearing.
+	if !rs.modelsByIdent[identKey("T-01", "local", 1)][""] {
+		t.Fatalf("a model-less row must index under the raw empty model: %v", rs.modelsByIdent)
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)}, rs)
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("the model-less row must trip the tier, in the UNLABELED bucket: %+v", d)
+	}
+	if len(d.recordedModels) != 1 || d.recordedModels[0] != modelUnrecorded {
+		t.Fatalf("the refusal must NAME the condition, got %v", d.recordedModels)
+	}
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("the blank-model cell belongs in its own bucket so the refusal can drop its 'never measured at' claim: %+v", d)
+	}
+}
+
+// loadDone populates the model index from evidence rows only, TRIMMING lane
+// and model exactly as the planned side does — a padded recorded field
+// otherwise blinds both drift tiers on the seam with money attached.
+func TestLoadDoneModelIndexAndTrim(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"claude ","model":" claude-sonnet-5","effort":"","trial":1,"dispatched":true,"outcome_class":"ok"}
+{"task":"T-02","lane":"claude","model":"claude-sonnet-5","trial":1,"dispatched":false,"outcome_class":"error"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs := loadDone(p)
+	if !rs.done[rowKey("T-01", "claude", "claude-sonnet-5", policyeval.EffortUnrecorded, 1)] {
+		t.Fatalf("padded lane/model must resume under the TRIMMED key: %v", rs.done)
+	}
+	if !rs.modelsByIdent[identKey("T-01", "claude", 1)]["claude-sonnet-5"] {
+		t.Fatalf("the model index must hold the trimmed model: %v", rs.modelsByIdent)
+	}
+	if rs.modelsByIdent[identKey("T-02", "claude", 1)] != nil {
+		t.Fatal("a hole (error row) must not enter the model index")
+	}
+	// And the guard actually fires off the trimmed index: an effort re-key of
+	// the padded row must be caught.
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "claude-sonnet-5", "high", 1)}, rs)
+	if len(d.effortDrift) != 1 {
+		t.Fatalf("padded recorded row must still trip the effort tier: %+v", d)
+	}
+}
+
+func TestDetectEffortDrift_PartialDriftIsCaught(t *testing.T) {
+	// The case the aggregate tell was blind to: local's keys still match (its
+	// cells were skipped upstream and are NOT in run), claude's are re-keyed.
+	effs := map[string]map[string]bool{
+		cellKey("T-01", "local", "lm", 1):  {policyeval.EffortUnrecorded: true},
+		cellKey("T-01", "claude", "cm", 1): {policyeval.EffortUnrecorded: true},
+	}
+	run := []plannedCell{ // local skipped upstream; only claude planned
+		driftCell("T-01", "claude", "cm", "high", 1),
+	}
+	d := detectDrift(run, resumeState{effortsByCell: effs})
+	if len(d.effortDrift) != 1 || d.effortDrift[0].Config.Lane != "claude" {
+		t.Fatalf("the drifted lane must be caught even when another lane resumes cleanly: %+v", d)
+	}
+}
+
+func TestDetectEffortDrift_MixedNewAndDrifted(t *testing.T) {
+	effs := map[string]map[string]bool{
+		cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "claude", "m", "high", 1), // drift
+		driftCell("T-02", "claude", "m", "high", 1), // new task: fine
+	}
+	d := detectDrift(run, resumeState{effortsByCell: effs})
+	if len(d.effortDrift) != 1 || d.effortDrift[0].Task != "T-01" {
+		t.Fatalf("only the re-keyed cell drifts, got %+v", d)
+	}
+}
+
+// loadDone's second return feeds the drift detector: evidence rows indexed by
+// effort-less identity, holes excluded (re-dispatching a hole was always going
+// to happen — not a re-spend the guard needs to refuse).
+func TestLoadDoneEffortIndex(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"claude","model":"m","trial":1,"dispatched":true,"outcome_class":"ok"}
+{"task":"T-01","lane":"claude","model":"m","effort":"high","trial":1,"dispatched":true,"outcome_class":"ok"}
+{"task":"T-02","lane":"claude","model":"m","trial":1,"dispatched":false,"outcome_class":"error"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	effs := loadDone(p).effortsByCell
+	got := effs[cellKey("T-01", "claude", "m", 1)]
+	if !got[policyeval.EffortUnrecorded] || !got["high"] || len(got) != 2 {
+		t.Fatalf("both recorded efforts must be indexed under the cell identity, got %v", got)
+	}
+	if effs[cellKey("T-02", "claude", "m", 1)] != nil {
+		t.Fatal("a hole (error row) must not enter the drift index — re-attempting it is not a re-spend")
+	}
+}
+
+// The evidence definition is policyeval.IsEvidence — error/exit-N/verify_error
+// rows are HOLES on the resume side exactly as they are on the scoring side,
+// or a cell is simultaneously "already recorded" and "not evidence" forever.
+func TestLoadDoneExcludesNonEvidenceRows(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"local","model":"m","effort":"e","trial":1,"dispatched":false,"outcome_class":"error"}
+{"task":"T-02","lane":"local","model":"m","effort":"e","trial":1,"dispatched":true,"outcome_class":"exit-4"}
+{"task":"T-03","lane":"local","model":"m","effort":"e","trial":1,"dispatched":true,"outcome_class":"verify_error"}
+{"task":"T-04","lane":"local","model":"m","effort":"e","trial":1,"dispatched":true,"outcome_class":"ok"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := loadDone(p).done
+	for _, task := range []string{"T-01", "T-02", "T-03"} {
+		if done[rowKey(task, "local", "m", "e", 1)] {
+			t.Fatalf("%s is a hole and must be re-attemptable, not recorded", task)
+		}
+	}
+	if !done[rowKey("T-04", "local", "m", "e", 1)] {
+		t.Fatal("the ok row is evidence and must be recorded")
+	}
+}
+
+// ── verify seam classification (review 2026-08-12, round 4) ─────────────────
+
+// TestHelperProcess is not a test: it lets the tests below manufacture REAL
+// *exec.ExitError values with chosen exit codes (the standard os/exec trick).
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	code, _ := strconv.Atoi(os.Getenv("HELPER_EXIT_CODE"))
+	os.Exit(code)
+}
+
+func realExitError(t *testing.T, code int) error {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", fmt.Sprintf("HELPER_EXIT_CODE=%d", code))
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("helper exited 0, wanted %d", code)
+	}
+	return err
+}
+
+// The three verify outcomes are not interchangeable: exit 0 is a measured
+// pass, exit 1 a measured failure, and ANYTHING else is the verifier's own
+// infrastructure breaking — a hole (verify_error), never a measured failure.
+// Before this classification a missing goldverify binary scored an entire
+// replay as incompetent.
+func TestApplyVerifyOutcome(t *testing.T) {
+	base := func() Row { return Row{Task: "T-01", Dispatched: true, OutcomeClass: "ok"} }
+
+	r := base()
+	applyVerifyOutcome(&r, []byte(`{"pass":true}`), nil)
+	if !r.VerifierPass || r.OutcomeClass != "ok" {
+		t.Fatalf("exit 0 must be a measured pass: %+v", r)
+	}
+
+	r = base()
+	applyVerifyOutcome(&r, []byte(`{"detail":"held-out test failed"}`), realExitError(t, 1))
+	if r.VerifierPass || r.OutcomeClass != "ok" || !strings.Contains(r.Note, "verify-fail") {
+		t.Fatalf("exit 1 must be a measured failure with WHY in the note: %+v", r)
+	}
+	if !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+		t.Fatal("a measured verify failure IS evidence")
+	}
+
+	r = base()
+	applyVerifyOutcome(&r, []byte("git: bad -repos path"), realExitError(t, 2))
+	if r.OutcomeClass != "verify_error" {
+		t.Fatalf("an unexpected verifier exit must be verify_error, got %+v", r)
+	}
+	if policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+		t.Fatal("verifier infrastructure failure must be a HOLE, not evidence")
+	}
+
+	r = base()
+	spawnErr := exec.Command(filepath.Join(t.TempDir(), "no-such-goldverify.exe")).Run()
+	if spawnErr == nil {
+		t.Fatal("expected a spawn error")
+	}
+	applyVerifyOutcome(&r, nil, spawnErr)
+	if r.OutcomeClass != "verify_error" || !strings.Contains(r.Note, "goldverify:") {
+		t.Fatalf("a missing verifier binary must be verify_error: %+v", r)
+	}
+}
+
+// looksLikeOracle's majority-identity refusal threshold: a file where more
+// than half the rows carry no task+lane is refused outright (a mistyped path
+// pointed at dispatch.jsonl), while a minority passes with the VERBATIM
+// warning. The threshold itself had no test (round-4 finding).
+func TestLooksLikeOracleRefusalThreshold(t *testing.T) {
+	oracleRow := `{"task":"T-01","lane":"local","model":"m","trial":1,"dispatched":true,"outcome_class":"ok"}`
+	foreign := `{"ts":"t","tokens":1,"usd":0.1}`
+
+	if err := looksLikeOracle(fixture(oracleRow, foreign, foreign)); err == nil {
+		t.Fatal("2 of 3 identity-less rows must refuse the rewrite")
+	}
+	if err := looksLikeOracle(fixture(oracleRow, oracleRow, foreign)); err != nil {
+		t.Fatalf("1 of 3 identity-less rows passes with a warning, got refusal: %v", err)
+	}
+	if err := looksLikeOracle([]byte("\n\n")); err == nil {
+		t.Fatal("a file with no JSON rows must be refused")
+	}
+}
+
+// The two drift tiers say DIFFERENT things because they are different facts,
+// and the blank-model case says a third. Reverting any of the three to the
+// generic "re-spend" sentence left the suite green (review round 5), so the
+// message text is pinned here — it is the whole output of a guard whose only
+// product is advice on a tool with money attached.
+func TestDriftMessagesAreTierAccurate(t *testing.T) {
+	effortOnly := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+		},
+		modelsByIdent: map[string]map[string]bool{identKey("T-01", "claude", 1): {"m": true}},
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, effortOnly)
+	msg := driftRefusal(d)
+	if !strings.Contains(msg, "RE-SPENDS") {
+		t.Fatalf("the effort tier DOES re-spend and must say so: %s", msg)
+	}
+
+	modelOnly := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{identKey("T-01", "claude", 1): {"other": true}},
+	}
+	d = detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, modelOnly)
+	msg = driftRefusal(d)
+	if strings.Contains(msg, "RE-SPENDS") {
+		t.Fatalf("a model-tier cell was never recorded at this model — it ADDS a measurement, it does not re-spend: %s", msg)
+	}
+	if !strings.Contains(msg, "ADDS a first measurement") {
+		t.Fatalf("the model tier must say what it actually does: %s", msg)
+	}
+
+	// The blank-model branch: an unlabeled row does NOT say which model
+	// produced it, so "never measured at this model" would be a lie and
+	// -re-measure may re-buy recorded work.
+	blank := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{identKey("T-01", "local", 1): {"": true}},
+	}
+	d = detectDrift([]plannedCell{driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)}, blank)
+	msg = driftRefusal(d)
+	if strings.Contains(msg, "never measured at") {
+		t.Fatalf("an unlabeled row may BE a measurement at the pin; the message must not claim otherwise: %s", msg)
+	}
+	if !strings.Contains(msg, "could re-buy") || !strings.Contains(msg, "recorded WITHOUT a model") {
+		t.Fatalf("the blank-model branch must name the condition and the re-buy risk: %s", msg)
+	}
+}
+
+// The sentinel is a DISPLAY string, never an index key. Indexing it alongside
+// real pins made it selectable: pinning it literally matched a model-less row,
+// silenced BOTH drift tiers, and appended evidence under a fabricated model —
+// a message fix that opened a hole in the money guard (review round 5).
+func TestSentinelIsNotPinnable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"local","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs := loadDone(p)
+	if !rs.modelsByIdent[identKey("T-01", "local", 1)][""] {
+		t.Fatalf("a blank recorded model must index under the RAW empty string: %v", rs.modelsByIdent)
+	}
+	if rs.modelsByIdent[identKey("T-01", "local", 1)][modelUnrecorded] {
+		t.Fatal("the display sentinel must NOT be in the matching namespace — pinning it would disarm the guard")
+	}
+	// Pinning the sentinel string must still trip the guard.
+	d := detectDrift([]plannedCell{driftCell("T-01", "local", modelUnrecorded, policyeval.EffortUnrecorded, 1)}, rs)
+	if len(d.blankModelDrift) != 1 {
+		t.Fatalf("pinning the sentinel must NOT match a blank recorded model: %+v", d)
+	}
+	// ...and the message still names the condition via the display form.
+	if len(d.recordedModels) != 1 || d.recordedModels[0] != modelUnrecorded {
+		t.Fatalf("the refusal must display the blank as the sentinel: %v", d.recordedModels)
+	}
+}
+
+// A run can contain BOTH shapes: an unlabeled row on one cell and a real
+// model re-key on another. Each must get its own diagnosis. When the
+// blank-model case was a report-level FLAG, a single unlabeled row rewrote
+// the message for every model-drift cell, telling an operator whose pin was
+// simply typo'd that their dispatch might "re-buy" work — and dropping the
+// "never measured at / pin typo" diagnosis that cell actually needed
+// (review round 6).
+func TestDriftRefusalSeparatesBlankAndRealModelDrift(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "local", 1):  {"": true},                // unlabeled
+			identKey("T-02", "claude", 1): {"claude-sonnet-5": true}, // real re-key
+		},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1),
+		driftCell("T-02", "claude", "claude-sonnet-55", policyeval.EffortUnrecorded, 1),
+	}
+	d := detectDrift(run, rs)
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 1 {
+		t.Fatalf("each cell earns its own bucket from its OWN recorded set: %+v", d)
+	}
+	msg := driftRefusal(d)
+	if !strings.Contains(msg, "never measured at") {
+		t.Fatalf("the real re-key still needs the pin-typo diagnosis: %s", msg)
+	}
+	if !strings.Contains(msg, "could re-buy") {
+		t.Fatalf("the unlabeled cell still needs the re-buy warning: %s", msg)
+	}
+	if !strings.Contains(msg, "claude-sonnet-5") {
+		t.Fatalf("the recorded model must still be named: %s", msg)
+	}
+}
+
+// A cell recorded at BOTH a blank and a real model still carries the re-buy
+// risk — the unlabeled row may be a measurement at this very pin — so it
+// belongs in the unlabeled bucket. Classifying it by "blank-only" sent it to
+// the bucket whose message omits that warning, i.e. it failed toward
+// UNDER-warning about spend (review round 6).
+func TestDriftMixedRecordedSetWarnsAboutRebuy(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "claude", 1): {"": true, "claude-sonnet-5": true},
+		},
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "claude-opus-4-8", policyeval.EffortUnrecorded, 1)}, rs)
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("a cell with ANY blank recorded model must earn the re-buy warning: %+v", d)
+	}
+	if msg := driftRefusal(d); !strings.Contains(msg, "could re-buy") {
+		t.Fatalf("the mixed cell must still warn about re-buying: %s", msg)
 	}
 }

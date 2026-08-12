@@ -81,9 +81,69 @@ func TestOracleBestAndRegret(t *testing.T) {
 		t.Fatalf("oracle claude fraction: %v", ev.ClaudeFraction)
 	}
 	base := Evaluate(tb, tasks, Fixed(lc("claude")))
-	if r := Regret(ev, base); !almost(r, -0.25) {
-		// regret of always-claude vs oracle = 4-3 = 1 task = 0.25; ev vs base is negative
-		t.Fatalf("regret: %v", r)
+	r, n := Regret(ev, base)
+	if !almost(r, -0.25) || n != 4 {
+		// regret of always-claude vs oracle = 4-3 = 1 task = 0.25 over the 4
+		// shared-evidence tasks; ev vs base is negative
+		t.Fatalf("regret: %v over n=%d", r, n)
+	}
+}
+
+// Regret is a paired delta, so it must gate on Measured — differencing the
+// raw PassRates converts "not measured" into "failed": an all-holes candidate
+// and a measured-failed-everything candidate scored byte-identical regret.
+func TestRegretGatesOnMeasured(t *testing.T) {
+	tb := microTable()
+	tasks := []string{"t1", "t2", "t3", "t4"}
+	base := Evaluate(tb, tasks, Fixed(lc("claude")))
+
+	// An all-holes candidate shares NO measured task with the reference: the
+	// gap is undefined (n=0), not a measured -0.75.
+	holes := Evaluate(tb, tasks, Fixed(lc("glm")))
+	if r, n := Regret(holes, base); n != 0 || r != 0 {
+		t.Fatalf("all-holes vs measured must be undefined (0, 0), got (%v, %d)", r, n)
+	}
+
+	// A measured candidate pairs only on the tasks BOTH saw.
+	local := Evaluate(tb, tasks, Fixed(lc("local")))
+	if r, n := Regret(local, base); n != 4 || !almost(r, 0.5) {
+		// claude beats local on t2,t4 (+1 each) over 4 shared tasks = +0.5
+		t.Fatalf("paired regret wrong: (%v, %d)", r, n)
+	}
+
+	// The gate must bind on BOTH sides: b unmeasured on a task a measured.
+	// Without the b-side check, b's imputed 0 on t5 would enter the delta as
+	// a fake failure — deleting `if !b.Measured[task]` passed the suite
+	// before this case existed (round 4, mutation-verified).
+	tb5 := microTable()
+	tb5.Add("t5", lc("local"), true) // local measured on t5; claude is NOT
+	tasks5 := []string{"t1", "t2", "t3", "t4", "t5"}
+	a5 := Evaluate(tb5, tasks5, Fixed(lc("local")))
+	b5 := Evaluate(tb5, tasks5, Fixed(lc("claude")))
+	if r, n := Regret(a5, b5); n != 4 || !almost(r, 0.5) {
+		t.Fatalf("t5 (a measured, b not) must be excluded: (%v, %d), want (0.5, 4)", r, n)
+	}
+}
+
+// Identical inputs produce bit-identical output: the deltas are summed in
+// sorted task order, because float addition is not associative and map-order
+// accumulation drifts in the last ULP across runs (round 4).
+func TestRegretIsDeterministic(t *testing.T) {
+	tb := NewTable()
+	tasks := []string{"a", "b", "c", "d", "e", "f", "g"}
+	for i, task := range tasks {
+		for j := 0; j < 7; j++ {
+			tb.Add(task, lc("local"), j <= i)
+			tb.Add(task, lc("claude"), j >= i)
+		}
+	}
+	a := Evaluate(tb, tasks, Fixed(lc("local")))
+	b := Evaluate(tb, tasks, Fixed(lc("claude")))
+	first, _ := Regret(a, b)
+	for i := 0; i < 500; i++ {
+		if r, _ := Regret(a, b); r != first {
+			t.Fatalf("run %d: %x != %x — map order reached the output", i, r, first)
+		}
 	}
 }
 
@@ -91,7 +151,10 @@ func TestOracleBestAndRegret(t *testing.T) {
 func TestFrontier(t *testing.T) {
 	tb := microTable()
 	tasks := []string{"t1", "t2", "t3", "t4"}
-	pts, _ := Frontier(tb, tasks)
+	pts, unmeasured, freeUnmeasured := Frontier(tb, tasks)
+	if unmeasured != 0 || freeUnmeasured != 0 {
+		t.Fatalf("fully-measured table must exclude nothing: %d, %d", unmeasured, freeUnmeasured)
+	}
 	if len(pts) != len(tasks)+1 {
 		t.Fatalf("frontier points: %d", len(pts))
 	}
@@ -106,10 +169,124 @@ func TestFrontier(t *testing.T) {
 	}
 }
 
+// The curve's rates share the caller's denominator with every policy row.
+// Rebasing onto the measured subset claimed pass_rate 1.0 at zero budget over
+// 2 measured tasks while policy rows maxed at 0.333 over 6.
+func TestFrontierSharesThePolicyDenominator(t *testing.T) {
+	tb := NewTable()
+	tb.Add("t1", lc("local"), true)
+	tb.Add("t2", lc("local"), true)
+	tasks := []string{"t1", "t2", "t3", "t4", "t5", "t6"} // 4 unmeasured
+	pts, unmeasured, _ := Frontier(tb, tasks)
+	if unmeasured != 4 {
+		t.Fatalf("unmeasured = %d, want 4", unmeasured)
+	}
+	if !almost(pts[0].PassRate, 2.0/6.0) {
+		t.Fatalf("pass_rate must be over the FULL evaluation set (2/6), got %v", pts[0].PassRate)
+	}
+	// Same table, same tasks, scored as a policy: identical denominator.
+	ev := Evaluate(tb, tasks, Fixed(lc("local")))
+	if !almost(pts[0].PassRate, ev.PassRate) {
+		t.Fatalf("frontier (%v) and policy (%v) pass rates must be comparable", pts[0].PassRate, ev.PassRate)
+	}
+}
+
+// A task measured ONLY on the claude side has an unknown free-lane value. It
+// STAYS in the sweep (excluding it discarded its measured claude evidence and
+// let oracle-best exceed the curve's maximum — the envelope violation of
+// review round 4); the claude-only-vs-measured-free-failure distinction lives
+// in the COUNTER, which is how the artifact tells the two tables apart.
+func TestFrontierCountsFreeUnmeasuredTasks(t *testing.T) {
+	claudeOnly := NewTable()
+	claudeOnly.Add("t1", lc("claude"), false)
+	claudeOnly.Add("t2", lc("claude"), false)
+
+	freeFailed := NewTable()
+	freeFailed.Add("t1", lc("claude"), false)
+	freeFailed.Add("t2", lc("claude"), false)
+	freeFailed.Add("t1", lc("glm"), false)
+	freeFailed.Add("t2", lc("glm"), false)
+
+	tasks := []string{"t1", "t2"}
+	ptsA, _, freeUnA := Frontier(claudeOnly, tasks)
+	_, _, freeUnB := Frontier(freeFailed, tasks)
+	if freeUnA != 2 || freeUnB != 0 {
+		t.Fatalf("free-unmeasured counts: %d (want 2), %d (want 0)", freeUnA, freeUnB)
+	}
+	if len(ptsA) != 3 {
+		t.Fatalf("claude-only tasks must stay in the sweep: %d points, want 3", len(ptsA))
+	}
+}
+
+// The ENVELOPE property: no policy scored on the same tasks may exceed the
+// frontier's maximum point. Excluding a claude-only task from the sweep broke
+// this — oracle-best routed the task to its measured claude PASS while the
+// curve had discarded that evidence and divided by the full set anyway.
+func TestFrontierIsAnEnvelope(t *testing.T) {
+	tb := NewTable()
+	tb.Add("t1", lc("claude"), true) // claude-only, PASSES
+	tb.Add("t2", lc("local"), true)  // free-only, passes
+	tasks := []string{"t1", "t2"}
+
+	pts, _, freeUn := Frontier(tb, tasks)
+	if freeUn != 1 {
+		t.Fatalf("freeUnmeasured = %d, want 1", freeUn)
+	}
+	best := Evaluate(tb, tasks, OracleBest(tb))
+	maxRate := 0.0
+	for _, p := range pts {
+		if p.PassRate > maxRate {
+			maxRate = p.PassRate
+		}
+	}
+	if best.PassRate > maxRate+1e-12 {
+		t.Fatalf("oracle-best (%.3f) exceeds the frontier maximum (%.3f): the envelope is broken", best.PassRate, maxRate)
+	}
+	if !almost(maxRate, 1.0) {
+		t.Fatalf("full-budget point must reach the measured ceiling, got %v", maxRate)
+	}
+	// And the budget-0 point imputes the claude-only task's unknown free base
+	// as 0 — visible via the counter, so it reads "at least 0.5", never a
+	// measurement of t1's free side.
+	if !almost(pts[0].PassRate, 0.5) {
+		t.Fatalf("budget-0 point: %v, want 0.5", pts[0].PassRate)
+	}
+}
+
+// ClaudeFraction divides by the caller's full task set, exactly like PassRate
+// — reverting it to the sweepable count passed the whole suite (round 4).
+func TestFrontierClaudeFractionSharesTheDenominator(t *testing.T) {
+	tb := NewTable()
+	tb.Add("t1", lc("claude"), true)
+	tb.Add("t1", lc("local"), false)
+	tasks := []string{"t1", "t2", "t3"} // one sweepable of three
+	pts, _, _ := Frontier(tb, tasks)
+	if len(pts) != 2 {
+		t.Fatalf("points: %d, want 2 (budget 0..1)", len(pts))
+	}
+	if !almost(pts[1].ClaudeFraction, 1.0/3.0) {
+		t.Fatalf("claude_fraction at budget 1 = %v, want 1/3 (full-set denominator)", pts[1].ClaudeFraction)
+	}
+}
+
 func TestRCI(t *testing.T) {
 	assign := map[string]Config{"t1": lc("codex"), "t2": lc("codex"), "t3": lc("codex"), "t4": lc("claude")}
 	if r := RCI(assign); !almost(r, 0.75) {
 		t.Fatalf("RCI: %v", r)
+	}
+}
+
+// An abstain (the zero Config) is not a lane: a task routed NOWHERE must not
+// count toward the modal lane, or an all-abstain policy reports rci 1.0 — the
+// maximum collapse value for a policy that collapsed onto nothing.
+func TestRCIAbstainIsNotALane(t *testing.T) {
+	allAbstain := map[string]Config{"t1": {}, "t2": {}, "t3": {}}
+	if r := RCI(allAbstain); r != 0 {
+		t.Fatalf("all-abstain rci = %v, want 0", r)
+	}
+	mixed := map[string]Config{"t1": lc("codex"), "t2": lc("codex"), "t3": {}, "t4": {}}
+	if r := RCI(mixed); !almost(r, 0.5) {
+		t.Fatalf("abstains stay in the denominator: rci = %v, want 0.5", r)
 	}
 }
 

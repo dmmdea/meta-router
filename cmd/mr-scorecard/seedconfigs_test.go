@@ -72,24 +72,69 @@ func TestResolveLaneConfigPrefersEvidence(t *testing.T) {
 	a := policyeval.Config{Lane: "glm", Model: "glm-4.7", Effort: "high"} // rank 1, unmeasured
 	b := policyeval.Config{Lane: "glm", Model: "glm-5.2", Effort: "high"} // rank 2, measured
 	byLane := map[string][]policyeval.Config{"glm": {a, b}}
+	none := map[string]int{}
 
-	got, measured := resolveLaneConfig(byLane, "glm", map[string]int{b.Key(): 159})
+	got, measured := resolveLaneConfig(byLane, "glm", map[string]int{b.Key(): 159}, map[string]int{b.Key(): 159})
 	if got != b || !measured {
 		t.Fatalf("must take the best-ranked MEASURED config: got %s measured=%v", got.Key(), measured)
 	}
 	// With evidence for both, rank wins — evidence breaks ties, it does not
 	// outrank the table.
-	got, _ = resolveLaneConfig(byLane, "glm", map[string]int{a.Key(): 1, b.Key(): 159})
+	both := map[string]int{a.Key(): 1, b.Key(): 159}
+	got, _ = resolveLaneConfig(byLane, "glm", both, both)
 	if got != a {
 		t.Fatalf("with both measured, rank order must win: got %s", got.Key())
 	}
 	// No evidence anywhere: fall back to rank-1 and SAY it is unmeasured.
-	got, measured = resolveLaneConfig(byLane, "glm", map[string]int{})
+	got, measured = resolveLaneConfig(byLane, "glm", none, none)
 	if got != a || measured {
 		t.Fatalf("no evidence must fall back to rank-1 and report unmeasured: got %s measured=%v", got.Key(), measured)
 	}
 	// An unknown lane resolves to the zero Config, never an invented one.
-	if got, _ := resolveLaneConfig(byLane, "nosuch", map[string]int{}); got != (policyeval.Config{}) {
+	if got, _ := resolveLaneConfig(byLane, "nosuch", none, none); got != (policyeval.Config{}) {
 		t.Fatalf("unknown lane must abstain, got %s", got.Key())
+	}
+}
+
+// Under -split, "observed" must mean observed on the EVALUATION set: a ranked
+// config whose only rows sit on the tuning split resolved the reference to a
+// cell unmeasured on every task actually scored (review 2026-08-12, round 3).
+func TestResolveLaneConfigPrefersEvalSetEvidence(t *testing.T) {
+	a := policyeval.Config{Lane: "claude", Model: "claude-opus-4-8", Effort: "high"} // rank 1: tuning-only evidence
+	b := policyeval.Config{Lane: "claude", Model: "claude-sonnet-5", Effort: "high"} // rank 2: heldout evidence
+	byLane := map[string][]policyeval.Config{"claude": {a, b}}
+	obsEval := map[string]int{b.Key(): 200}            // what the heldout tasks saw
+	obsAll := map[string]int{a.Key(): 1, b.Key(): 200} // the whole oracle
+
+	got, measured := resolveLaneConfig(byLane, "claude", obsEval, obsAll)
+	if got != b || !measured {
+		t.Fatalf("a config observed on the eval set must beat a higher-ranked config observed only outside it: got %s", got.Key())
+	}
+	// With NO eval-set evidence at all, any-oracle evidence still beats an
+	// unmeasured rank-1: honest fallback, not an invented cell.
+	got, _ = resolveLaneConfig(byLane, "claude", map[string]int{}, obsAll)
+	if got != a {
+		t.Fatalf("fallback tier must use whole-oracle evidence in rank order: got %s", got.Key())
+	}
+}
+
+// rankedConfigs trims lane and model exactly as the oracle side trims on
+// ingest: a padded field in the operator's rank-table override otherwise
+// builds a key no oracle row can match, silently dropping the lane to
+// pass_rate 0 while oracle-best scores the same evidence fine.
+func TestRankedConfigsTrimsLaneAndModel(t *testing.T) {
+	tbl := router.Table{"workhorse-coding": {
+		{Lane: " glm ", Model: " glm-5.2 ", Effort: "high", Rank: 1},
+	}}
+	byLane, all := rankedConfigs(tbl)
+	want := policyeval.Config{Lane: "glm", Model: "glm-5.2", Effort: "high"}
+	if len(all) != 1 || all[0] != want {
+		t.Fatalf("padded table entry must produce the trimmed config %s, got %v", want.Key(), all)
+	}
+	if len(byLane["glm"]) != 1 {
+		t.Fatalf("the trimmed lane must key byLane, got %v", byLane)
+	}
+	if len(byLane[" glm "]) != 0 {
+		t.Fatal("the padded lane must not appear as its own lane")
 	}
 }
