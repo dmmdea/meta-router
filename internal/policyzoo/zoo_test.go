@@ -6,7 +6,9 @@ import (
 	"github.com/dmmdea/meta-router/internal/policyeval"
 )
 
-func mkTask(id, base, prompt string) Task { return Task{ID: id, Class: "c", Prompt: prompt, BaseLane: base} }
+func mkTask(id, base, prompt string) Task {
+	return Task{ID: id, Class: "c", Prompt: prompt, BaseLane: base}
+}
 
 func TestFloorBumpsOnlyUpward(t *testing.T) {
 	// A structurally complex prompt on a cheap base gets floored; a claude
@@ -45,16 +47,25 @@ func TestCtxFloorTriggersOnLength(t *testing.T) {
 	}
 }
 
+// zlc is the tests' lane resolver: one canonical config per lane, the same
+// shape the scorecard builds from the rank table.
+func zlc(lane string) policyeval.Config {
+	if lane == "" {
+		return policyeval.Config{}
+	}
+	return policyeval.Config{Lane: lane, Model: lane + "-m", Effort: policyeval.EffortUnrecorded}
+}
+
 func TestSelectBestPicksByTuningPassRateThenCheaper(t *testing.T) {
 	tb := policyeval.NewTable()
-	tb.Add("t1", "glm", true)
-	tb.Add("t1", "codex", true)
+	tb.Add("t1", zlc("glm"), true)
+	tb.Add("t1", zlc("codex"), true)
 	tasks := []Task{mkTask("t1", "glm", "short")}
 	cands := []Candidate{
 		{Family: "f", Desc: "stay", Route: func(t Task) string { return t.BaseLane }},
 		{Family: "f", Desc: "bump", Route: func(t Task) string { return "codex" }},
 	}
-	best, ev := SelectBest(cands, tb, tasks)
+	best, ev := SelectBest(cands, tb, tasks, zlc)
 	if best.Desc != "stay" {
 		t.Fatalf("tie must break to lower summed lane cost (glm < codex) before lexical Desc: got %s", best.Desc)
 	}
@@ -65,22 +76,22 @@ func TestSelectBestPicksByTuningPassRateThenCheaper(t *testing.T) {
 
 func TestSelectBestPrefersHigherPassRate(t *testing.T) {
 	tb := policyeval.NewTable()
-	tb.Add("t1", "glm", false)
-	tb.Add("t1", "codex", true)
+	tb.Add("t1", zlc("glm"), false)
+	tb.Add("t1", zlc("codex"), true)
 	tasks := []Task{mkTask("t1", "glm", "short")}
 	cands := []Candidate{
 		{Family: "f", Desc: "stay", Route: func(t Task) string { return t.BaseLane }},
 		{Family: "f", Desc: "bump", Route: func(t Task) string { return "codex" }},
 	}
-	best, _ := SelectBest(cands, tb, tasks)
+	best, _ := SelectBest(cands, tb, tasks, zlc)
 	if best.Desc != "bump" {
 		t.Fatalf("higher tuning pass-rate must win: got %s", best.Desc)
 	}
 }
 
 func TestPolicyOfAbstainsOnUnknownTask(t *testing.T) {
-	p := PolicyOf(Candidate{Family: "f", Desc: "x", Route: func(t Task) string { return "glm" }}, map[string]Task{})
-	if got := p("never-seen"); got != "" {
-		t.Fatalf("unknown task must abstain (\"\"), got %q", got)
+	p := PolicyOf(Candidate{Family: "f", Desc: "x", Route: func(t Task) string { return "glm" }}, map[string]Task{}, zlc)
+	if got := p("never-seen"); got != (policyeval.Config{}) {
+		t.Fatalf("unknown task must abstain (zero Config), got %v", got)
 	}
 }

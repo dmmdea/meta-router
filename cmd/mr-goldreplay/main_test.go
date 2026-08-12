@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
+	"github.com/dmmdea/meta-router/internal/policyeval"
 )
 
 // The oracle row records the model PIN, not the model that answered, so a lane
@@ -22,18 +23,18 @@ import (
 // With -trials 2 an opus row lands BESIDE the sonnet row and the scorecard
 // (which keys by task+lane) aggregates two models into one cell.
 func TestRowKeySeparatesModels(t *testing.T) {
-	sonnet := rowKey("RS-01", "claude", "claude-sonnet-5", 1)
-	opus := rowKey("RS-01", "claude", "claude-opus-4-8", 1)
+	sonnet := rowKey("RS-01", "claude", "claude-sonnet-5", "high", 1)
+	opus := rowKey("RS-01", "claude", "claude-opus-4-8", "high", 1)
 	if sonnet == opus {
 		t.Fatal("a different model MUST produce a different resume key, or the mandatory pin is a no-op")
 	}
-	if sonnet != rowKey("RS-01", "claude", "claude-sonnet-5", 1) {
+	if sonnet != rowKey("RS-01", "claude", "claude-sonnet-5", "high", 1) {
 		t.Fatal("same config must produce a stable key")
 	}
-	if sonnet == rowKey("RS-01", "claude", "claude-sonnet-5", 2) {
+	if sonnet == rowKey("RS-01", "claude", "claude-sonnet-5", "high", 2) {
 		t.Fatal("trial must still separate keys")
 	}
-	if sonnet == rowKey("RS-01", "codex", "claude-sonnet-5", 1) {
+	if sonnet == rowKey("RS-01", "codex", "claude-sonnet-5", "high", 1) {
 		t.Fatal("lane must still separate keys")
 	}
 }
@@ -42,15 +43,15 @@ func TestRowKeySeparatesModels(t *testing.T) {
 // existing sonnet observation must NOT mark the opus cell as already-recorded.
 func TestLoadDoneDoesNotCreditADifferentModel(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "oracle.jsonl")
-	row := `{"ts":"t","task":"RS-01","class":"research","lane":"claude","model":"claude-sonnet-5","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true,"latency_ms":9}` + "\n"
+	row := `{"ts":"t","task":"RS-01","class":"research","lane":"claude","model":"claude-sonnet-5","effort":"high","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true,"latency_ms":9}` + "\n"
 	if err := os.WriteFile(p, []byte(row), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	done := loadDone(p)
-	if !done[rowKey("RS-01", "claude", "claude-sonnet-5", 1)] {
+	if !done[rowKey("RS-01", "claude", "claude-sonnet-5", "high", 1)] {
 		t.Fatal("the recorded sonnet cell must be marked done")
 	}
-	if done[rowKey("RS-01", "claude", "claude-opus-4-8", 1)] {
+	if done[rowKey("RS-01", "claude", "claude-opus-4-8", "high", 1)] {
 		t.Fatal("a sonnet row must NOT mark the opus cell done — that is the reproduced no-op")
 	}
 }
@@ -59,12 +60,18 @@ func TestLoadDoneDoesNotCreditADifferentModel(t *testing.T) {
 // through to both the oracle row and the -model dispatch arg, so a padded pin
 // passed validation and was recorded as a distinct model string.
 func TestPinsAreTrimmedNotJustValidated(t *testing.T) {
-	got := normalizePins(map[string]string{"claude": "  claude-opus-4-8  ", "codex": "gpt-5.6-terra"})
-	if got["claude"] != "claude-opus-4-8" {
-		t.Fatalf("pin must be trimmed for USE, got %q", got["claude"])
+	got := normalizePins(map[string]policyeval.Config{
+		"claude": {Lane: "claude", Model: "  claude-opus-4-8  ", Effort: "  xhigh  "},
+		"codex":  {Lane: "codex", Model: "gpt-5.6-terra", Effort: "high"},
+	})
+	if got["claude"].Model != "claude-opus-4-8" {
+		t.Fatalf("pin must be trimmed for USE, got %q", got["claude"].Model)
 	}
-	if got["codex"] != "gpt-5.6-terra" {
-		t.Fatalf("an already-clean pin must be untouched, got %q", got["codex"])
+	if got["claude"].Effort != "xhigh" {
+		t.Fatalf("effort must be trimmed for USE too, got %q", got["claude"].Effort)
+	}
+	if got["codex"].Model != "gpt-5.6-terra" || got["codex"].Effort != "high" {
+		t.Fatalf("an already-clean pin must be untouched, got %+v", got["codex"])
 	}
 }
 
@@ -88,79 +95,113 @@ func TestLanesAreDeduped(t *testing.T) {
 // A binary built from MUT-1 re-dispatched all 224 already-recorded cells of the
 // real oracle. These tests drive buildRunPlan, which is where those call sites
 // now live, so each mutation fails at least one of them.
-func planFixture(t *testing.T, lanesCSV string, pins map[string]string, done map[string]bool) runPlan {
+func planFixture(t *testing.T, lanesCSV string, pins map[string]policyeval.Config, done map[string]bool) runPlan {
 	t.Helper()
 	tasks := []goldtask.Task{{ID: "AC-01", Class: "agentic-coding"}}
 	return buildRunPlan(tasks, lanesCSV, pins, 1, nil, nil, done)
 }
 
+// pin is the terse fixture form of a fully-specified lane pin.
+func pin(model, effort string) policyeval.Config {
+	return policyeval.Config{Model: model, Effort: effort}
+}
+
 // Kills MUT-1: a cell already recorded under the SAME model must be skipped,
 // and the same cell under a DIFFERENT model must still run.
 func TestRunPlanResumeIsModelAware(t *testing.T) {
-	done := map[string]bool{rowKey("AC-01", "claude", "claude-sonnet-5", 1): true}
+	done := map[string]bool{rowKey("AC-01", "claude", "claude-sonnet-5", "high", 1): true}
 
-	same := planFixture(t, "claude", map[string]string{"claude": "claude-sonnet-5"}, done)
+	same := planFixture(t, "claude", map[string]policyeval.Config{"claude": pin("claude-sonnet-5", "high")}, done)
 	if len(same.Run) != 0 || same.Skipped != 1 {
 		t.Fatalf("recorded cell must be skipped: run=%d skipped=%d", len(same.Run), same.Skipped)
 	}
 
-	other := planFixture(t, "claude", map[string]string{"claude": "claude-opus-4-8"}, done)
+	other := planFixture(t, "claude", map[string]policyeval.Config{"claude": pin("claude-opus-4-8", "high")}, done)
 	if len(other.Run) != 1 || other.Skipped != 0 {
 		t.Fatalf("a DIFFERENT model must still run: run=%d skipped=%d", len(other.Run), other.Skipped)
+	}
+}
+
+// The same resume regression, one axis over: a cell recorded at `high` must NOT
+// mark the `xhigh` cell already-done, or the mandatory effort pin is the same
+// no-op the mandatory model pin was.
+func TestRunPlanResumeIsEffortAware(t *testing.T) {
+	done := map[string]bool{rowKey("AC-01", "claude", "claude-opus-4-8", "high", 1): true}
+
+	same := planFixture(t, "claude", map[string]policyeval.Config{"claude": pin("claude-opus-4-8", "high")}, done)
+	if len(same.Run) != 0 || same.Skipped != 1 {
+		t.Fatalf("recorded cell must be skipped: run=%d skipped=%d", len(same.Run), same.Skipped)
+	}
+
+	other := planFixture(t, "claude", map[string]policyeval.Config{"claude": pin("claude-opus-4-8", "xhigh")}, done)
+	if len(other.Run) != 1 || other.Skipped != 0 {
+		t.Fatalf("a DIFFERENT effort must still run: run=%d skipped=%d", len(other.Run), other.Skipped)
 	}
 }
 
 // Kills MUT-2: the model that reaches the planned cell must be the TRIMMED pin,
 // otherwise the padded value is what gets recorded and dispatched.
 func TestRunPlanUsesTrimmedPin(t *testing.T) {
-	p := planFixture(t, "claude", map[string]string{"claude": "  claude-opus-4-8  "}, nil)
+	p := planFixture(t, "claude", map[string]policyeval.Config{"claude": pin("  claude-opus-4-8  ", "  xhigh  ")}, nil)
 	if len(p.Run) != 1 {
 		t.Fatalf("expected one planned cell, got %d", len(p.Run))
 	}
-	if p.Run[0].Model != "claude-opus-4-8" {
-		t.Fatalf("planned cell must carry the trimmed pin, got %q", p.Run[0].Model)
+	if p.Run[0].Model() != "claude-opus-4-8" {
+		t.Fatalf("planned cell must carry the trimmed pin, got %q", p.Run[0].Model())
+	}
+	if p.Run[0].Config.Effort != "xhigh" {
+		t.Fatalf("planned cell must carry the trimmed effort, got %q", p.Run[0].Config.Effort)
 	}
 }
 
 // Kills MUT-3: a duplicated lane must produce ONE cell, and a space-padded lane
 // name must still resolve its pin (strings.Split leaves " codex" untrimmed, so
-// laneModel[" codex"] is "" and the cell would be planned with an empty model).
+// laneCfg[" codex"] is the zero Config and the cell would be planned empty).
 func TestRunPlanDedupesAndTrimsLanes(t *testing.T) {
 	p := planFixture(t, "claude,claude, codex",
-		map[string]string{"claude": "claude-opus-4-8", "codex": "gpt-5.6-terra"}, nil)
+		map[string]policyeval.Config{"claude": pin("claude-opus-4-8", "xhigh"), "codex": pin("gpt-5.6-terra", "high")}, nil)
 	if len(p.Run) != 2 {
 		t.Fatalf("expected 2 cells (claude once, codex once), got %d: %+v", len(p.Run), p.Run)
 	}
 	for _, c := range p.Run {
-		if c.Model == "" {
-			t.Fatalf("lane %q planned with an empty model — its pin was not resolved", c.Lane)
+		if c.Model() == "" {
+			t.Fatalf("lane %q planned with an empty model — its pin was not resolved", c.Lane())
+		}
+		// A lane whose pin failed to resolve would normalize to the unrecorded
+		// marker and look like a deliberate choice; it is not one here.
+		if c.Config.Effort == policyeval.EffortUnrecorded {
+			t.Fatalf("lane %q planned with an unresolved effort", c.Lane())
 		}
 	}
 }
 
-func TestRequireModelPins(t *testing.T) {
+func TestRequireConfigPins(t *testing.T) {
 	cases := []struct {
 		name  string
 		lanes []string
-		model map[string]string
+		cfgs  map[string]policyeval.Config
 		want  []string
 	}{
 		{"all pinned", []string{"claude", "codex"},
-			map[string]string{"claude": "claude-opus-5", "codex": "gpt-5.6-terra"}, nil},
+			map[string]policyeval.Config{"claude": pin("claude-opus-5", "xhigh"), "codex": pin("gpt-5.6-terra", "high")}, nil},
 		{"claude unpinned is caught", []string{"claude", "codex"},
-			map[string]string{"claude": "", "codex": "gpt-5.6-terra"}, []string{"claude"}},
+			map[string]policyeval.Config{"claude": pin("", "xhigh"), "codex": pin("gpt-5.6-terra", "high")}, []string{"claude"}},
 		{"whitespace is not a pin", []string{"claude"},
-			map[string]string{"claude": "   "}, []string{"claude"}},
+			map[string]policyeval.Config{"claude": pin("   ", "xhigh")}, []string{"claude"}},
+		{"a missing effort is caught exactly like a missing model", []string{"claude"},
+			map[string]policyeval.Config{"claude": pin("claude-opus-5", "")}, []string{"claude"}},
+		{"the unrecorded marker IS an explicit choice", []string{"local"},
+			map[string]policyeval.Config{"local": pin("qwythos", policyeval.EffortUnrecorded)}, nil},
 		{"only replayed lanes are required", []string{"claude"},
-			map[string]string{"claude": "claude-opus-5", "glm": ""}, nil},
+			map[string]policyeval.Config{"claude": pin("claude-opus-5", "xhigh"), "glm": pin("", "")}, nil},
 		{"order follows the lane list, not the map", []string{"local", "glm"},
-			map[string]string{"local": "", "glm": ""}, []string{"local", "glm"}},
+			map[string]policyeval.Config{"local": pin("", ""), "glm": pin("", "")}, []string{"local", "glm"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := requireModelPins(c.lanes, c.model)
+			got := requireConfigPins(c.lanes, c.cfgs)
 			if strings.Join(got, ",") != strings.Join(c.want, ",") {
-				t.Fatalf("requireModelPins = %v, want %v", got, c.want)
+				t.Fatalf("requireConfigPins = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -173,6 +214,99 @@ func TestPinFlagsForIsActionable(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("pinFlagsFor = %q, must name %s", got, want)
 		}
+	}
+}
+
+// containsPair reports whether args carries `flag value` as adjacent elements.
+func containsPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// An effort we RECORD but never SEND is worse than no effort at all: the row
+// asserts a configuration that never ran — the exact mislabelled-oracle defect
+// this change exists to fix, laundered through a row claiming otherwise.
+// replayOne built its args with no -effort; mr-orchestrate run accepts one, and
+// the lane arg builders emit it only when non-empty.
+func TestReplayArgsCarryEffortWhenPinned(t *testing.T) {
+	args := replayArgs("QE-09", policyeval.Config{
+		Lane: "claude", Model: "claude-opus-5", Effort: "xhigh"}, "desc", 10)
+	if !containsPair(args, "-effort", "xhigh") {
+		t.Fatalf("a pinned effort must reach the dispatch, got %v", args)
+	}
+	if !containsPair(args, "-model", "claude-opus-5") {
+		t.Fatalf("model must still be passed, got %v", args)
+	}
+	if !containsPair(args, "-lane", "claude") {
+		t.Fatalf("lane must still be passed, got %v", args)
+	}
+}
+
+// EffortUnrecorded is a marker, not an effort — it must NOT be sent, or the
+// orchestrator forwards the literal string "unrecorded" to the CLI.
+func TestReplayArgsOmitUnrecordedEffort(t *testing.T) {
+	args := replayArgs("QE-09", policyeval.Config{
+		Lane: "local", Model: "gemma4-cascade", Effort: policyeval.EffortUnrecorded}, "desc", 10)
+	for _, a := range args {
+		if a == policyeval.EffortUnrecorded {
+			t.Fatal("the unrecorded marker must never be dispatched as an effort value")
+		}
+	}
+	if containsPair(args, "-effort", "") {
+		t.Fatal("an empty -effort must not be dispatched either")
+	}
+}
+
+func TestRowKeySeparatesEfforts(t *testing.T) {
+	if rowKey("QE-09", "claude", "claude-opus-5", "high", 1) ==
+		rowKey("QE-09", "claude", "claude-opus-5", "xhigh", 1) {
+		t.Fatal("a different effort must produce a different resume key")
+	}
+	// The legacy marker is a real value, so it separates too: an unrecorded-effort
+	// row must never mark a pinned-effort cell already-done.
+	if rowKey("QE-09", "claude", "claude-opus-5", policyeval.EffortUnrecorded, 1) ==
+		rowKey("QE-09", "claude", "claude-opus-5", "high", 1) {
+		t.Fatal("unrecorded evidence must not satisfy a cell naming a real effort")
+	}
+}
+
+// Legacy rows carry no `effort` key at all. loadDone must normalize the blank
+// the SAME way the config side does, or every legacy row lands under a key
+// ending "...|" that no planned cell can ever match — and the resume set
+// silently stops working for the whole 825-row table.
+func TestLoadDoneNormalizesBlankEffort(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	legacy := `{"ts":"t","task":"AC-10","class":"agentic-coding","lane":"local","model":"gemma4-cascade","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":false,"latency_ms":3804}` + "\n"
+	if err := os.WriteFile(p, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := loadDone(p)
+	if !done[rowKey("AC-10", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)] {
+		t.Fatalf("a legacy row must resume under the normalized unrecorded effort: %v", done)
+	}
+	if done[rowKey("AC-10", "local", "gemma4-cascade", "low", 1)] {
+		t.Fatal("a legacy row must NOT mark a pinned-effort cell done")
+	}
+}
+
+// Both fields are required, for the same reason: the row records the PIN, so an
+// unpassed flag writes evidence under a configuration nobody chose.
+func TestRequireConfigPinsCoversEffort(t *testing.T) {
+	cfgs := map[string]policyeval.Config{
+		"claude": {Model: "claude-opus-4-8", Effort: "xhigh"},
+		"codex":  {Model: "gpt-5.6-terra", Effort: ""},
+		"glm":    {Model: "", Effort: "high"},
+	}
+	got := requireConfigPins([]string{"claude", "codex", "glm"}, cfgs)
+	if strings.Join(got, ",") != "codex,glm" {
+		t.Fatalf("requireConfigPins = %v, want [codex glm] (missing effort, missing model)", got)
+	}
+	if pf := pinFlagsFor([]string{"codex"}); !strings.Contains(pf, "-codex-effort") {
+		t.Fatalf("the error must name the effort flag too, got %q", pf)
 	}
 }
 
@@ -198,26 +332,26 @@ func TestExtractDiff(t *testing.T) {
 
 func TestLoadDoneResume(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "oracle.jsonl")
-	body := `{"ts":"t","task":"AC-04","class":"agentic-coding","lane":"local","model":"m","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":false,"latency_ms":5}
+	body := `{"ts":"t","task":"AC-04","class":"agentic-coding","lane":"local","model":"m","effort":"e","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":false,"latency_ms":5}
 not json — torn line survives
-{"ts":"t","task":"RS-03","class":"research","lane":"claude","model":"m","trial":2,"dispatched":true,"outcome_class":"ok","verifier_pass":true,"latency_ms":9}
+{"ts":"t","task":"RS-03","class":"research","lane":"claude","model":"m","effort":"e","trial":2,"dispatched":true,"outcome_class":"ok","verifier_pass":true,"latency_ms":9}
 `
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	done := loadDone(p)
-	if !done[rowKey("AC-04", "local", "m", 1)] || !done[rowKey("RS-03", "claude", "m", 2)] {
+	if !done[rowKey("AC-04", "local", "m", "e", 1)] || !done[rowKey("RS-03", "claude", "m", "e", 2)] {
 		t.Fatalf("resume set wrong: %v", done)
 	}
 	// A deferred row is a hole — resume must NOT count it as done.
-	deferredLine := `{"ts":"t","task":"EX-01","class":"extraction","lane":"glm","model":"m","trial":1,"dispatched":false,"outcome_class":"deferred","verifier_pass":false,"latency_ms":1}` + "\n"
+	deferredLine := `{"ts":"t","task":"EX-01","class":"extraction","lane":"glm","model":"m","effort":"e","trial":1,"dispatched":false,"outcome_class":"deferred","verifier_pass":false,"latency_ms":1}` + "\n"
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
 	f.WriteString(deferredLine)
 	f.Close()
-	if loadDone(p)[rowKey("EX-01", "glm", "m", 1)] {
+	if loadDone(p)[rowKey("EX-01", "glm", "m", "e", 1)] {
 		t.Fatal("deferred row wrongly counted as done — the window-reopen refill would no-op")
 	}
-	if done[rowKey("AC-04", "local", "m", 2)] || len(done) != 2 {
+	if done[rowKey("AC-04", "local", "m", "e", 2)] || len(done) != 2 {
 		t.Fatalf("resume set has phantom rows: %v", done)
 	}
 	if loadDone(filepath.Join(t.TempDir(), "absent.jsonl")) == nil {
