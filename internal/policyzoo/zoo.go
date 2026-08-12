@@ -107,16 +107,35 @@ func AllFamilies() map[string][]Candidate {
 // the zero Config means "no config for this lane" — abstain, never guess.
 type LaneResolver func(lane string) policyeval.Config
 
-// PolicyOf adapts a Candidate to policyeval.Policy over known tasks, using
-// resolve to turn the candidate's lane into an evidence cell.
-func PolicyOf(c Candidate, byID map[string]Task, resolve LaneResolver) policyeval.Policy {
+// PolicyOf adapts a Candidate to policyeval.Policy over known tasks.
+//
+// When the candidate leaves the router's lane UNCHANGED, the task is scored
+// at the router's OWN emitted config (base) — the same cell router-live
+// scores at. Resolving the unchanged lane through the rank table instead
+// scored the two arms of the W3 comparison at DIFFERENT cells: router-live
+// at the router's emitted (lane, model, effort), the zoo wrapper at whatever
+// resolve() picked for the same lane — so a candidate that provably changes
+// NOTHING could outscore router-live and be certified pareto_vs_router: true
+// (review 2026-08-12, round 3). A no-op wrapper now scores identically to
+// what it wraps, by construction.
+//
+// resolve is consulted only for a lane the candidate CHANGED — a lane the
+// router did not emit a config for on this task, where something must still
+// say which cell stands for it (see LaneResolver).
+func PolicyOf(c Candidate, byID map[string]Task, base policyeval.Policy, resolve LaneResolver) policyeval.Policy {
 	return func(id string) policyeval.Config {
 		t, ok := byID[id]
 		if !ok {
 			return policyeval.Config{} // unknown task: abstain, never guess
 		}
 		lane := c.Route(t)
-		if lane == "" || resolve == nil {
+		if lane == "" {
+			return policyeval.Config{}
+		}
+		if lane == t.BaseLane && base != nil {
+			return base(id)
+		}
+		if resolve == nil {
 			return policyeval.Config{}
 		}
 		return resolve(lane)
@@ -146,10 +165,13 @@ func assignCost(assignment map[string]policyeval.Config) int {
 // order: higher PassRate, then LOWER summed lane cost, then lexical Desc (the
 // pre-sort) — map iteration can never decide the pick. This is the only place
 // the zoo touches the oracle table before the heldout verdict.
-// resolve turns each candidate's lane into the evidence cell it stands for
-// (see LaneResolver); a nil resolver abstains on every task, which shows up
-// honestly as Unknown cells rather than as a silently perfect score.
-func SelectBest(cands []Candidate, tb *policyeval.Table, tuning []Task, resolve LaneResolver) (Candidate, policyeval.Eval) {
+// base and resolve are threaded through to PolicyOf: tuning selection must
+// score candidates at the SAME cells the heldout verdict will (an unchanged
+// lane at the router's own config, a changed lane through resolve), or the
+// grid is tuned against one ruler and judged against another. A nil resolver
+// abstains on every changed lane, which shows up honestly as Unknown cells
+// rather than as a silently perfect score.
+func SelectBest(cands []Candidate, tb *policyeval.Table, tuning []Task, base policyeval.Policy, resolve LaneResolver) (Candidate, policyeval.Eval) {
 	byID := map[string]Task{}
 	ids := make([]string, 0, len(tuning))
 	for _, t := range tuning {
@@ -162,7 +184,7 @@ func SelectBest(cands []Candidate, tb *policyeval.Table, tuning []Task, resolve 
 	var bestEv policyeval.Eval
 	have := false
 	for _, c := range sorted {
-		ev := policyeval.Evaluate(tb, ids, PolicyOf(c, byID, resolve))
+		ev := policyeval.Evaluate(tb, ids, PolicyOf(c, byID, base, resolve))
 		if !have || ev.PassRate > bestEv.PassRate ||
 			(ev.PassRate == bestEv.PassRate && assignCost(ev.Assignment) < assignCost(bestEv.Assignment)) {
 			best, bestEv, have = c, ev, true

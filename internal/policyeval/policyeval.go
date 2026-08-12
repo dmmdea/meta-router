@@ -255,8 +255,31 @@ func Evaluate(t *Table, tasks []string, p Policy) Eval {
 	return ev
 }
 
-// Regret is the value gap between two evaluations (a - b, in pass-rate).
-func Regret(a, b Eval) float64 { return b.PassRate - a.PassRate }
+// Regret is the PAIRED value gap between two evaluations — the mean of
+// (b - a) per-task deltas over the tasks BOTH measured, with n reporting how
+// many that was (n == 0 means no shared evidence: the gap is undefined, and
+// 0 is a report of that, not a measurement).
+//
+// It gates on Eval.Measured, exactly as that field's own comment demands of
+// "callers doing deltas": PerTask holds 0 for an unknown cell, so the old
+// PassRate difference silently converted "not measured" into "failed" — an
+// all-holes candidate and a measured-failed-everything candidate produced
+// byte-identical regret, the package's one other paired-difference API
+// contradicting the rule written 40 lines above it (review 2026-08-12).
+func Regret(a, b Eval) (regret float64, n int) {
+	sum := 0.0
+	for task := range a.Measured {
+		if !b.Measured[task] {
+			continue
+		}
+		sum += b.PerTask[task] - a.PerTask[task]
+		n++
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	return sum / float64(n), n
+}
 
 // FrontierPoint is one oracle operating point under a Claude budget.
 type FrontierPoint struct {
@@ -266,16 +289,39 @@ type FrontierPoint struct {
 	PassRate       float64 `json:"pass_rate"`
 }
 
-// Frontier sweeps the Claude budget 0..len(tasks): free passes come from the
-// best non-Claude lane; tasks whose Claude gain is largest consume budget
-// first. This is THE cost-quality curve WF@Q reads (Q1).
-func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks int) {
+// Frontier sweeps the Claude budget over the sweepable tasks: free passes
+// come from the best non-Claude lane; tasks whose Claude gain is largest
+// consume budget first. This is THE cost-quality curve WF@Q reads (Q1).
+//
+// Two task classes are EXCLUDED from the sweep and counted instead — placing
+// either on the curve would impute a hole as a zero, the exact
+// absence-as-failure conflation the artifact's own note forbids:
+//   - unmeasuredTasks: no measured cell at all (an all-holes table and an
+//     all-failures table previously produced byte-identical curves);
+//   - freeUnmeasuredTasks: measured ONLY on the claude side, so the task's
+//     free-lane value — the curve's base at budget 0 — is unknown. A zero
+//     base is an imputed free-lane failure, the same defect one level down:
+//     a claude-only table and a table where every free lane measurably
+//     failed produced identical curves (review 2026-08-12, round 3).
+//
+// A sweepable task whose CLAUDE side is unmeasured contributes a zero claude
+// DELTA — "no known gain", which never fabricates a failure: it holds the
+// curve at the task's measured free value rather than inventing one, and a
+// zero delta sorts last so it never consumes budget ahead of a real gain.
+//
+// RATES share the caller's denominator (len(tasks)) — the same denominator
+// every policy row's pass_rate uses. Rebasing onto the measured subset made
+// the curve claim pass_rate 1.0 at zero budget over 2 measured tasks while
+// every policy row on the same artifact maxed at 0.333 over 6, with nothing
+// in the array saying the denominators differ (review 2026-08-12, round 3).
+// The BUDGET axis still spans only the sweepable tasks: claude can only be
+// "spent" on a task the sweep can place.
+func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks, freeUnmeasuredTasks int) {
 	type gain struct{ free, withClaude float64 }
 	gains := make([]gain, 0, len(tasks))
-	skipped := 0
 	for _, task := range tasks {
 		g := gain{}
-		measured := false
+		measured, freeMeasured := false, false
 		for key := range t.cells[task] {
 			cfg := t.cfgs[key]
 			r, ok := t.Rate(task, cfg)
@@ -287,20 +333,22 @@ func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks in
 				if r > g.withClaude {
 					g.withClaude = r
 				}
-			} else if r > g.free {
-				g.free = r
+			} else {
+				freeMeasured = true
+				if r > g.free {
+					g.free = r
+				}
 			}
 		}
 		if g.withClaude < g.free {
 			g.withClaude = g.free // claude never forced when worse
 		}
-		// A task with NO measured cell contributes nothing but a zero, which
-		// the curve cannot distinguish from a task measured and failed — two
-		// tables, one all-holes and one all-failures, produced byte-identical
-		// frontiers, and the artifact note claims holes are never imputed.
-		// Unmeasured tasks are EXCLUDED and counted instead.
 		if !measured {
-			skipped++
+			unmeasuredTasks++
+			continue
+		}
+		if !freeMeasured {
+			freeUnmeasuredTasks++
 			continue
 		}
 		gains = append(gains, g)
@@ -312,10 +360,8 @@ func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks in
 		deltas[i] = g.withClaude - g.free
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(deltas)))
-	// The curve spans the MEASURED tasks. Sweeping over len(tasks) while the
-	// gains slice holds only the measured ones would index past the end and,
-	// worse, divide by a denominator that includes tasks the table never saw.
-	n := len(gains)
+	n := len(gains)     // budget axis: the sweepable tasks
+	denom := len(tasks) // rate axis: the caller's full evaluation set
 	pts = make([]FrontierPoint, 0, n+1)
 	cum := base
 	for b := 0; b <= n; b++ {
@@ -323,13 +369,13 @@ func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks in
 			cum += deltas[b-1]
 		}
 		fp := FrontierPoint{ClaudeBudget: b, Passes: cum}
-		if n > 0 {
-			fp.ClaudeFraction = float64(b) / float64(n)
-			fp.PassRate = cum / float64(n)
+		if denom > 0 {
+			fp.ClaudeFraction = float64(b) / float64(denom)
+			fp.PassRate = cum / float64(denom)
 		}
 		pts = append(pts, fp)
 	}
-	return pts, skipped
+	return pts, unmeasuredTasks, freeUnmeasuredTasks
 }
 
 // RCI is the routing-collapse index: the share of tasks routed to the modal
@@ -338,12 +384,22 @@ func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks in
 // one subscription window", which is a lane question. Counting configs instead
 // would dilute the number whenever one lane runs two models and silently
 // change what the metric means across the v0.27→v0.28 boundary.
+//
+// An ABSTAIN (the zero Config — a lane the rank table cannot resolve) is not
+// a lane: a task assigned nothing was not routed anywhere, and counting the
+// empty lane as modal scored an all-abstain policy rci 1.0 — the maximum
+// collapse value for a policy that collapsed onto NOTHING (review
+// 2026-08-12, round 3). Abstains stay in the denominator (the task was in
+// the assignment) but never in the modal count, so all-abstain reads 0.
 func RCI(assignment map[string]Config) float64 {
 	if len(assignment) == 0 {
 		return 0
 	}
 	counts := map[string]int{}
 	for _, cfg := range assignment {
+		if cfg.Lane == "" {
+			continue // abstain: routed nowhere
+		}
 		counts[cfg.Lane]++
 	}
 	max := 0

@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,53 +65,91 @@ func rowKey(task, lane, model, effort string, trial int) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%d", task, lane, model, effort, trial)
 }
 
-// rowIsEvidence is the ONE definition of "this cell was measured", shared by
-// the resume set here and mirrored by mr-scorecard's oracleRow.ran. A cell
-// that did not dispatch, deferred, or ended in an error/exit-N is a HOLE:
-// never counted as measurement, and always re-attemptable.
+// rowIsEvidence delegates to policyeval.IsEvidence — the ONE evidence
+// definition the whole stack shares (resume set here, mr-scorecard's ran,
+// the B15 canary). Three drifting copies of the list are how error rows were
+// simultaneously "already recorded" and "not evidence" (review 2026-08-12).
 func rowIsEvidence(r Row) bool {
-	if !r.Dispatched {
-		return false
-	}
-	switch r.OutcomeClass {
-	case "deferred", "error", "spawn_error", "config_error", "parse_error", "api_error":
-		return false
-	}
-	return !strings.HasPrefix(r.OutcomeClass, "exit-")
+	return policyeval.IsEvidence(r.Dispatched, r.OutcomeClass)
+}
+
+// cellKey identifies a cell WITHOUT its effort — the index the effort-drift
+// detector uses to tell "this (task,lane,model,trial) was recorded under a
+// different effort" (a re-key: re-dispatching it re-spends) from "this cell
+// was never recorded at any effort" (a genuinely new cell: a new lane, task,
+// class filter or model pin — a first measurement, not a re-spend).
+func cellKey(task, lane, model string, trial int) string {
+	return fmt.Sprintf("%s|%s|%s|%d", task, lane, model, trial)
 }
 
 // loadDone reads an existing oracle file and returns the set of recorded
-// (task,lane,model,effort,trial) keys, so a rerun only fills the holes.
+// (task,lane,model,effort,trial) keys, so a rerun only fills the holes —
+// plus the effort index the drift guard reads (see cellKey).
 //
 // The effort is normalized on the way in, the SAME way the planned cell's is:
 // the 825 legacy rows carry no `effort` key at all, so without this every one
 // of them lands under a key ending "...|" that no planned cell can match, and
 // resume silently stops recognizing the entire existing table.
-func loadDone(path string) map[string]bool {
-	done := map[string]bool{}
+func loadDone(path string) (done map[string]bool, effortsByCell map[string]map[string]bool) {
+	done = map[string]bool{}
+	effortsByCell = map[string]map[string]bool{}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return done
+		return done, effortsByCell
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		var r Row
-		// The SAME evidence definition the scorecard applies (oracleRow.ran).
-		// Treating only "deferred" as a hole left error/exit-N cells
-		// simultaneously "already recorded" (resume never refills them) and
-		// "not evidence" (the scorecard and B15 ignore them) — a hole that
-		// can never fill. They are holes on BOTH sides now, so a rerun
-		// re-attempts them; -plan-only shows the count before it costs
-		// anything (review 2026-08-12).
+		// Only EVIDENCE rows enter the resume set (a hole is re-attemptable,
+		// not recorded — see policyeval.IsEvidence), and only evidence rows
+		// enter the drift index: re-dispatching a hole was always going to
+		// happen, so it is not a re-spend the guard needs to refuse.
 		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && rowIsEvidence(r) {
-			// A deferred row is a HOLE (admission was closed), not an
-			// observation — resume must refill it when the window reopens.
-			done[rowKey(r.Task, r.Lane, r.Model, policyeval.NormalizeEffort(r.Effort), r.Trial)] = true
+			eff := policyeval.NormalizeEffort(r.Effort)
+			done[rowKey(r.Task, r.Lane, r.Model, eff, r.Trial)] = true
+			ck := cellKey(r.Task, r.Lane, r.Model, r.Trial)
+			if effortsByCell[ck] == nil {
+				effortsByCell[ck] = map[string]bool{}
+			}
+			effortsByCell[ck][eff] = true
 		}
 	}
-	return done
+	return done, effortsByCell
+}
+
+// detectEffortDrift returns the planned cells that would RE-dispatch an
+// already-recorded cell under a different effort key, plus the set of efforts
+// those recorded cells actually carry (for the error message).
+//
+// This replaces the aggregate `plan.Skipped == 0` tell, which was wrong in
+// both directions (review 2026-08-12): it over-fired on every legitimate
+// first measurement of new cells against a populated oracle (a new lane,
+// task, class filter or model pin has no recorded counterpart — nothing
+// re-spends), and it was silent on PARTIAL drift (pin one lane's real effort
+// while another lane still matches, and the mismatched lane re-dispatched
+// with no warning at all — exactly what an operator produces when fixing the
+// incident the guard was written for). Per-cell collision detection has
+// neither failure: a cell drifts iff its (task,lane,model,trial) identity is
+// already recorded under some OTHER effort.
+func detectEffortDrift(run []plannedCell, effortsByCell map[string]map[string]bool) (drift []plannedCell, recordedEfforts []string) {
+	seen := map[string]bool{}
+	for _, c := range run {
+		effs := effortsByCell[cellKey(c.Task, c.Config.Lane, c.Config.Model, c.Trial)]
+		if len(effs) == 0 || effs[c.Config.Effort] {
+			continue // never recorded (new cell), or recorded at this exact effort (skipped upstream)
+		}
+		drift = append(drift, c)
+		for e := range effs {
+			if !seen[e] {
+				seen[e] = true
+				recordedEfforts = append(recordedEfforts, e)
+			}
+		}
+	}
+	sort.Strings(recordedEfforts)
+	return drift, recordedEfforts
 }
 
 // extractDiff pulls the unified diff out of an agent's output (prompts demand
@@ -297,12 +336,7 @@ func main() {
 			"Pass %s", strings.Join(missing, ", "), pinFlagsFor(missing))
 	}
 
-	done := loadDone(*outPath)
-	out, err := os.OpenFile(*outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		fatal("open out: %v", err)
-	}
-	defer out.Close()
+	done, effortsByCell := loadDone(*outPath)
 
 	plan := buildRunPlan(tasks, *lanesFlag, rawPins, *trials, taskFilter, classFilter, done)
 
@@ -311,47 +345,65 @@ func main() {
 	// an unattended weekly driver never reads.
 	fmt.Fprintf(os.Stderr, "plan: %d cells (%d to run, %d already recorded)\n",
 		plan.Total, len(plan.Run), plan.Skipped)
-	// The mismatch is detected BEFORE the plan-only exit. -plan-only is the
+	// Drift is detected BEFORE the plan-only exit. -plan-only is the
 	// pre-flight the guard's own error message tells you to run, so it must
 	// SHOW the condition the guard trips on; returning first made the safety
 	// tool structurally blind to the hazard it exists to reveal.
-	resumeMismatch := len(done) > 0 && plan.Skipped == 0 && len(plan.Run) > 0
+	driftCells, recordedEfforts := detectEffortDrift(plan.Run, effortsByCell)
 	if len(done) > 0 {
 		fmt.Fprintf(os.Stderr, "resume: %d recorded cell(s) in the output oracle, %d matched this run's keys\n", len(done), plan.Skipped)
 	}
-	if resumeMismatch {
-		fmt.Fprintf(os.Stderr, "RESUME MISMATCH: none of the %d recorded cells match the (task, lane, model, EFFORT, trial) keys this run would write\n", len(done))
+	if len(driftCells) > 0 {
+		c := driftCells[0]
+		fmt.Fprintf(os.Stderr, "EFFORT DRIFT: %d planned cell(s) are already recorded under a different effort (recorded: %s; e.g. %s planned at %q)\n",
+			len(driftCells), strings.Join(recordedEfforts, ","), cellKey(c.Task, c.Config.Lane, c.Config.Model, c.Trial), c.Config.Effort)
 	}
 	if *planOnly {
 		fmt.Printf("plan-only: %d cells (%d would run, %d already recorded, %d recorded in file) → %s\n",
 			plan.Total, len(plan.Run), plan.Skipped, len(done), *outPath)
-		if resumeMismatch {
-			fmt.Printf("plan-only: RESUME MISMATCH — a live run would REFUSE (pass -re-measure to override)\n")
+		if len(driftCells) > 0 {
+			fmt.Printf("plan-only: EFFORT DRIFT — %d cell(s) would RE-dispatch already-recorded cells under a different effort; a live run would REFUSE (pass -re-measure to override)\n",
+				len(driftCells))
 		}
 		return
 	}
 
-	// RESUME-KEY MISMATCH GUARD. The resume key includes effort. An oracle
-	// recorded before effort capture resumes as "unrecorded"; pinning a real
-	// effort makes every key miss, so nothing is skipped and the ENTIRE table
-	// re-dispatches — 476 cloud cells on this project's live oracle, tool
-	// enabled, unattended, discovered only by the bill (review 2026-08-12).
+	// EFFORT-DRIFT GUARD. The resume key includes effort. An oracle recorded
+	// before effort capture resumes as "unrecorded"; pinning a real effort
+	// re-keys every recorded cell, so the ENTIRE table re-dispatches — 476
+	// cloud cells on this project's live oracle, tool enabled, unattended,
+	// discovered only by the bill (review 2026-08-12).
 	//
-	// The tell is unambiguous: a non-empty resume set that matched NOTHING.
-	// That is either a genuine first run against someone else's oracle or a
-	// key mismatch, and the safe reading is the expensive one.
-	if resumeMismatch {
+	// The tell is PER-CELL, not aggregate: a planned cell whose
+	// (task,lane,model,trial) identity is already recorded under some other
+	// effort is a re-key (re-dispatching it re-spends); a cell never recorded
+	// at any effort is a first measurement and passes freely. The previous
+	// aggregate tell (`plan.Skipped == 0`) refused legitimate new-cell runs
+	// and stayed silent on partial drift — one drifted lane hiding behind
+	// another lane's clean resume (review 2026-08-12, round 3).
+	if len(driftCells) > 0 {
 		if !*reMeasure {
-			fatal("resume matched NOTHING: the output oracle already holds %d recorded cells, "+
-				"but none match the (task, lane, model, EFFORT, trial) keys this run would write, "+
-				"so all %d cells would re-dispatch and re-spend. The usual cause is an effort pin "+
-				"that disagrees with the recorded rows (rows written before effort capture resume "+
-				"as %q). Check with -plan-only, pin the effort the rows actually carry, or pass "+
-				"-re-measure if re-spending is genuinely what you want.",
-				len(done), len(plan.Run), policyeval.EffortUnrecorded)
+			fatal("effort drift: %d of the %d cells this run would dispatch are ALREADY RECORDED "+
+				"under a different effort (%s), so dispatching them re-spends what the oracle "+
+				"already paid for. The usual cause is an effort pin that disagrees with the "+
+				"recorded rows (rows written before effort capture resume as %q). Check with "+
+				"-plan-only, pin the effort the rows actually carry, or pass -re-measure if "+
+				"re-measuring at the new effort is genuinely what you want. Cells never recorded "+
+				"at any effort (a new lane, task or model) do not trip this guard.",
+				len(driftCells), len(plan.Run), strings.Join(recordedEfforts, ","), policyeval.EffortUnrecorded)
 		}
-		fmt.Fprintf(os.Stderr, "WARNING: -re-measure: resume matched nothing; re-dispatching all %d cells\n", len(plan.Run))
+		fmt.Fprintf(os.Stderr, "WARNING: -re-measure: re-dispatching %d cell(s) already recorded under a different effort\n", len(driftCells))
 	}
+
+	// Opened AFTER the plan-only exit and the drift guard: O_CREATE before
+	// them left a 0-byte oracle behind every preflight — a file -migrate-effort
+	// then refuses as "not an oracle", and a typo'd -out silently seeded a
+	// second empty oracle beside the real one (review 2026-08-12).
+	out, err := os.OpenFile(*outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fatal("open out: %v", err)
+	}
+	defer out.Close()
 
 	for _, c := range plan.Run {
 		row := replayOne(c.GoldTask, c.Config, c.Trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
@@ -567,6 +619,9 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 	}
 	pf := filepath.Join(os.TempDir(), fmt.Sprintf("goldreplay-%s-%s-%d.diff", strings.ToLower(t.ID), lane, trial))
 	if err := os.WriteFile(pf, []byte(diff), 0o644); err != nil {
+		// Same seam as the goldverify infra branch below: OUR machinery
+		// failed, not the agent's diff — a hole, never a measured failure.
+		row.OutcomeClass = "verify_error"
 		row.Note = "write diff: " + err.Error()
 		return row
 	}
@@ -584,6 +639,15 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 		row.VerifierPass = false
 		row.Note = "verify-fail: " + verdictDetail(vOut) // WHY it failed, never silent
 	} else {
+		// The VERIFIER'S infrastructure failed — missing/stale binary, a bad
+		// -repos path, a git failure inside goldverify — which says nothing
+		// about the agent's diff. Leaving outcome_class "ok" here recorded a
+		// measured FAILURE (dispatched:true, verifier_pass:false), so a
+		// missing goldverify binary scored an entire replay as incompetent:
+		// the hole-as-failure defect at the verify seam (review 2026-08-12).
+		// verify_error is a HOLE (policyeval.IsEvidence): never evidence,
+		// always re-attemptable.
+		row.OutcomeClass = "verify_error"
 		row.Note = "goldverify: " + firstLine(vOut, vErr)
 	}
 	return row

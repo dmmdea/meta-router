@@ -75,6 +75,17 @@ func stampLine(line []byte) ([]byte, bool, error) {
 	if !json.Valid(body) {
 		return line, false, nil
 	}
+	// An identity-less line is returned VERBATIM too — the SAME predicate
+	// looksLikeOracle counts as "bad", so the warning it prints ("passed
+	// through VERBATIM, not stamped") is finally true. Previously the two
+	// predicates disagreed: looksLikeOracle counted a valid-JSON line with no
+	// task+lane as bad, but stampLine stamped it anyway, so a mixed file (a
+	// few quota/dispatch records among oracle rows, under the 50% refusal
+	// threshold) had its FOREIGN records rewritten under an explicit
+	// reassurance that they were not (review 2026-08-12).
+	if !hasOracleIdentity(body) {
+		return line, false, nil
+	}
 	start, end, found, err := effortValueSpan(body)
 	if err != nil {
 		return line, false, nil // unparseable: verbatim, never an error
@@ -160,10 +171,19 @@ func effortValueSpan(line []byte) (start, end int, found bool, err error) {
 	return 0, 0, false, nil
 }
 
-// migrateEffortFile applies migrateEffort to a file via write-temp-then-rename.
-// Never an in-place truncation: a process death mid-write would take the whole
-// oracle with it, and the oracle is not reproducible without re-spending every
-// dispatch that built it.
+// hasOracleIdentity reports whether a JSON line carries the oracle row
+// identity (task + lane). It is the ONE predicate both looksLikeOracle (which
+// counts and warns) and stampLine (which decides per line what to touch)
+// read: two predicates for "is this line an oracle row" is how the migration
+// stamped lines its own warning promised were passed through verbatim.
+func hasOracleIdentity(body []byte) bool {
+	var r struct {
+		Task string `json:"task"`
+		Lane string `json:"lane"`
+	}
+	return json.Unmarshal(body, &r) == nil && r.Task != "" && r.Lane != ""
+}
+
 // looksLikeOracle gates the rewrite on the file actually BEING an oracle.
 // Without it a mistyped path stamped "effort" into every record of whatever
 // JSONL it was handed — dispatch.jsonl and quota-trace.jsonl sit one
@@ -177,11 +197,7 @@ func looksLikeOracle(in []byte) error {
 			continue
 		}
 		rows++
-		var r struct {
-			Task string `json:"task"`
-			Lane string `json:"lane"`
-		}
-		if json.Unmarshal(t, &r) != nil || r.Task == "" || r.Lane == "" {
+		if !hasOracleIdentity(t) {
 			bad++
 		}
 	}
@@ -197,6 +213,10 @@ func looksLikeOracle(in []byte) error {
 	return nil
 }
 
+// migrateEffortFile applies migrateEffort to a file via write-temp-then-rename.
+// Never an in-place truncation: a process death mid-write would take the whole
+// oracle with it, and the oracle is not reproducible without re-spending every
+// dispatch that built it.
 func migrateEffortFile(path string) (int, error) {
 	in, err := os.ReadFile(path)
 	if err != nil {

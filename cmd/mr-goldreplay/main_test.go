@@ -47,7 +47,7 @@ func TestLoadDoneDoesNotCreditADifferentModel(t *testing.T) {
 	if err := os.WriteFile(p, []byte(row), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := loadDone(p)
+	done, _ := loadDone(p)
 	if !done[rowKey("RS-01", "claude", "claude-sonnet-5", "high", 1)] {
 		t.Fatal("the recorded sonnet cell must be marked done")
 	}
@@ -284,7 +284,7 @@ func TestLoadDoneNormalizesBlankEffort(t *testing.T) {
 	if err := os.WriteFile(p, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := loadDone(p)
+	done, _ := loadDone(p)
 	if !done[rowKey("AC-10", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)] {
 		t.Fatalf("a legacy row must resume under the normalized unrecorded effort: %v", done)
 	}
@@ -339,7 +339,7 @@ not json — torn line survives
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := loadDone(p)
+	done, _ := loadDone(p)
 	if !done[rowKey("AC-04", "local", "m", "e", 1)] || !done[rowKey("RS-03", "claude", "m", "e", 2)] {
 		t.Fatalf("resume set wrong: %v", done)
 	}
@@ -348,14 +348,14 @@ not json — torn line survives
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
 	f.WriteString(deferredLine)
 	f.Close()
-	if loadDone(p)[rowKey("EX-01", "glm", "m", "e", 1)] {
+	if d, _ := loadDone(p); d[rowKey("EX-01", "glm", "m", "e", 1)] {
 		t.Fatal("deferred row wrongly counted as done — the window-reopen refill would no-op")
 	}
 	if done[rowKey("AC-04", "local", "m", "e", 2)] || len(done) != 2 {
 		t.Fatalf("resume set has phantom rows: %v", done)
 	}
-	if loadDone(filepath.Join(t.TempDir(), "absent.jsonl")) == nil {
-		t.Fatal("missing file must return empty set, not nil")
+	if d, effs := loadDone(filepath.Join(t.TempDir(), "absent.jsonl")); d == nil || effs == nil {
+		t.Fatal("missing file must return empty sets, not nil")
 	}
 }
 
@@ -409,5 +409,132 @@ func TestRouterClass(t *testing.T) {
 		if got := routerClass(in); got != want {
 			t.Errorf("routerClass(%s)=%q want %q", in, got, want)
 		}
+	}
+}
+
+// ── effort-drift guard (review 2026-08-12, round 3) ─────────────────────────
+//
+// The previous guard keyed on the AGGREGATE plan.Skipped == 0, which was wrong
+// in both directions: it refused every legitimate first measurement of new
+// cells against a populated oracle, and it was silent on PARTIAL drift (pin
+// one lane's real effort while another lane still matches). Drift is per-cell:
+// a planned cell whose (task,lane,model,trial) identity is already recorded
+// under some OTHER effort.
+
+// driftFixture builds a plan + effort index from terse cell descriptions.
+func driftCell(task, lane, model, effort string, trial int) plannedCell {
+	return plannedCell{Task: task, Trial: trial,
+		Config: policyeval.Config{Lane: lane, Model: model, Effort: effort}}
+}
+
+func TestDetectEffortDrift_LegacyRepinDrifts(t *testing.T) {
+	// The 476-cell incident shape: rows recorded pre-effort-capture resume as
+	// "unrecorded"; the operator pins a real effort; every cell re-keys.
+	effs := map[string]map[string]bool{
+		cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+		cellKey("T-02", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "claude", "m", "high", 1),
+		driftCell("T-02", "claude", "m", "high", 1),
+	}
+	drift, recorded := detectEffortDrift(run, effs)
+	if len(drift) != 2 {
+		t.Fatalf("both re-keyed cells must drift, got %d", len(drift))
+	}
+	if len(recorded) != 1 || recorded[0] != policyeval.EffortUnrecorded {
+		t.Fatalf("the recorded efforts must be named for the error message, got %v", recorded)
+	}
+}
+
+func TestDetectEffortDrift_NewCellsDoNotDrift(t *testing.T) {
+	effs := map[string]map[string]bool{
+		cellKey("T-01", "local", "m", 1): {policyeval.EffortUnrecorded: true},
+	}
+	for name, run := range map[string][]plannedCell{
+		"new lane":  {driftCell("T-01", "glm", "glm-5.2", policyeval.EffortUnrecorded, 1)},
+		"new task":  {driftCell("T-99", "local", "m", policyeval.EffortUnrecorded, 1)},
+		"new model": {driftCell("T-01", "local", "m2", "high", 1)},
+		"new trial": {driftCell("T-01", "local", "m", policyeval.EffortUnrecorded, 2)},
+	} {
+		if drift, _ := detectEffortDrift(run, effs); len(drift) != 0 {
+			t.Fatalf("%s: a cell never recorded at ANY effort is a first measurement, not drift: %v", name, drift)
+		}
+	}
+}
+
+func TestDetectEffortDrift_PartialDriftIsCaught(t *testing.T) {
+	// The case the aggregate tell was blind to: local's keys still match (its
+	// cells were skipped upstream and are NOT in run), claude's are re-keyed.
+	effs := map[string]map[string]bool{
+		cellKey("T-01", "local", "lm", 1):  {policyeval.EffortUnrecorded: true},
+		cellKey("T-01", "claude", "cm", 1): {policyeval.EffortUnrecorded: true},
+	}
+	run := []plannedCell{ // local skipped upstream; only claude planned
+		driftCell("T-01", "claude", "cm", "high", 1),
+	}
+	drift, _ := detectEffortDrift(run, effs)
+	if len(drift) != 1 || drift[0].Config.Lane != "claude" {
+		t.Fatalf("the drifted lane must be caught even when another lane resumes cleanly: %v", drift)
+	}
+}
+
+func TestDetectEffortDrift_MixedNewAndDrifted(t *testing.T) {
+	effs := map[string]map[string]bool{
+		cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "claude", "m", "high", 1), // drift
+		driftCell("T-02", "claude", "m", "high", 1), // new task: fine
+	}
+	drift, _ := detectEffortDrift(run, effs)
+	if len(drift) != 1 || drift[0].Task != "T-01" {
+		t.Fatalf("only the re-keyed cell drifts, got %v", drift)
+	}
+}
+
+// loadDone's second return feeds the drift detector: evidence rows indexed by
+// effort-less identity, holes excluded (re-dispatching a hole was always going
+// to happen — not a re-spend the guard needs to refuse).
+func TestLoadDoneEffortIndex(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"claude","model":"m","trial":1,"dispatched":true,"outcome_class":"ok"}
+{"task":"T-01","lane":"claude","model":"m","effort":"high","trial":1,"dispatched":true,"outcome_class":"ok"}
+{"task":"T-02","lane":"claude","model":"m","trial":1,"dispatched":false,"outcome_class":"error"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, effs := loadDone(p)
+	got := effs[cellKey("T-01", "claude", "m", 1)]
+	if !got[policyeval.EffortUnrecorded] || !got["high"] || len(got) != 2 {
+		t.Fatalf("both recorded efforts must be indexed under the cell identity, got %v", got)
+	}
+	if effs[cellKey("T-02", "claude", "m", 1)] != nil {
+		t.Fatal("a hole (error row) must not enter the drift index — re-attempting it is not a re-spend")
+	}
+}
+
+// The evidence definition is policyeval.IsEvidence — error/exit-N/verify_error
+// rows are HOLES on the resume side exactly as they are on the scoring side,
+// or a cell is simultaneously "already recorded" and "not evidence" forever.
+func TestLoadDoneExcludesNonEvidenceRows(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"local","model":"m","effort":"e","trial":1,"dispatched":false,"outcome_class":"error"}
+{"task":"T-02","lane":"local","model":"m","effort":"e","trial":1,"dispatched":true,"outcome_class":"exit-4"}
+{"task":"T-03","lane":"local","model":"m","effort":"e","trial":1,"dispatched":true,"outcome_class":"verify_error"}
+{"task":"T-04","lane":"local","model":"m","effort":"e","trial":1,"dispatched":true,"outcome_class":"ok"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done, _ := loadDone(p)
+	for _, task := range []string{"T-01", "T-02", "T-03"} {
+		if done[rowKey(task, "local", "m", "e", 1)] {
+			t.Fatalf("%s is a hole and must be re-attemptable, not recorded", task)
+		}
+	}
+	if !done[rowKey("T-04", "local", "m", "e", 1)] {
+		t.Fatal("the ok row is evidence and must be recorded")
 	}
 }

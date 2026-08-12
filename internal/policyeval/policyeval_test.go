@@ -81,9 +81,34 @@ func TestOracleBestAndRegret(t *testing.T) {
 		t.Fatalf("oracle claude fraction: %v", ev.ClaudeFraction)
 	}
 	base := Evaluate(tb, tasks, Fixed(lc("claude")))
-	if r := Regret(ev, base); !almost(r, -0.25) {
-		// regret of always-claude vs oracle = 4-3 = 1 task = 0.25; ev vs base is negative
-		t.Fatalf("regret: %v", r)
+	r, n := Regret(ev, base)
+	if !almost(r, -0.25) || n != 4 {
+		// regret of always-claude vs oracle = 4-3 = 1 task = 0.25 over the 4
+		// shared-evidence tasks; ev vs base is negative
+		t.Fatalf("regret: %v over n=%d", r, n)
+	}
+}
+
+// Regret is a paired delta, so it must gate on Measured — differencing the
+// raw PassRates converts "not measured" into "failed": an all-holes candidate
+// and a measured-failed-everything candidate scored byte-identical regret.
+func TestRegretGatesOnMeasured(t *testing.T) {
+	tb := microTable()
+	tasks := []string{"t1", "t2", "t3", "t4"}
+	base := Evaluate(tb, tasks, Fixed(lc("claude")))
+
+	// An all-holes candidate shares NO measured task with the reference: the
+	// gap is undefined (n=0), not a measured -0.75.
+	holes := Evaluate(tb, tasks, Fixed(lc("glm")))
+	if r, n := Regret(holes, base); n != 0 || r != 0 {
+		t.Fatalf("all-holes vs measured must be undefined (0, 0), got (%v, %d)", r, n)
+	}
+
+	// A measured candidate pairs only on the tasks BOTH saw.
+	local := Evaluate(tb, tasks, Fixed(lc("local")))
+	if r, n := Regret(local, base); n != 4 || !almost(r, 0.5) {
+		// claude beats local on t2,t4 (+1 each) over 4 shared tasks = +0.5
+		t.Fatalf("paired regret wrong: (%v, %d)", r, n)
 	}
 }
 
@@ -91,7 +116,10 @@ func TestOracleBestAndRegret(t *testing.T) {
 func TestFrontier(t *testing.T) {
 	tb := microTable()
 	tasks := []string{"t1", "t2", "t3", "t4"}
-	pts, _ := Frontier(tb, tasks)
+	pts, unmeasured, freeUnmeasured := Frontier(tb, tasks)
+	if unmeasured != 0 || freeUnmeasured != 0 {
+		t.Fatalf("fully-measured table must exclude nothing: %d, %d", unmeasured, freeUnmeasured)
+	}
 	if len(pts) != len(tasks)+1 {
 		t.Fatalf("frontier points: %d", len(pts))
 	}
@@ -106,10 +134,71 @@ func TestFrontier(t *testing.T) {
 	}
 }
 
+// The curve's rates share the caller's denominator with every policy row.
+// Rebasing onto the measured subset claimed pass_rate 1.0 at zero budget over
+// 2 measured tasks while policy rows maxed at 0.333 over 6.
+func TestFrontierSharesThePolicyDenominator(t *testing.T) {
+	tb := NewTable()
+	tb.Add("t1", lc("local"), true)
+	tb.Add("t2", lc("local"), true)
+	tasks := []string{"t1", "t2", "t3", "t4", "t5", "t6"} // 4 unmeasured
+	pts, unmeasured, _ := Frontier(tb, tasks)
+	if unmeasured != 4 {
+		t.Fatalf("unmeasured = %d, want 4", unmeasured)
+	}
+	if !almost(pts[0].PassRate, 2.0/6.0) {
+		t.Fatalf("pass_rate must be over the FULL evaluation set (2/6), got %v", pts[0].PassRate)
+	}
+	// Same table, same tasks, scored as a policy: identical denominator.
+	ev := Evaluate(tb, tasks, Fixed(lc("local")))
+	if !almost(pts[0].PassRate, ev.PassRate) {
+		t.Fatalf("frontier (%v) and policy (%v) pass rates must be comparable", pts[0].PassRate, ev.PassRate)
+	}
+}
+
+// A task measured ONLY on the claude side has an unknown free-lane value: a
+// zero base is an imputed free-lane failure. A claude-only table and a table
+// where every free lane measurably failed must NOT produce identical curves.
+func TestFrontierExcludesFreeUnmeasuredTasks(t *testing.T) {
+	claudeOnly := NewTable()
+	claudeOnly.Add("t1", lc("claude"), false)
+	claudeOnly.Add("t2", lc("claude"), false)
+
+	freeFailed := NewTable()
+	freeFailed.Add("t1", lc("claude"), false)
+	freeFailed.Add("t2", lc("claude"), false)
+	freeFailed.Add("t1", lc("glm"), false)
+	freeFailed.Add("t2", lc("glm"), false)
+
+	tasks := []string{"t1", "t2"}
+	ptsA, _, freeUnA := Frontier(claudeOnly, tasks)
+	ptsB, _, freeUnB := Frontier(freeFailed, tasks)
+	if freeUnA != 2 || freeUnB != 0 {
+		t.Fatalf("free-unmeasured counts: %d (want 2), %d (want 0)", freeUnA, freeUnB)
+	}
+	if len(ptsA) == len(ptsB) {
+		t.Fatal("a claude-only table and a measured-free-failure table must not produce same-shaped curves")
+	}
+}
+
 func TestRCI(t *testing.T) {
 	assign := map[string]Config{"t1": lc("codex"), "t2": lc("codex"), "t3": lc("codex"), "t4": lc("claude")}
 	if r := RCI(assign); !almost(r, 0.75) {
 		t.Fatalf("RCI: %v", r)
+	}
+}
+
+// An abstain (the zero Config) is not a lane: a task routed NOWHERE must not
+// count toward the modal lane, or an all-abstain policy reports rci 1.0 — the
+// maximum collapse value for a policy that collapsed onto nothing.
+func TestRCIAbstainIsNotALane(t *testing.T) {
+	allAbstain := map[string]Config{"t1": {}, "t2": {}, "t3": {}}
+	if r := RCI(allAbstain); r != 0 {
+		t.Fatalf("all-abstain rci = %v, want 0", r)
+	}
+	mixed := map[string]Config{"t1": lc("codex"), "t2": lc("codex"), "t3": {}, "t4": {}}
+	if r := RCI(mixed); !almost(r, 0.5) {
+		t.Fatalf("abstains stay in the denominator: rci = %v, want 0.5", r)
 	}
 }
 
