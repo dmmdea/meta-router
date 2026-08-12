@@ -230,6 +230,23 @@ that goes red if the guard is reverted:
   is also using interactively. A denial relegates (exit 3) with a typed
   receipt so the DAG escalates to a cloud lane.
 
+### Lossless compaction + context handoff (W5)
+
+Strategy DAGs move dep results between nodes; W5 makes those bytes cheaper
+without ever risking their meaning (DG-3: *quality is the lever* — anything
+lossy belongs behind a fidelity gate and does not exist here):
+
+- **Embed-time compaction** — a dep artifact that is JSON is fenced into the
+  downstream prompt minified and column-rotated (`internal/orch/compact`,
+  `Decompact(Compact(x))` semantically equal to `x`, marker collisions
+  escaped bijectively). The stored artifact keeps its original bytes; savings
+  are journaled per node (`ctx_compacted`) as a side-effect metric. Prose
+  embeds byte-identical. Kill-switch: `compaction_off`.
+- **Context handoff on re-lane** — a re-laned retry carries the failed
+  attempt's lane, outcome class, and a bounded excerpt of its result in a
+  `<handoff prior-attempt>` block, so the alternative lane starts from state
+  instead of cold.
+
 ### `mr-eval` — measure retrieval quality
 
 A benchmarking tool that scores retrievers (BM25, embedding-only, hybrid) against a labeled gold-set, reporting recall@1/@3/@5, MRR, and median latency — useful for tuning or for validating a change to the retrieval logic. It evaluates over the same discovered root set the hook indexes, and reports both the full gold-set and the *covered-only* subset (cases whose expected skill is actually installed), so uninstalled targets can't mask ranking regressions.

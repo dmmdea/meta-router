@@ -34,6 +34,11 @@ type StepState struct {
 	// non-verifier nodes and when no structured verdict could be parsed.
 	VerifyVerdict string `json:"verify_verdict,omitempty"`
 	VerifyReason  string `json:"verify_reason,omitempty"`
+	// Handoff (W5) is the compact JSON blob a re-laned retry carries from its
+	// FAILED attempt — from-lane, outcome class, and a bounded excerpt of the
+	// failed result — so the alternative lane starts from state, not cold.
+	// Set only by the re-lane path.
+	Handoff string `json:"handoff,omitempty"`
 }
 
 type State struct {

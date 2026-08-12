@@ -4,6 +4,18 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.27.0] — 2026-08-12
+
+### Added — W5: lossless compaction + context handoff (charter queue item 4)
+DG-3, operator-approved posture: *"quality is the lever and the priority here. Compression is a savings/performance method that ranks second to quality."* Everything here is **provably lossless**; anything lossy belongs behind a fidelity gate + gold-set non-inferiority and deliberately does not exist in this repo (the full lossy engine was delegated to the offload-harness session).
+- **`internal/orch/compact`** — lossless JSON compaction: minification plus Headroom-style columnar rotation (an array of ≥3 objects sharing one key set stops repeating every key on every row). `Decompact(Compact(x))` is semantically equal to `x` for every input — the round-trip test is the contract, and it caught a real decode-ambiguity during development: a document legitimately containing `"@columnar"` keys would have had USER data unrotated. The fix is a bijective escape (n `@`s → n+1 on encode, reversed on decode), so every bare marker in output is provably ours and decode never guesses. Prose is never touched (only JSON has a lossless compact form).
+- **Embed-time application, stored artifacts untouched.** `ResolveContextCompact` compacts a dep artifact only as it is fenced into a downstream strategy prompt; `artifacts/<id>.json` keeps the original bytes, so the raw is always recoverable regardless. Byte savings are journaled per node (`ctx_compacted`) — the R14 side-effect metric: reported, never the goal. Kill-switch: `compaction_off`.
+- **Context handoff on re-lane.** A re-laned retry now carries what the failed attempt learned — from-lane, outcome class, and a rune-safe 600-char excerpt of the failed result — as a `<handoff prior-attempt>` block, so the alternative lane starts from state instead of cold. First attempts never carry one.
+- Producer-side canaries (the W6 lesson, applied from the start): the canaries drive the real executor and assert on the prompts the runner receives — compaction wiring, kill-switch, handoff-reaches-retry, excerpt bounds — each verified red under revert.
+
+### Complexity
+- B12 budget raised 23160 → 23520. See `docs/complexity-budget.json` for the accounting.
+
 ## [0.26.0] — 2026-08-12
 
 ### Added — W6 resilience remainder (charter queue item 3)
