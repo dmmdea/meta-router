@@ -222,6 +222,8 @@ func main() {
 	maxNotional := flag.Float64("max-notional", 10, "claude-lane notional guard ceiling (real coding tasks exceed the $2 default)")
 	claudeExtra := flag.String("claude-extra", "--dangerously-skip-permissions",
 		"extra claude-lane flags via run -extra (headless replay agents work tool-enabled in disposable worktrees; empty to disable)")
+	planOnly := flag.Bool("plan-only", false, "print the cells this run WOULD dispatch and exit 0 — the zero-spend way to check a resume before an unattended run")
+	reMeasure := flag.Bool("re-measure", false, "proceed even when the resume set matched nothing (deliberate full re-spend)")
 	flag.Parse()
 
 	// Migration is a pure file rewrite: it must not require a goldset, lanes or
@@ -281,6 +283,40 @@ func main() {
 	defer out.Close()
 
 	plan := buildRunPlan(tasks, *lanesFlag, rawPins, *trials, taskFilter, classFilter, done)
+
+	// The plan is what a replay WOULD do, decided before anything dispatches —
+	// so SAY it before dispatching, not in a summary line after the loop that
+	// an unattended weekly driver never reads.
+	fmt.Fprintf(os.Stderr, "plan: %d cells (%d to run, %d already recorded)\n",
+		plan.Total, len(plan.Run), plan.Skipped)
+	if *planOnly {
+		fmt.Printf("plan-only: %d cells (%d would run, %d already recorded) → %s\n",
+			plan.Total, len(plan.Run), plan.Skipped, *outPath)
+		return
+	}
+
+	// RESUME-KEY MISMATCH GUARD. The resume key includes effort. An oracle
+	// recorded before effort capture resumes as "unrecorded"; pinning a real
+	// effort makes every key miss, so nothing is skipped and the ENTIRE table
+	// re-dispatches — 476 cloud cells on this project's live oracle, tool
+	// enabled, unattended, discovered only by the bill (review 2026-08-12).
+	//
+	// The tell is unambiguous: a non-empty resume set that matched NOTHING.
+	// That is either a genuine first run against someone else's oracle or a
+	// key mismatch, and the safe reading is the expensive one.
+	if len(done) > 0 && plan.Skipped == 0 && len(plan.Run) > 0 {
+		if !*reMeasure {
+			fatal("resume matched NOTHING: the output oracle already holds %d recorded cells, "+
+				"but none match the (task, lane, model, EFFORT, trial) keys this run would write, "+
+				"so all %d cells would re-dispatch and re-spend. The usual cause is an effort pin "+
+				"that disagrees with the recorded rows (rows written before effort capture resume "+
+				"as %q). Check with -plan-only, pin the effort the rows actually carry, or pass "+
+				"-re-measure if re-spending is genuinely what you want.",
+				len(done), len(plan.Run), policyeval.EffortUnrecorded)
+		}
+		fmt.Fprintf(os.Stderr, "WARNING: -re-measure: resume matched nothing; re-dispatching all %d cells\n", len(plan.Run))
+	}
+
 	for _, c := range plan.Run {
 		row := replayOne(c.GoldTask, c.Config, c.Trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
 		b, _ := json.Marshal(row)

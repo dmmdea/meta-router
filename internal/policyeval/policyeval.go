@@ -216,11 +216,17 @@ type Eval struct {
 	Unknown        int     `json:"unknown_cells"`
 	Assignment     map[string]Config
 	PerTask        map[string]float64
+	// Measured says whether a task's cell had ANY evidence. PerTask stores 0
+	// for an unknown cell, which is right for the pass-rate mean (counted,
+	// never imputed) and WRONG for any paired comparison — differencing
+	// against that 0 turns "not measured" into "failed". Callers doing
+	// deltas, ratios or CIs must gate on this, not on the score.
+	Measured map[string]bool
 }
 
 // Evaluate values π over tasks by table lookup.
 func Evaluate(t *Table, tasks []string, p Policy) Eval {
-	ev := Eval{Assignment: map[string]Config{}, PerTask: map[string]float64{}}
+	ev := Eval{Assignment: map[string]Config{}, PerTask: map[string]float64{}, Measured: map[string]bool{}}
 	claude := 0
 	for _, task := range tasks {
 		cfg := p(task)
@@ -239,6 +245,7 @@ func Evaluate(t *Table, tasks []string, p Policy) Eval {
 		}
 		ev.Passes += r
 		ev.PerTask[task] = r
+		ev.Measured[task] = true
 	}
 	n := len(tasks)
 	if n > 0 {
