@@ -4,6 +4,20 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.30.0] — 2026-08-12
+
+### Fixed — the rest of the Stage-2b review
+Everything the v0.29.0 round left open. One theme runs through all of it: the eval stack kept answering questions it had no evidence for, wearing a different disguise each time.
+
+- **Lane→cell resolution prefers evidence.** It now walks the lane's configs in rank order and takes the first the oracle actually **observed**. Rank-1-only resolution pointed three of four lanes at zero-row cells on the live oracle (`glm`→`glm-4.7` because `'4' < '5'`; `local`→`qwythos-think`), so every lane row read `pass_rate 0` while **580 observations sat unreachable** — the operator's conclusion would have been "codex, glm and local are worthless". No evidence anywhere still falls back to rank-1 and says so.
+- **The scorecard and B15 read the ACTIVE rank table**, not the compiled seed. The probes already route on the operator's override, so resolving against the seed measured a router nobody runs. Provenance (`seed`/`override`) is stamped in the artifact.
+- **A config's rank is its best across classes.** The first-seen rank was itself map-iteration-dependent — the same defect v0.28.2 fixed one layer down, caught here by the new total-order test.
+- **`PolicyReport.configs` is populated.** v0.29.0 shipped it as a **dead field**, so no reader could tell which model a row's `pass_rate` belonged to.
+- **The frontier excludes unmeasured tasks** and reports `frontier_unmeasured_tasks`. An all-holes table and an all-failures table previously produced byte-identical curves, while the artifact's own note claimed holes are never imputed.
+- **Undeployable class recommendations are flagged** (`class_assignment_not_rankable`). `ClassBest` picks from the *table* while routing can only emit what is *ranked*; the headline generalization candidate was recommending five configs the router cannot dispatch.
+- **`-migrate-effort` is no longer a foot-gun.** It refuses a file that is not an oracle (a mistyped path stamped `effort` into every record of whatever JSONL it was handed — `dispatch.jsonl` sits one directory away — and reported success), refuses to overwrite a **non-string** effort, and skips any line that is not valid JSON: the old default branch spliced at the last `}`, which in a *truncated* line sits inside a string value, so the one function that promises not to rewrite what it cannot read corrupted it.
+- Smaller: unparseable oracle lines are counted and warned (`malformed_oracle_lines`); observations matching no ranked config are counted (`unranked_observations`), so an all-zero coverage table no longer reads the same as an empty oracle; lane/model are trimmed on ingest exactly as `normalizePins` trims on write; `NormalizeEffort` folds the **sentinel's** case only (`UNRECORDED` became its own cell key *and* was forwarded to the CLI as a literal effort); `floored()` no longer treats an unknown lane as the cheapest tier, which had it invent a lane for an unresolvable base.
+
 ## [0.29.0] — 2026-08-12
 
 ### Fixed — Stage-2b review of Plan 1 (the review that should have run before v0.28.0)

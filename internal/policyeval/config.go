@@ -28,6 +28,14 @@ func NormalizeEffort(e string) string {
 	if e == "" {
 		return EffortUnrecorded
 	}
+	// Fold the SENTINEL's case only. "UNRECORDED" typed by hand IS the marker,
+	// but unfolded it became its own distinct cell key and — worse — was
+	// forwarded to the CLI as a literal effort value, because the suppression
+	// check compares against the exact literal. Real efforts keep their
+	// spelling: the vendor decides what those mean, not us.
+	if strings.EqualFold(e, EffortUnrecorded) {
+		return EffortUnrecorded
+	}
 	return e
 }
 

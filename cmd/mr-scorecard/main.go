@@ -67,45 +67,91 @@ func (r oracleRow) ran() bool {
 
 // config is the row's evidence cell.
 func (r oracleRow) config() policyeval.Config {
-	return policyeval.Config{Lane: r.Lane, Model: r.Model,
+	// Lane and model are TRIMMED on ingest, matching normalizePins on the
+	// write side. A padded value is a distinct string from every other
+	// row's, which is precisely the mislabelling the config key exists to
+	// end — the reasoning NormalizeEffort already states, applied to all
+	// three fields instead of one.
+	return policyeval.Config{Lane: strings.TrimSpace(r.Lane), Model: strings.TrimSpace(r.Model),
 		Effort: policyeval.NormalizeEffort(r.Effort)}
 }
 
-// seedConfigs maps each lane to the config the rank table ranks FIRST for it,
-// and lists every ranked config. It is the one place a lane-level policy
-// (always-<lane>, the zoo's floors, the live router's chosen lane) is resolved
-// to an evidence cell — stated here rather than hidden inside each caller.
-// Seed efforts go through NormalizeEffort too: the table carries entries with
-// no effort, and normalizing only the oracle side would make those configs
-// permanently uncoverable (their keys would never match).
-func seedConfigs() (byLane map[string]policyeval.Config, all []policyeval.Config) {
-	byLane = map[string]policyeval.Config{}
-	bestRank := map[string]int{}
-	seen := map[string]bool{}
-	for _, entries := range router.Seed() {
+// rankedConfigs enumerates the configs the ACTIVE rank table ranks, and the
+// per-lane rank order. It reads the operator's override when present — the
+// same policy liveRouterPolicy deliberately copies into its neutral state dir.
+// Reading the compiled seed here while the probes route on an override
+// measured a router nobody runs (the 2026-07-25 audit's exact divergence,
+// re-created at this seam; review 2026-08-12).
+func rankedConfigs(tbl router.Table) (byLane map[string][]policyeval.Config, all []policyeval.Config) {
+	type ranked struct {
+		cfg  policyeval.Config
+		rank int
+	}
+	// A config can appear in SEVERAL classes at different ranks. Its rank here
+	// is the BEST (minimum) across them — "how highly does the table rank this
+	// config anywhere". Taking the first-seen rank instead would let map
+	// iteration order decide it, which is the exact non-determinism this
+	// function's total order exists to remove.
+	best := map[string]*ranked{}
+	for _, entries := range tbl {
 		for _, e := range entries {
 			cfg := policyeval.Config{Lane: e.Lane, Model: e.Model,
 				Effort: policyeval.NormalizeEffort(e.Effort)}
-			if !seen[cfg.Key()] {
-				seen[cfg.Key()] = true
+			if cur, ok := best[cfg.Key()]; !ok {
+				best[cfg.Key()] = &ranked{cfg, e.Rank}
 				all = append(all, cfg)
+			} else if e.Rank < cur.rank {
+				cur.rank = e.Rank
 			}
-			// The order is TOTAL: lower rank wins, and a rank TIE breaks on the
-			// config key. router.Seed() is a MAP, so without the key tie-break
-			// the winner is decided by Go's randomized map iteration — observed
-			// live: two runs over identical input resolved the claude reference
-			// to |xhigh then |high, which silently changes the reference every
-			// scorecard run and makes every ratio non-reproducible. This is the
-			// same "map iteration must never decide a pick" rule betterPick
-			// already enforces on the routing side.
-			r, ok := bestRank[e.Lane]
-			if !ok || e.Rank < r || (e.Rank == r && cfg.Key() < byLane[e.Lane].Key()) {
-				bestRank[e.Lane], byLane[e.Lane] = e.Rank, cfg
+		}
+	}
+	perLane := map[string][]ranked{}
+	for _, r := range best {
+		perLane[r.cfg.Lane] = append(perLane[r.cfg.Lane], *r)
+	}
+	byLane = map[string][]policyeval.Config{}
+	for lane, rs := range perLane {
+		// TOTAL order: rank, then config key. The table is a MAP, so without
+		// the key tie-break Go's iteration order decides which equally-ranked
+		// config represents the lane.
+		sort.Slice(rs, func(i, j int) bool {
+			if rs[i].rank != rs[j].rank {
+				return rs[i].rank < rs[j].rank
 			}
+			return rs[i].cfg.Key() < rs[j].cfg.Key()
+		})
+		for _, r := range rs {
+			byLane[lane] = append(byLane[lane], r.cfg)
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Key() < all[j].Key() })
 	return byLane, all
+}
+
+// resolveLaneConfig turns a LANE into the cell a lane-level policy
+// (always-<lane>, a zoo floor) is measured as. It walks the lane's configs in
+// rank order and takes the first one the oracle actually OBSERVED, falling
+// back to rank-1 when the lane has no evidence at all.
+//
+// Why evidence-preferring rather than simply rank-1: "route everything to this
+// lane" is only measurable through a config that was measured. Rank-1 alone
+// resolved three of four lanes to cells with ZERO rows on the live oracle
+// (glm→glm-4.7 because '4'<'5'; local→qwythos-think), so every lane row read
+// pass_rate 0 while 580 observations sat in the table unreachable — the
+// operator's conclusion would have been "codex, glm and local are worthless".
+// Walking rank order keeps the choice principled and deterministic; the
+// fallback keeps "no evidence" honest rather than inventing a cell.
+func resolveLaneConfig(byLane map[string][]policyeval.Config, lane string, observed map[string]int) (policyeval.Config, bool) {
+	cfgs := byLane[lane]
+	for _, c := range cfgs {
+		if observed[c.Key()] > 0 {
+			return c, true
+		}
+	}
+	if len(cfgs) > 0 {
+		return cfgs[0], false
+	}
+	return policyeval.Config{}, false
 }
 
 // ConfigCoverage reports, per ranked config, how much evidence exists — at
@@ -148,10 +194,12 @@ type PolicyReport struct {
 	RCI            float64  `json:"rci"`
 	Unknown        int      `json:"unknown_cells"`
 	NonInferior    bool     `json:"non_inferior_at_margin"`
-	// Config names the evidence cell this row's numbers belong to. Without it
-	// a reader cannot tell WHICH model a pass_rate describes — the exact
-	// mislabelling this program exists to end, at the artifact layer.
-	Config string `json:"config,omitempty"`
+	// Configs names the evidence cells this row's numbers belong to, sorted.
+	// A fixed policy has one; a per-task policy (oracle-best, router-live)
+	// has several. Without it a reader cannot tell WHICH model a pass_rate
+	// describes — the mislabelling this program exists to end, at the
+	// artifact layer. (Shipped as a dead field in v0.29.0; populated here.)
+	Configs []string `json:"configs,omitempty"`
 	// PairedN is how many tasks had evidence for BOTH this policy and the
 	// reference. The ratio/CI/p are computed on those tasks only; anything
 	// less than the full set means the verdict is narrower than the margin
@@ -246,15 +294,18 @@ func main() {
 	lanes := map[string]bool{}
 	obsByConfig := map[string]int{} // full (lane,model,effort) key → row count
 	obsByModel := map[string]bool{} // "lane|model" → any evidence
-	seedByLane, rankedCfgs := seedConfigs()
-	// resolve is the lane→cell seam every lane-level policy goes through.
-	resolve := func(lane string) policyeval.Config { return seedByLane[lane] }
+	malformed := 0                  // unparseable/identity-less oracle lines
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		var r oracleRow
 		if json.Unmarshal([]byte(line), &r) != nil || r.Task == "" {
+			// Counted, not silently dropped. model and effort are load-bearing
+			// now, so a torn row does not merely vanish — it would shrink the
+			// table under a config nobody can see. Same rule the v0.25.0
+			// dashboard adopted for exactly this reason.
+			malformed++
 			continue
 		}
 		if !r.ran() {
@@ -265,6 +316,28 @@ func main() {
 		lanes[r.Lane] = true
 		obsByConfig[cfg.Key()]++
 		obsByModel[cfg.Lane+"|"+cfg.Model] = true
+	}
+	if malformed > 0 {
+		fmt.Fprintf(os.Stderr, "WARNING: %d oracle line(s) unparseable or identity-less — skipped; the table below is smaller than the file\n", malformed)
+	}
+
+	// The ACTIVE policy, not the compiled default: the probes route on the
+	// operator's rank-table override, so resolving against the seed would score
+	// a router nobody runs.
+	rankTbl, tblProvenance, tblWarn := router.LoadChecked(statepaths.RankTable())
+	if tblWarn != "" {
+		fmt.Fprintln(os.Stderr, "WARN: rank table:", tblWarn)
+	}
+	byLaneRanked, rankedCfgs := rankedConfigs(rankTbl)
+	ranked := map[string]bool{}
+	for _, c := range rankedCfgs {
+		ranked[c.Key()] = true
+	}
+	// resolve is the one lane→cell seam; it prefers a ranked config the oracle
+	// actually observed (see resolveLaneConfig).
+	resolve := func(lane string) policyeval.Config {
+		c, _ := resolveLaneConfig(byLaneRanked, lane, obsByConfig)
+		return c
 	}
 
 	// B'2 (-split): the EVALUATION set becomes the heldout tasks only, and the
@@ -386,8 +459,18 @@ func main() {
 	var reports []PolicyReport
 	for name, p := range policies {
 		ev := policyeval.Evaluate(tb, evalIDs, p)
+		cfgSeen := map[string]bool{}
+		var cfgKeys []string
+		for _, c := range ev.Assignment {
+			if k := c.Key(); !cfgSeen[k] {
+				cfgSeen[k] = true
+				cfgKeys = append(cfgKeys, k)
+			}
+		}
+		sort.Strings(cfgKeys)
 		rep := PolicyReport{Policy: name, PassRate: ev.PassRate,
-			ClaudeFraction: ev.ClaudeFraction, RCI: policyeval.RCI(ev.Assignment), Unknown: ev.Unknown}
+			ClaudeFraction: ev.ClaudeFraction, RCI: policyeval.RCI(ev.Assignment), Unknown: ev.Unknown,
+			Configs: cfgKeys}
 		// PAIRED on the tasks where BOTH arms have evidence. An unknown cell
 		// scores 0 in Evaluate (correct there — it is counted, not imputed),
 		// but feeding that 0 into a DIFFERENCE silently converts "we did not
@@ -469,8 +552,18 @@ func main() {
 	note := "Q6 quota gate: throttles/defers during replay are graceful degradation, not violations; 0 cap-blows recorded. Unknown cells are holes (e.g. a lane's unfilled window), never imputed."
 	var splitInfo *SplitInfo
 	if *split {
+		var notRankable []string
+		for cls, cfg := range classAssign {
+			if cfg.Key() != "||" && !ranked[cfg.Key()] {
+				notRankable = append(notRankable, cls+" -> "+cfg.Key())
+			}
+		}
+		sort.Strings(notRankable)
+		if len(notRankable) > 0 {
+			fmt.Fprintf(os.Stderr, "WARNING: %d class assignment(s) name a config the rank table cannot dispatch: %v\n", len(notRankable), notRankable)
+		}
 		splitInfo = &SplitInfo{Mode: "tuning->heldout", TuningN: len(tuningIDs), HeldoutN: len(heldoutIDs),
-			ClassAssignment: classAssign, ClassCoverage: classCov}
+			ClassAssignment: classAssign, NonRankable: notRankable, ClassCoverage: classCov}
 		note += " SPLIT MODE: policies are scored on the heldout tasks only; oracle-best and the frontier are IN-SAMPLE ceilings (they see the heldout cells); class-oracle-tuned is the generalization test - derived on tuning only, over GOLD class labels (an idealized upper bound on class routing: production classifies via classify.go, which disagrees with gold labels on 48/56)."
 		if *zoo {
 			note += " ZOO: zoo:* rows are tuned on the tuning split only (config in zoo[].chosen_config); their heldout verdict needs non_inferior_at_margin AND pareto_vs_router for promotion."
@@ -481,24 +574,41 @@ func main() {
 	// on (model level) or the gap the re-baseline must close (effort level),
 	// and either way the operator must be able to see it without running the
 	// canary.
+	// Observations that match NO ranked config: with an all-zero coverage
+	// table the operator cannot tell "the oracle is empty" from "the oracle
+	// is full of cells nobody ranks" — which is exactly the day-one state.
+	unranked := 0
+	for k, n := range obsByConfig {
+		if !ranked[k] {
+			unranked += n
+		}
+	}
 	cov := make([]ConfigCoverage, 0, len(rankedCfgs))
 	for _, c := range rankedCfgs {
 		n := obsByConfig[c.Key()]
 		cov = append(cov, ConfigCoverage{Config: c.Key(), Observations: n,
 			CoveredModel: obsByModel[c.Lane+"|"+c.Model], CoveredEffort: n > 0})
 	}
+	frontier, frontierUnmeasured := policyeval.Frontier(tb, evalIDs)
 	out := struct {
-		Margin   float64                    `json:"margin"`
-		Ref      string                     `json:"reference"`
-		RefCfg   string                     `json:"reference_config"`
-		RefGap   *ReferenceGap              `json:"reference_unmeasured,omitempty"`
-		Split    *SplitInfo                 `json:"split,omitempty"`
-		Zoo      []ZooEntry                 `json:"zoo,omitempty"`
-		Reports  []PolicyReport             `json:"policies"`
-		Coverage []ConfigCoverage           `json:"config_coverage"`
-		Frontier []policyeval.FrontierPoint `json:"frontier"`
-		Note     string                     `json:"note"`
-	}{*margin, "always-claude", refCfg.Key(), refUnmeasured, splitInfo, zooEntries, reports, cov, policyeval.Frontier(tb, evalIDs), note}
+		Margin    float64                    `json:"margin"`
+		Ref       string                     `json:"reference"`
+		RefCfg    string                     `json:"reference_config"`
+		RankTable string                     `json:"rank_table"`
+		Malformed int                        `json:"malformed_oracle_lines"`
+		Unranked  int                        `json:"unranked_observations"`
+		RefGap    *ReferenceGap              `json:"reference_unmeasured,omitempty"`
+		Split     *SplitInfo                 `json:"split,omitempty"`
+		Zoo       []ZooEntry                 `json:"zoo,omitempty"`
+		Reports   []PolicyReport             `json:"policies"`
+		Coverage  []ConfigCoverage           `json:"config_coverage"`
+		Frontier  []policyeval.FrontierPoint `json:"frontier"`
+		// Tasks the frontier EXCLUDED for having no measured cell at all. The
+		// curve spans measured tasks only; imputing holes as zeros made an
+		// all-holes table and an all-failures table produce identical curves.
+		FrontierUnmeasured int    `json:"frontier_unmeasured_tasks"`
+		Note               string `json:"note"`
+	}{*margin, "always-claude", refCfg.Key(), tblProvenance, malformed, unranked, refUnmeasured, splitInfo, zooEntries, reports, cov, frontier, frontierUnmeasured, note}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
@@ -510,7 +620,14 @@ type SplitInfo struct {
 	TuningN         int                          `json:"tuning_n"`
 	HeldoutN        int                          `json:"heldout_n"`
 	ClassAssignment map[string]policyeval.Config `json:"class_assignment"`
-	ClassCoverage   policyeval.ClassCoverage     `json:"class_coverage"`
+	// NonRankable lists class assignments naming a config the ACTIVE rank
+	// table cannot dispatch. ClassBest picks from the TABLE (anything
+	// measured) while routing can only emit what is RANKED, and nothing
+	// reconciled the two: the headline generalization candidate recommended
+	// five configs that are not deployable and the artifact presented them
+	// as an assignment (review 2026-08-12).
+	NonRankable   []string                 `json:"class_assignment_not_rankable,omitempty"`
+	ClassCoverage policyeval.ClassCoverage `json:"class_coverage"`
 }
 
 // liveRouterPolicy runs the shipped deterministic router on each task's RAW

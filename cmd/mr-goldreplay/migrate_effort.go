@@ -66,6 +66,15 @@ func stampLine(line []byte) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(body)) == 0 || bytes.TrimSpace(body)[0] != '{' {
 		return line, false, nil
 	}
+	// A line that does not fully parse is returned VERBATIM. Without this the
+	// default branch below spliced at the last '}' — which in a TRUNCATED
+	// line can sit inside a completed string value, so the one function that
+	// promises not to rewrite what it cannot read corrupted it (an
+	// interrupted append-only replay is exactly how a torn line arises, and
+	// notes routinely contain '}').
+	if !json.Valid(body) {
+		return line, false, nil
+	}
 	start, end, found, err := effortValueSpan(body)
 	if err != nil {
 		return line, false, nil // unparseable: verbatim, never an error
@@ -77,6 +86,18 @@ func stampLine(line []byte) ([]byte, bool, error) {
 		var cur string
 		if json.Unmarshal(body[start:end], &cur) == nil && cur != "" {
 			return line, false, nil // already pinned — byte-identical
+		}
+		// A NON-STRING effort (3, null, an object) is unexpected data, not a
+		// blank to fill. Overwriting it destroys the only copy in a file whose
+		// own header calls it unreproducible without re-spending every
+		// dispatch. Refuse the line and let the operator look.
+		if !bytes.Equal(bytes.TrimSpace(body[start:end]), []byte(`""`)) {
+			var probe any
+			if json.Unmarshal(body[start:end], &probe) == nil {
+				if _, isStr := probe.(string); !isStr {
+					return line, false, fmt.Errorf("effort is %s, not a string: refusing to overwrite it", bytes.TrimSpace(body[start:end]))
+				}
+			}
 		}
 		outBody = append(append(append([]byte{}, body[:start]...), stamp...), body[end:]...)
 	default:
@@ -143,10 +164,46 @@ func effortValueSpan(line []byte) (start, end int, found bool, err error) {
 // Never an in-place truncation: a process death mid-write would take the whole
 // oracle with it, and the oracle is not reproducible without re-spending every
 // dispatch that built it.
+// looksLikeOracle gates the rewrite on the file actually BEING an oracle.
+// Without it a mistyped path stamped "effort" into every record of whatever
+// JSONL it was handed — dispatch.jsonl and quota-trace.jsonl sit one
+// directory away — and reported success. Every non-blank line must carry the
+// row identity (task + lane); a file with none is refused.
+func looksLikeOracle(in []byte) error {
+	rows, bad := 0, 0
+	for _, line := range bytes.Split(in, []byte("\n")) {
+		t := bytes.TrimSpace(line)
+		if len(t) == 0 {
+			continue
+		}
+		rows++
+		var r struct {
+			Task string `json:"task"`
+			Lane string `json:"lane"`
+		}
+		if json.Unmarshal(t, &r) != nil || r.Task == "" || r.Lane == "" {
+			bad++
+		}
+	}
+	if rows == 0 {
+		return fmt.Errorf("no JSON rows: this does not look like an oracle")
+	}
+	if bad*2 > rows {
+		return fmt.Errorf("%d of %d rows carry no task+lane identity: this does not look like an oracle (refusing to rewrite it)", bad, rows)
+	}
+	if bad > 0 {
+		fmt.Fprintf(os.Stderr, "WARNING: %d of %d line(s) are unreadable or identity-less; they are passed through VERBATIM, not stamped\n", bad, rows)
+	}
+	return nil
+}
+
 func migrateEffortFile(path string) (int, error) {
 	in, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
+	}
+	if err := looksLikeOracle(in); err != nil {
+		return 0, fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}
 	out, changed, err := migrateEffort(in)
 	if err != nil {

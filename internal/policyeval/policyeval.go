@@ -269,17 +269,20 @@ type FrontierPoint struct {
 // Frontier sweeps the Claude budget 0..len(tasks): free passes come from the
 // best non-Claude lane; tasks whose Claude gain is largest consume budget
 // first. This is THE cost-quality curve WF@Q reads (Q1).
-func Frontier(t *Table, tasks []string) []FrontierPoint {
+func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks int) {
 	type gain struct{ free, withClaude float64 }
 	gains := make([]gain, 0, len(tasks))
+	skipped := 0
 	for _, task := range tasks {
 		g := gain{}
+		measured := false
 		for key := range t.cells[task] {
 			cfg := t.cfgs[key]
 			r, ok := t.Rate(task, cfg)
 			if !ok {
 				continue
 			}
+			measured = true
 			if cfg.IsLane("claude") {
 				if r > g.withClaude {
 					g.withClaude = r
@@ -291,6 +294,15 @@ func Frontier(t *Table, tasks []string) []FrontierPoint {
 		if g.withClaude < g.free {
 			g.withClaude = g.free // claude never forced when worse
 		}
+		// A task with NO measured cell contributes nothing but a zero, which
+		// the curve cannot distinguish from a task measured and failed — two
+		// tables, one all-holes and one all-failures, produced byte-identical
+		// frontiers, and the artifact note claims holes are never imputed.
+		// Unmeasured tasks are EXCLUDED and counted instead.
+		if !measured {
+			skipped++
+			continue
+		}
 		gains = append(gains, g)
 	}
 	deltas := make([]float64, len(gains))
@@ -300,8 +312,11 @@ func Frontier(t *Table, tasks []string) []FrontierPoint {
 		deltas[i] = g.withClaude - g.free
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(deltas)))
-	n := len(tasks)
-	pts := make([]FrontierPoint, 0, n+1)
+	// The curve spans the MEASURED tasks. Sweeping over len(tasks) while the
+	// gains slice holds only the measured ones would index past the end and,
+	// worse, divide by a denominator that includes tasks the table never saw.
+	n := len(gains)
+	pts = make([]FrontierPoint, 0, n+1)
 	cum := base
 	for b := 0; b <= n; b++ {
 		if b > 0 {
@@ -314,7 +329,7 @@ func Frontier(t *Table, tasks []string) []FrontierPoint {
 		}
 		pts = append(pts, fp)
 	}
-	return pts
+	return pts, skipped
 }
 
 // RCI is the routing-collapse index: the share of tasks routed to the modal

@@ -91,7 +91,7 @@ func TestOracleBestAndRegret(t *testing.T) {
 func TestFrontier(t *testing.T) {
 	tb := microTable()
 	tasks := []string{"t1", "t2", "t3", "t4"}
-	pts := Frontier(tb, tasks)
+	pts, _ := Frontier(tb, tasks)
 	if len(pts) != len(tasks)+1 {
 		t.Fatalf("frontier points: %d", len(pts))
 	}
