@@ -312,11 +312,11 @@ func main() {
 		os.Exit(2)
 	}
 	lanes := map[string]bool{}
-	obsByConfig := map[string]int{}            // full (lane,model,effort) key → row count
+	obsByConfig := map[string]int{}                // full (lane,model,effort) key → row count
 	obsByConfigTask := map[string]map[string]int{} // config key → task → row count (eval-set restriction below)
-	obsByModel := map[string]bool{}            // "lane|model" → any evidence
-	malformed := 0                             // unparseable/identity-less oracle lines
-	nonEvidence := 0                           // parsed rows that are HOLES (see ran)
+	obsByModel := map[string]bool{}                // "lane|model" → any evidence
+	malformed := 0                                 // unparseable/identity-less oracle lines
+	nonEvidence := 0                               // parsed rows that are HOLES (see ran)
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -483,6 +483,34 @@ func main() {
 			}
 			return n
 		}
+		// The zoo resolves changed lanes with a TUNING-preferring map, frozen
+		// across both splits. The eval-set-first resolve above is right for
+		// the reference row but wrong here twice over: under -split its
+		// tier-1 counts HELDOUT rows only, so (a) a cell with hundreds of
+		// tuning rows loses to one with a single heldout row and every
+		// diverging candidate's tuning objective collapses to Unknown/0 —
+		// SelectBest degenerates to the no-op — and (b) heldout coverage
+		// would steer the tuning-split pick, leaking the winner's-curse
+		// test's own answer key. Freezing ONE resolver (tuning-preferring,
+		// then whole-oracle, then rank-1) for both selection and the heldout
+		// verdict keeps a single ruler chosen with tuning information only
+		// (review 2026-08-12, round 4).
+		tuningSet := map[string]bool{}
+		for _, id := range tuningIDs {
+			tuningSet[id] = true
+		}
+		obsTuning := map[string]int{}
+		for key, byTask := range obsByConfigTask {
+			for task, n := range byTask {
+				if tuningSet[task] {
+					obsTuning[key] += n
+				}
+			}
+		}
+		resolveTuning := func(lane string) policyeval.Config {
+			c, _ := resolveLaneConfig(byLaneRanked, lane, obsTuning, obsByConfig)
+			return c
+		}
 		fams := policyzoo.AllFamilies()
 		famNames := make([]string, 0, len(fams))
 		for n := range fams {
@@ -494,8 +522,8 @@ func main() {
 			// lane unchanged scores at the router's OWN emitted config — the
 			// same cell router-live scores at — so a no-op wrapper can never
 			// beat what it wraps (review 2026-08-12, round 3).
-			best, tuneEv := policyzoo.SelectBest(fams[name], tb, tuningTasks, routerPick, resolve)
-			policies["zoo:"+name+"["+best.Desc+"]"] = policyzoo.PolicyOf(best, byID, routerPick, resolve)
+			best, tuneEv := policyzoo.SelectBest(fams[name], tb, tuningTasks, routerPick, resolveTuning)
+			policies["zoo:"+name+"["+best.Desc+"]"] = policyzoo.PolicyOf(best, byID, routerPick, resolveTuning)
 			zooEntries = append(zooEntries, ZooEntry{Family: name, Chosen: best.Desc,
 				GridSize: len(fams[name]), TuningPassRate: tuneEv.PassRate, TuningClaudeFr: tuneEv.ClaudeFraction,
 				TuningDiverged: diverged(best, tuningTasks), HeldoutDiverged: diverged(best, heldoutTasks)})
@@ -698,11 +726,11 @@ func main() {
 	}
 	frontier, frontierUnmeasured, frontierFreeUnmeasured := policyeval.Frontier(tb, evalIDs)
 	out := struct {
-		Margin    float64          `json:"margin"`
-		Ref       string           `json:"reference"`
-		RefCfg    string           `json:"reference_config"`
-		RankTable string           `json:"rank_table"`
-		Malformed int              `json:"malformed_oracle_lines"`
+		Margin    float64 `json:"margin"`
+		Ref       string  `json:"reference"`
+		RefCfg    string  `json:"reference_config"`
+		RankTable string  `json:"rank_table"`
+		Malformed int     `json:"malformed_oracle_lines"`
 		// Parsed rows the evidence rule dropped (holes: not dispatched,
 		// deferred, error, exit-N, verify_error). Counted so an all-error
 		// replay cannot produce an artifact byte-identical to an empty

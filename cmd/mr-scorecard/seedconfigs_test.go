@@ -100,10 +100,10 @@ func TestResolveLaneConfigPrefersEvidence(t *testing.T) {
 // config whose only rows sit on the tuning split resolved the reference to a
 // cell unmeasured on every task actually scored (review 2026-08-12, round 3).
 func TestResolveLaneConfigPrefersEvalSetEvidence(t *testing.T) {
-	a := policyeval.Config{Lane: "claude", Model: "claude-opus-4-8", Effort: "high"}  // rank 1: tuning-only evidence
+	a := policyeval.Config{Lane: "claude", Model: "claude-opus-4-8", Effort: "high"} // rank 1: tuning-only evidence
 	b := policyeval.Config{Lane: "claude", Model: "claude-sonnet-5", Effort: "high"} // rank 2: heldout evidence
 	byLane := map[string][]policyeval.Config{"claude": {a, b}}
-	obsEval := map[string]int{b.Key(): 200}          // what the heldout tasks saw
+	obsEval := map[string]int{b.Key(): 200}            // what the heldout tasks saw
 	obsAll := map[string]int{a.Key(): 1, b.Key(): 200} // the whole oracle
 
 	got, measured := resolveLaneConfig(byLane, "claude", obsEval, obsAll)

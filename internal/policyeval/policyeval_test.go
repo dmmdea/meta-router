@@ -110,6 +110,41 @@ func TestRegretGatesOnMeasured(t *testing.T) {
 		// claude beats local on t2,t4 (+1 each) over 4 shared tasks = +0.5
 		t.Fatalf("paired regret wrong: (%v, %d)", r, n)
 	}
+
+	// The gate must bind on BOTH sides: b unmeasured on a task a measured.
+	// Without the b-side check, b's imputed 0 on t5 would enter the delta as
+	// a fake failure — deleting `if !b.Measured[task]` passed the suite
+	// before this case existed (round 4, mutation-verified).
+	tb5 := microTable()
+	tb5.Add("t5", lc("local"), true) // local measured on t5; claude is NOT
+	tasks5 := []string{"t1", "t2", "t3", "t4", "t5"}
+	a5 := Evaluate(tb5, tasks5, Fixed(lc("local")))
+	b5 := Evaluate(tb5, tasks5, Fixed(lc("claude")))
+	if r, n := Regret(a5, b5); n != 4 || !almost(r, 0.5) {
+		t.Fatalf("t5 (a measured, b not) must be excluded: (%v, %d), want (0.5, 4)", r, n)
+	}
+}
+
+// Identical inputs produce bit-identical output: the deltas are summed in
+// sorted task order, because float addition is not associative and map-order
+// accumulation drifts in the last ULP across runs (round 4).
+func TestRegretIsDeterministic(t *testing.T) {
+	tb := NewTable()
+	tasks := []string{"a", "b", "c", "d", "e", "f", "g"}
+	for i, task := range tasks {
+		for j := 0; j < 7; j++ {
+			tb.Add(task, lc("local"), j <= i)
+			tb.Add(task, lc("claude"), j >= i)
+		}
+	}
+	a := Evaluate(tb, tasks, Fixed(lc("local")))
+	b := Evaluate(tb, tasks, Fixed(lc("claude")))
+	first, _ := Regret(a, b)
+	for i := 0; i < 500; i++ {
+		if r, _ := Regret(a, b); r != first {
+			t.Fatalf("run %d: %x != %x — map order reached the output", i, r, first)
+		}
+	}
 }
 
 // Frontier: claude budget 0 → passes t1(local)+t2,t3(codex)=3; budget ≥1 → 4.
@@ -156,10 +191,12 @@ func TestFrontierSharesThePolicyDenominator(t *testing.T) {
 	}
 }
 
-// A task measured ONLY on the claude side has an unknown free-lane value: a
-// zero base is an imputed free-lane failure. A claude-only table and a table
-// where every free lane measurably failed must NOT produce identical curves.
-func TestFrontierExcludesFreeUnmeasuredTasks(t *testing.T) {
+// A task measured ONLY on the claude side has an unknown free-lane value. It
+// STAYS in the sweep (excluding it discarded its measured claude evidence and
+// let oracle-best exceed the curve's maximum — the envelope violation of
+// review round 4); the claude-only-vs-measured-free-failure distinction lives
+// in the COUNTER, which is how the artifact tells the two tables apart.
+func TestFrontierCountsFreeUnmeasuredTasks(t *testing.T) {
 	claudeOnly := NewTable()
 	claudeOnly.Add("t1", lc("claude"), false)
 	claudeOnly.Add("t2", lc("claude"), false)
@@ -172,12 +209,63 @@ func TestFrontierExcludesFreeUnmeasuredTasks(t *testing.T) {
 
 	tasks := []string{"t1", "t2"}
 	ptsA, _, freeUnA := Frontier(claudeOnly, tasks)
-	ptsB, _, freeUnB := Frontier(freeFailed, tasks)
+	_, _, freeUnB := Frontier(freeFailed, tasks)
 	if freeUnA != 2 || freeUnB != 0 {
 		t.Fatalf("free-unmeasured counts: %d (want 2), %d (want 0)", freeUnA, freeUnB)
 	}
-	if len(ptsA) == len(ptsB) {
-		t.Fatal("a claude-only table and a measured-free-failure table must not produce same-shaped curves")
+	if len(ptsA) != 3 {
+		t.Fatalf("claude-only tasks must stay in the sweep: %d points, want 3", len(ptsA))
+	}
+}
+
+// The ENVELOPE property: no policy scored on the same tasks may exceed the
+// frontier's maximum point. Excluding a claude-only task from the sweep broke
+// this — oracle-best routed the task to its measured claude PASS while the
+// curve had discarded that evidence and divided by the full set anyway.
+func TestFrontierIsAnEnvelope(t *testing.T) {
+	tb := NewTable()
+	tb.Add("t1", lc("claude"), true) // claude-only, PASSES
+	tb.Add("t2", lc("local"), true)  // free-only, passes
+	tasks := []string{"t1", "t2"}
+
+	pts, _, freeUn := Frontier(tb, tasks)
+	if freeUn != 1 {
+		t.Fatalf("freeUnmeasured = %d, want 1", freeUn)
+	}
+	best := Evaluate(tb, tasks, OracleBest(tb))
+	maxRate := 0.0
+	for _, p := range pts {
+		if p.PassRate > maxRate {
+			maxRate = p.PassRate
+		}
+	}
+	if best.PassRate > maxRate+1e-12 {
+		t.Fatalf("oracle-best (%.3f) exceeds the frontier maximum (%.3f): the envelope is broken", best.PassRate, maxRate)
+	}
+	if !almost(maxRate, 1.0) {
+		t.Fatalf("full-budget point must reach the measured ceiling, got %v", maxRate)
+	}
+	// And the budget-0 point imputes the claude-only task's unknown free base
+	// as 0 — visible via the counter, so it reads "at least 0.5", never a
+	// measurement of t1's free side.
+	if !almost(pts[0].PassRate, 0.5) {
+		t.Fatalf("budget-0 point: %v, want 0.5", pts[0].PassRate)
+	}
+}
+
+// ClaudeFraction divides by the caller's full task set, exactly like PassRate
+// — reverting it to the sweepable count passed the whole suite (round 4).
+func TestFrontierClaudeFractionSharesTheDenominator(t *testing.T) {
+	tb := NewTable()
+	tb.Add("t1", lc("claude"), true)
+	tb.Add("t1", lc("local"), false)
+	tasks := []string{"t1", "t2", "t3"} // one sweepable of three
+	pts, _, _ := Frontier(tb, tasks)
+	if len(pts) != 2 {
+		t.Fatalf("points: %d, want 2 (budget 0..1)", len(pts))
+	}
+	if !almost(pts[1].ClaudeFraction, 1.0/3.0) {
+		t.Fatalf("claude_fraction at budget 1 = %v, want 1/3 (full-set denominator)", pts[1].ClaudeFraction)
 	}
 }
 

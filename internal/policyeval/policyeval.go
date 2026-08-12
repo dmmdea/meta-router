@@ -267,14 +267,22 @@ func Evaluate(t *Table, tasks []string, p Policy) Eval {
 // byte-identical regret, the package's one other paired-difference API
 // contradicting the rule written 40 lines above it (review 2026-08-12).
 func Regret(a, b Eval) (regret float64, n int) {
-	sum := 0.0
+	// Summed in SORTED task order: float addition is not associative, so a
+	// map-order accumulation returns ULP-different results run to run — this
+	// package's own rule is that map order never reaches an output
+	// (review 2026-08-12, round 4).
+	shared := make([]string, 0, len(a.Measured))
 	for task := range a.Measured {
-		if !b.Measured[task] {
-			continue
+		if b.Measured[task] {
+			shared = append(shared, task)
 		}
-		sum += b.PerTask[task] - a.PerTask[task]
-		n++
 	}
+	sort.Strings(shared)
+	sum := 0.0
+	for _, task := range shared {
+		sum += b.PerTask[task] - a.PerTask[task]
+	}
+	n = len(shared)
 	if n == 0 {
 		return 0, 0
 	}
@@ -293,16 +301,22 @@ type FrontierPoint struct {
 // come from the best non-Claude lane; tasks whose Claude gain is largest
 // consume budget first. This is THE cost-quality curve WF@Q reads (Q1).
 //
-// Two task classes are EXCLUDED from the sweep and counted instead — placing
-// either on the curve would impute a hole as a zero, the exact
-// absence-as-failure conflation the artifact's own note forbids:
-//   - unmeasuredTasks: no measured cell at all (an all-holes table and an
-//     all-failures table previously produced byte-identical curves);
-//   - freeUnmeasuredTasks: measured ONLY on the claude side, so the task's
-//     free-lane value — the curve's base at budget 0 — is unknown. A zero
-//     base is an imputed free-lane failure, the same defect one level down:
-//     a claude-only table and a table where every free lane measurably
-//     failed produced identical curves (review 2026-08-12, round 3).
+// Tasks with NO measured cell at all are EXCLUDED from the sweep and counted
+// (unmeasuredTasks): an all-holes table and an all-failures table previously
+// produced byte-identical curves, and a task the table never saw depresses
+// every policy row's rate identically, so excluding it keeps the envelope.
+//
+// Tasks measured ONLY on the claude side STAY in the sweep and are counted
+// (freeUnmeasuredTasks). They cannot be excluded: dropping them discards
+// their MEASURED claude evidence from the curve's numerator while the shared
+// denominator keeps their slot, so a policy row (oracle-best routing the task
+// to its measured claude pass) exceeded the curve's own maximum — the
+// envelope the frontier exists to draw (review 2026-08-12, round 4). Their
+// free-lane base is UNKNOWN and enters the sweep as 0 — an imputation,
+// COUNTED and named in the artifact: when this count is nonzero, low-budget
+// points are "at least this", not measurements. (The claude-only-vs-
+// measured-free-failure distinction lives in this counter, not in the curve
+// shape.)
 //
 // A sweepable task whose CLAUDE side is unmeasured contributes a zero claude
 // DELTA — "no known gain", which never fabricates a failure: it holds the
@@ -348,8 +362,7 @@ func Frontier(t *Table, tasks []string) (pts []FrontierPoint, unmeasuredTasks, f
 			continue
 		}
 		if !freeMeasured {
-			freeUnmeasuredTasks++
-			continue
+			freeUnmeasuredTasks++ // counted, NOT excluded — see above
 		}
 		gains = append(gains, g)
 	}

@@ -116,3 +116,30 @@ func TestPolicyOfScoresUnchangedLaneAtTheRouterConfig(t *testing.T) {
 		t.Fatalf("a CHANGED lane has no router-emitted config and must go through resolve, got %s", got.Key())
 	}
 }
+
+// SelectBest must thread the base policy into its tuning evaluation — an
+// unchanged lane scores at the router's own cell DURING SELECTION too, or the
+// grid is tuned against a different ruler than the heldout verdict uses.
+// Dropping the base argument inside SelectBest survived the whole suite
+// (round 4, mutation-verified), so this pins it: the router's cell for t1 is
+// MEASURED (pass) while resolve's cell for the same lane is UNMEASURED, and
+// only a base-respecting evaluation can score the stay-candidate 1.0.
+func TestSelectBestScoresUnchangedLanesAtTheBaseConfig(t *testing.T) {
+	routerCfg := policyeval.Config{Lane: "glm", Model: "glm-ROUTER", Effort: "high"}
+	tb := policyeval.NewTable()
+	tb.Add("t1", routerCfg, true) // evidence exists ONLY at the router's own cell
+
+	base := func(string) policyeval.Config { return routerCfg }
+	tasks := []Task{mkTask("t1", "glm", "short")}
+	cands := []Candidate{{Family: "f", Desc: "stay", Route: func(t Task) string { return t.BaseLane }}}
+
+	_, ev := SelectBest(cands, tb, tasks, base, zlc)
+	if !almostZoo(ev.PassRate, 1.0) || ev.Unknown != 0 {
+		t.Fatalf("the stay-candidate must score at the router's measured cell: PassRate=%v Unknown=%d", ev.PassRate, ev.Unknown)
+	}
+}
+
+func almostZoo(a, b float64) bool {
+	d := a - b
+	return d < 1e-9 && d > -1e-9
+}
