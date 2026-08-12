@@ -579,14 +579,14 @@ func TestLoadDoneNamesAModellessRow(t *testing.T) {
 		t.Fatalf("a model-less row must index under the raw empty model: %v", rs.modelsByIdent)
 	}
 	d := detectDrift([]plannedCell{driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)}, rs)
-	if len(d.modelDrift) != 1 {
-		t.Fatalf("the model-less row must still trip the tier: %+v", d)
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("the model-less row must trip the tier, in the UNLABELED bucket: %+v", d)
 	}
 	if len(d.recordedModels) != 1 || d.recordedModels[0] != modelUnrecorded {
 		t.Fatalf("the refusal must NAME the condition, got %v", d.recordedModels)
 	}
-	if !d.blankRecordedModel {
-		t.Fatal("the blank-model case must be flagged so the refusal can drop its 'never measured at' claim")
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("the blank-model cell belongs in its own bucket so the refusal can drop its 'never measured at' claim: %+v", d)
 	}
 }
 
@@ -823,7 +823,7 @@ func TestDriftMessagesAreTierAccurate(t *testing.T) {
 	if strings.Contains(msg, "never measured at") {
 		t.Fatalf("an unlabeled row may BE a measurement at the pin; the message must not claim otherwise: %s", msg)
 	}
-	if !strings.Contains(msg, "could re-buy") || !strings.Contains(msg, modelUnrecorded) {
+	if !strings.Contains(msg, "could re-buy") || !strings.Contains(msg, "recorded WITHOUT a model") {
 		t.Fatalf("the blank-model branch must name the condition and the re-buy risk: %s", msg)
 	}
 }
@@ -847,11 +847,67 @@ func TestSentinelIsNotPinnable(t *testing.T) {
 	}
 	// Pinning the sentinel string must still trip the guard.
 	d := detectDrift([]plannedCell{driftCell("T-01", "local", modelUnrecorded, policyeval.EffortUnrecorded, 1)}, rs)
-	if len(d.modelDrift) != 1 {
+	if len(d.blankModelDrift) != 1 {
 		t.Fatalf("pinning the sentinel must NOT match a blank recorded model: %+v", d)
 	}
 	// ...and the message still names the condition via the display form.
 	if len(d.recordedModels) != 1 || d.recordedModels[0] != modelUnrecorded {
 		t.Fatalf("the refusal must display the blank as the sentinel: %v", d.recordedModels)
+	}
+}
+
+// A run can contain BOTH shapes: an unlabeled row on one cell and a real
+// model re-key on another. Each must get its own diagnosis. When the
+// blank-model case was a report-level FLAG, a single unlabeled row rewrote
+// the message for every model-drift cell, telling an operator whose pin was
+// simply typo'd that their dispatch might "re-buy" work — and dropping the
+// "never measured at / pin typo" diagnosis that cell actually needed
+// (review round 6).
+func TestDriftRefusalSeparatesBlankAndRealModelDrift(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "local", 1):  {"": true},                // unlabeled
+			identKey("T-02", "claude", 1): {"claude-sonnet-5": true}, // real re-key
+		},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1),
+		driftCell("T-02", "claude", "claude-sonnet-55", policyeval.EffortUnrecorded, 1),
+	}
+	d := detectDrift(run, rs)
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 1 {
+		t.Fatalf("each cell earns its own bucket from its OWN recorded set: %+v", d)
+	}
+	msg := driftRefusal(d)
+	if !strings.Contains(msg, "never measured at") {
+		t.Fatalf("the real re-key still needs the pin-typo diagnosis: %s", msg)
+	}
+	if !strings.Contains(msg, "could re-buy") {
+		t.Fatalf("the unlabeled cell still needs the re-buy warning: %s", msg)
+	}
+	if !strings.Contains(msg, "claude-sonnet-5") {
+		t.Fatalf("the recorded model must still be named: %s", msg)
+	}
+}
+
+// A cell recorded at BOTH a blank and a real model still carries the re-buy
+// risk — the unlabeled row may be a measurement at this very pin — so it
+// belongs in the unlabeled bucket. Classifying it by "blank-only" sent it to
+// the bucket whose message omits that warning, i.e. it failed toward
+// UNDER-warning about spend (review round 6).
+func TestDriftMixedRecordedSetWarnsAboutRebuy(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "claude", 1): {"": true, "claude-sonnet-5": true},
+		},
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "claude-opus-4-8", policyeval.EffortUnrecorded, 1)}, rs)
+	if len(d.blankModelDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("a cell with ANY blank recorded model must earn the re-buy warning: %+v", d)
+	}
+	if msg := driftRefusal(d); !strings.Contains(msg, "could re-buy") {
+		t.Fatalf("the mixed cell must still warn about re-buying: %s", msg)
 	}
 }

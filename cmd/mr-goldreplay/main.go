@@ -190,19 +190,29 @@ func loadDone(path string) resumeState {
 // RE-dispatch already-recorded work, split by which pin drifted, plus the
 // recorded values for the error messages.
 type driftReport struct {
-	effortDrift     []plannedCell // same (task,lane,model,trial), different effort
-	modelDrift      []plannedCell // same (task,lane,trial), different model (and no effort-drift hit)
+	effortDrift []plannedCell // same (task,lane,model,trial), different effort
+	// modelDrift: recorded only at other REAL models — dispatching ADDS a
+	// first measurement and re-spends nothing.
+	modelDrift []plannedCell
+	// blankModelDrift: recorded WITHOUT any model. Split from modelDrift
+	// because the guard's usual sentence is WRONG for these: an unlabeled row
+	// says nothing about which model produced it, so it may well BE a
+	// measurement at the pin (the same legacy-capture argument the effort
+	// branch makes), which makes this the one branch where following the
+	// advice can RE-BUY recorded work. Kept PER-CELL, not as a report-level
+	// flag: a single unlabeled row must not rewrite the message for the real
+	// typo cells in the same run, which do need "never measured at"
+	// (review 2026-08-12, round 6).
+	blankModelDrift []plannedCell
 	recordedEfforts []string
 	recordedModels  []string // display form; a blank recorded model shows as modelUnrecorded
-	// blankRecordedModel marks the one model-tier case where the guard's
-	// usual sentence is WRONG: a row carrying no `model` key says nothing
-	// about which model produced it, so it may well BE a measurement at the
-	// pin — the same legacy-capture argument the effort branch makes. That
-	// is the only branch where following the advice can re-buy recorded work.
-	blankRecordedModel bool
 }
 
-func (d driftReport) any() bool { return len(d.effortDrift)+len(d.modelDrift) > 0 }
+// allModelDrift is every model-tier cell, both flavors — the count the
+// operator-facing totals report.
+func (d driftReport) allModelDrift() int { return len(d.modelDrift) + len(d.blankModelDrift) }
+
+func (d driftReport) any() bool { return len(d.effortDrift)+d.allModelDrift() > 0 }
 
 // detectDrift returns the planned cells whose identity is already recorded
 // under a DIFFERENT pin. This replaces the v0.31.0 aggregate `plan.Skipped ==
@@ -241,16 +251,26 @@ func detectDrift(run []plannedCell, rs resumeState) driftReport {
 			continue
 		}
 		if models := rs.modelsByIdent[identKey(c.Task, c.Config.Lane, c.Trial)]; len(models) > 0 && !models[c.Config.Model] {
-			d.modelDrift = append(d.modelDrift, c)
+			// PER-CELL split: this cell's own recorded set decides which
+			// sentence it earns. ANY blank in the set puts the cell in the
+			// unlabeled bucket, because the re-buy risk is what the operator
+			// must act on: an unlabeled row may be a measurement at this very
+			// pin, whether or not the cell ALSO has labeled rows. Requiring
+			// the set to be blank-only sent a mixed cell to the bucket whose
+			// message omits that warning — failing toward under-warning about
+			// spend, which is the wrong direction on this tool
+			// (review 2026-08-12, round 6).
+			if models[""] {
+				d.blankModelDrift = append(d.blankModelDrift, c)
+			} else {
+				d.modelDrift = append(d.modelDrift, c)
+			}
 			for m := range models {
 				if !seenModel[m] {
 					seenModel[m] = true
 					// Display form only at the formatting boundary; the index
 					// itself keeps the raw value (see modelUnrecorded).
 					d.recordedModels = append(d.recordedModels, displayModel(m))
-					if m == "" {
-						d.blankRecordedModel = true
-					}
 				}
 			}
 		}
@@ -471,6 +491,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "MODEL DRIFT: %d planned cell(s) whose (task,lane,trial) is already recorded under a different model (recorded: %s; e.g. %s planned at model %q)\n",
 			len(drift.modelDrift), strings.Join(drift.recordedModels, ","), identKey(c.Task, c.Config.Lane, c.Trial), c.Config.Model)
 	}
+	if len(drift.blankModelDrift) > 0 {
+		c := drift.blankModelDrift[0]
+		fmt.Fprintf(os.Stderr, "MODEL DRIFT (unlabeled): %d planned cell(s) whose (task,lane,trial) is recorded WITHOUT a model — dispatching may RE-BUY recorded work (e.g. %s planned at model %q)\n",
+			len(drift.blankModelDrift), identKey(c.Task, c.Config.Lane, c.Trial), c.Config.Model)
+	}
 	if *planOnly {
 		fmt.Printf("plan-only: %d cells (%d would run, %d already recorded, %d recorded in file) → %s\n",
 			plan.Total, len(plan.Run), plan.Skipped, len(rs.done), *outPath)
@@ -484,9 +509,17 @@ func main() {
 			fmt.Printf("plan-only: EFFORT DRIFT — %d cell(s) would RE-dispatch cells already recorded at a different effort (%s), re-spending what the oracle already paid for; a live run would REFUSE (pass -re-measure to override)\n",
 				len(drift.effortDrift), strings.Join(drift.recordedEfforts, ","))
 		}
-		if len(drift.modelDrift) > 0 {
+		if n := len(drift.modelDrift); n > 0 {
 			fmt.Printf("plan-only: MODEL DRIFT — %d cell(s) would record a (task,lane,trial) at a model it has never been measured at (recorded: %s); a live run would REFUSE (pass -re-measure to override)\n",
-				len(drift.modelDrift), strings.Join(drift.recordedModels, ","))
+				n, strings.Join(drift.recordedModels, ","))
+		}
+		// The blank-model shape gets its own line here too. The round-6 fix
+		// landed on the refusal but not on this preflight, so -plan-only —
+		// the tool the refusal tells you to run FIRST — still asserted the
+		// cell was never measured at the pin, which for an unlabeled row is
+		// exactly what nobody knows (review round 6).
+		if n := len(drift.blankModelDrift); n > 0 {
+			fmt.Printf("plan-only: MODEL DRIFT (unlabeled rows) — %d cell(s) are recorded WITHOUT a model, so dispatching may RE-BUY work already paid for; a live run would REFUSE (pass -re-measure to override)\n", n)
 		}
 		return
 	}
@@ -504,8 +537,8 @@ func main() {
 		if !*reMeasure {
 			fatal("%s", driftRefusal(drift))
 		}
-		fmt.Fprintf(os.Stderr, "WARNING: -re-measure: dispatching %d cell(s) whose identity is already recorded under a different pin (%d effort, %d model)\n",
-			len(drift.effortDrift)+len(drift.modelDrift), len(drift.effortDrift), len(drift.modelDrift))
+		fmt.Fprintf(os.Stderr, "WARNING: -re-measure: dispatching %d cell(s) whose identity is already recorded under a different pin (%d effort, %d model, %d unlabeled-model)\n",
+			len(drift.effortDrift)+drift.allModelDrift(), len(drift.effortDrift), len(drift.modelDrift), len(drift.blankModelDrift))
 	}
 
 	// Opened AFTER the plan-only exit and the drift guard: O_CREATE before
@@ -536,40 +569,33 @@ func main() {
 // attached the advice IS the product.
 func driftRefusal(drift driftReport) string {
 	var parts []string
-	{
-		{
-			if n := len(drift.effortDrift); n > 0 {
-				parts = append(parts, fmt.Sprintf("%d cell(s) are already recorded at a different EFFORT (%s), so dispatching them "+
-					"RE-SPENDS what the oracle already paid for — the usual cause is an effort pin that disagrees with the "+
-					"recorded rows (rows written before effort capture resume as %q); pin the effort the rows actually carry",
-					n, strings.Join(drift.recordedEfforts, ","), policyeval.EffortUnrecorded))
-			}
-			if n := len(drift.modelDrift); n > 0 {
-				var m string
-				if drift.blankRecordedModel {
-					// The one case where "never measured at this model" would
-					// be a LIE: an unlabeled row does not say which model
-					// produced it, so it may already be a measurement at this
-					// very pin — and then -re-measure re-buys recorded work.
-					// Say that, rather than the tier's usual sentence.
-					m = fmt.Sprintf("%d cell(s) whose (task,lane,trial) is recorded WITHOUT a model (%s). An unlabeled row "+
-						"does not say which model produced it, so it may already be a measurement at this pin — dispatching "+
-						"could re-buy work the oracle already paid for. No pin can match a blank recorded model (an empty "+
-						"pin is rejected), so the options are: stamp the rows with the model that produced them, or pass "+
-						"-re-measure accepting the possible re-spend",
-						n, strings.Join(drift.recordedModels, ","))
-				} else {
-					// NOT a re-spend: this cell has never been recorded at
-					// this model, so a dispatch APPENDS a first measurement.
-					// The hazard is that the two causes are indistinguishable.
-					m = fmt.Sprintf("%d cell(s) whose (task,lane,trial) is recorded only at other MODELS (%s), so dispatching "+
-						"them ADDS a first measurement at a model this cell was never measured at — either a pin typo "+
-						"(fix the -<lane>-model flag, which would also mislabel the rows) or a deliberate new-model measurement",
-						n, strings.Join(drift.recordedModels, ","))
-				}
-				parts = append(parts, m)
-			}
-		}
+	if n := len(drift.effortDrift); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d cell(s) are already recorded at a different EFFORT (%s), so dispatching them "+
+			"RE-SPENDS what the oracle already paid for — the usual cause is an effort pin that disagrees with the "+
+			"recorded rows (rows written before effort capture resume as %q); pin the effort the rows actually carry",
+			n, strings.Join(drift.recordedEfforts, ","), policyeval.EffortUnrecorded))
+	}
+	if n := len(drift.modelDrift); n > 0 {
+		// NOT a re-spend: these cells have never been recorded at this model,
+		// so a dispatch APPENDS a first measurement. The hazard is that the
+		// two causes are mechanically indistinguishable.
+		parts = append(parts, fmt.Sprintf("%d cell(s) whose (task,lane,trial) is recorded only at other MODELS (%s), so dispatching "+
+			"them ADDS a first measurement at a model this cell was never measured at — either a pin typo "+
+			"(fix the -<lane>-model flag, which would also mislabel the rows) or a deliberate new-model measurement",
+			n, strings.Join(drift.recordedModels, ",")))
+	}
+	if n := len(drift.blankModelDrift); n > 0 {
+		// The one case where "never measured at this model" would be a LIE:
+		// an unlabeled row does not say which model produced it, so it may
+		// already be a measurement at this very pin — and then -re-measure
+		// re-buys recorded work. Emitted ALONGSIDE the sentence above rather
+		// than replacing it, so a run containing both shapes gets both
+		// diagnoses (review round 6).
+		parts = append(parts, fmt.Sprintf("%d cell(s) whose (task,lane,trial) is recorded WITHOUT a model. An unlabeled row "+
+			"does not say which model produced it, so it may already be a measurement at this pin — dispatching "+
+			"could re-buy work the oracle already paid for. No pin can match a blank recorded model (an empty "+
+			"pin is rejected), so the options are: stamp the rows with the model that produced them, or pass "+
+			"-re-measure accepting the possible re-spend", n))
 	}
 	return fmt.Sprintf("drift: %s. Check with -plan-only, or pass -re-measure if measuring under the new pin is deliberate. "+
 		"Cells with no recorded (task,lane,trial) counterpart do not trip this guard.",
