@@ -43,17 +43,21 @@ const zooOracle = `{"task":"T-01","class":"research","lane":"codex","model":"cod
 {"task":"T-03","class":"research","lane":"local","model":"gemma4-cascade","effort":"unrecorded","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true}
 `
 
-// Every class classify.go can EMIT is ranked identically (13 of the 15
-// declared classes; hard-case-reclaim is never emitted, and doc-summarize is
-// ranked below). The scorecard probes with no --class, so classify.go picks.
+// 13 of router.go's 15 declared classes are ranked here, identically. The two
+// absent ones: hard-case-reclaim (no classify.go path emits it) and
+// doc-summarize — which IS emittable (classify.go, rule
+// verb-summarize-small-ctx), so this table is NOT closed over the classifier.
 //
-// Ranking them IDENTICALLY is the load-bearing part, and the reason is not
-// the one an earlier version of this comment gave: an unranked class does NOT
-// refuse loudly — route falls back silently and still returns a lane, so a
-// fixture that differentiated the rows would produce a silently wrong
-// BaseLane, changing what diverged() counts with no failure anywhere. Uniform
-// rows make the classifier's pick irrelevant to what these tests measure,
-// which is lane ORDER (review round 5).
+// What actually keeps the fixture safe is the UNRANKED-CLASS FALLBACK, not
+// coverage: an unranked class does not refuse loudly — route falls back to the
+// hard-repo ordering and still returns a lane, exit 0. Since every ranked row
+// here is identical, the classifier's pick cannot change what these tests
+// measure, which is lane ORDER. That is also the hazard to respect if you edit
+// this table: differentiate the rows and a prompt that classifies to
+// doc-summarize would silently take the fallback ordering instead, changing
+// BaseLane and what diverged() counts, with nothing failing (review round 6;
+// an earlier version of this comment claimed a loud exit-3 refusal, and then
+// that doc-summarize was ranked — neither is true).
 const zooRankTable = `{
   "hard-repo":               [{"Lane":"local","Model":"gemma4-cascade","Effort":"unrecorded","Rank":1},{"Lane":"codex","Model":"codex-TUNING","Effort":"high","Rank":2},{"Lane":"codex","Model":"codex-HELDOUT","Effort":"high","Rank":3},{"Lane":"claude","Model":"claude-sonnet-5","Effort":"high","Rank":4}],
   "terminal-bounded":        [{"Lane":"local","Model":"gemma4-cascade","Effort":"unrecorded","Rank":1},{"Lane":"codex","Model":"codex-TUNING","Effort":"high","Rank":2},{"Lane":"codex","Model":"codex-HELDOUT","Effort":"high","Rank":3},{"Lane":"claude","Model":"claude-sonnet-5","Effort":"high","Rank":4}],
@@ -146,9 +150,23 @@ func TestIntegrationZooScoresHeldoutWithTheSameResolver(t *testing.T) {
 			ctx = &a.Zoo[i]
 		}
 	}
-	if ctx == nil || ctx.HeldoutDiverged == 0 {
-		t.Fatalf("fixture is vacuous: the winning candidate must CHANGE the router's lane on the heldout task, "+
-			"or no zoo row ever consults the resolver and this test cannot fail (%+v)", ctx)
+	if ctx == nil {
+		t.Fatal("no ctx-floor zoo entry in the artifact")
+	}
+	// Chosen FIRST, for the reason the sibling test states: a selection-side
+	// revert makes SelectBest fall back to a non-diverging candidate, so the
+	// vacuity guard below would fire first and tell the engineer their
+	// FIXTURE broke rather than that they removed the fix. Asserting the
+	// winner names the real cause. (Round 6 applied this next door and not
+	// here — review round 6.)
+	if ctx.Chosen != "L=1500,floor=codex" {
+		t.Fatalf("expected the diverging candidate to win; got %q (%+v).\n"+
+			"A selection-side revert of the tuning-frozen resolver looks exactly like this.", ctx.Chosen, *ctx)
+	}
+	if ctx.HeldoutDiverged == 0 {
+		t.Fatalf("the winning candidate does not CHANGE the router's lane on the heldout task, so no zoo row "+
+			"consults the resolver and this test cannot fail — either the fixture is broken OR the "+
+			"tuning-frozen resolver was reverted (%+v)", *ctx)
 	}
 
 	sawChanged := false
