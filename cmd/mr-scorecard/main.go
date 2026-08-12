@@ -69,7 +69,16 @@ func seedConfigs() (byLane map[string]policyeval.Config, all []policyeval.Config
 				seen[cfg.Key()] = true
 				all = append(all, cfg)
 			}
-			if r, ok := bestRank[e.Lane]; !ok || e.Rank < r {
+			// The order is TOTAL: lower rank wins, and a rank TIE breaks on the
+			// config key. router.Seed() is a MAP, so without the key tie-break
+			// the winner is decided by Go's randomized map iteration — observed
+			// live: two runs over identical input resolved the claude reference
+			// to |xhigh then |high, which silently changes the reference every
+			// scorecard run and makes every ratio non-reproducible. This is the
+			// same "map iteration must never decide a pick" rule betterPick
+			// already enforces on the routing side.
+			r, ok := bestRank[e.Lane]
+			if !ok || e.Rank < r || (e.Rank == r && cfg.Key() < byLane[e.Lane].Key()) {
 				bestRank[e.Lane], byLane[e.Lane] = e.Rank, cfg
 			}
 		}
