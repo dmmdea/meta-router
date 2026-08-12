@@ -1,10 +1,16 @@
 // Package policyeval is V3 of the slice-4 eval stack: the counterfactual
 // policy evaluator over the V2 oracle replay table. Every policy π (a
-// task→lane assignment) is valued by EXACT table lookup — the replay-oracle
+// task→config assignment) is valued by EXACT table lookup — the replay-oracle
 // Direct Method (no propensities, no variance blow-up) — and compared to the
 // always-Claude reference on the two axes the decision record fixes (Q1):
 // quality ratio and Claude-window fraction. A cell with no recorded data is
 // UNKNOWN: it never passes and is counted, never imputed.
+//
+// The unit of evidence is a CONFIG — (lane, model, effort) — not a lane. A
+// lane-keyed table pools every observation for a lane regardless of which model
+// or effort produced it, which is how 204 claude rows recorded Sonnet's results
+// while the rank table dispatched Opus: the swap was invisible at the type
+// level, so nothing could fail.
 package policyeval
 
 import (
@@ -13,54 +19,81 @@ import (
 	"sort"
 )
 
-// Table holds per-(task,lane) pass rates aggregated over trials.
+// Table holds per-(task,config) pass rates aggregated over trials.
 type Table struct {
-	cells map[string]map[string]*cell // task → lane → cell
+	cells map[string]map[string]*cell // task → config key → cell
+	cfgs  map[string]Config           // config key → the config it came from
 }
 
 type cell struct{ pass, n int }
 
-func NewTable() *Table { return &Table{cells: map[string]map[string]*cell{}} }
+func NewTable() *Table {
+	return &Table{cells: map[string]map[string]*cell{}, cfgs: map[string]Config{}}
+}
 
 // Add records one trial observation.
-func (t *Table) Add(task, lane string, pass bool) {
+func (t *Table) Add(task string, c Config, pass bool) {
+	key := c.Key()
 	m, ok := t.cells[task]
 	if !ok {
 		m = map[string]*cell{}
 		t.cells[task] = m
 	}
-	c, ok := m[lane]
+	cl, ok := m[key]
 	if !ok {
-		c = &cell{}
-		m[lane] = c
+		cl = &cell{}
+		m[key] = cl
 	}
-	c.n++
+	t.cfgs[key] = c
+	cl.n++
 	if pass {
-		c.pass++
+		cl.pass++
 	}
 }
 
 // Rate returns the cell's pass rate and whether any data exists.
-func (t *Table) Rate(task, lane string) (float64, bool) {
-	if c, ok := t.cells[task][lane]; ok && c.n > 0 {
-		return float64(c.pass) / float64(c.n), true
+func (t *Table) Rate(task string, c Config) (float64, bool) {
+	if cl, ok := t.cells[task][c.Key()]; ok && cl.n > 0 {
+		return float64(cl.pass) / float64(cl.n), true
 	}
 	return 0, false
 }
 
-// Policy assigns a lane to a task ("" = abstain/unknown).
-type Policy func(task string) string
+// Configs lists every config the table holds evidence for, sorted by key so
+// callers iterate deterministically (map order must never reach an artifact).
+func (t *Table) Configs() []Config {
+	out := make([]Config, 0, len(t.cfgs))
+	for _, c := range t.cfgs {
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key() < out[j].Key() })
+	return out
+}
 
-// Fixed routes every task to one lane.
-func Fixed(lane string) Policy { return func(string) string { return lane } }
+// Policy assigns a CONFIG to a task (the zero Config = abstain/unknown).
+//
+// It returns a Config rather than a lane or a key string, and that is
+// load-bearing. A lane-returning policy cannot address a cell at all. A
+// key-returning policy compiles everywhere and silently breaks the
+// `lane == "claude"` comparison behind ClaudeFraction, which makes the
+// non-inferiority verdict unconditionally true — see
+// TestClaudeFractionSurvivesConfigPolicies.
+type Policy func(task string) Config
+
+// Fixed routes every task to one config.
+func Fixed(c Config) Policy { return func(string) Config { return c } }
 
 // FromMap routes per the given assignment.
-func FromMap(m map[string]string) Policy { return func(task string) string { return m[task] } }
+func FromMap(m map[string]Config) Policy { return func(task string) Config { return m[task] } }
 
 // laneCost orders lanes by window cost for oracle tie-breaks: free first,
 // Claude last (the guarded resource on the WF@Q axis). Unknown lanes cost MAX
-// (never win a tie by accident), and ties at equal cost break on lane name so
-// the order is TOTAL — map iteration must never decide a pick.
+// (never win a tie by accident), and ties at equal cost break on the config key
+// so the order is TOTAL — map iteration must never decide a pick.
+//
+// This stays keyed by LANE while evidence is keyed by config, deliberately:
+// cost is which subscription window burns, and that is a property of the lane.
+// Two models on one lane draw down the same window.
 var laneCost = map[string]int{"local": 0, "glm": 1, "codex": 2, "claude": 3}
 
 func laneCostOf(lane string) int {
@@ -70,32 +103,34 @@ func laneCostOf(lane string) int {
 	return math.MaxInt32
 }
 
-// betterPick reports whether (rate,lane) beats the incumbent under the total
-// order: higher rate; then cheaper lane; then lexical lane name.
-func betterPick(rate float64, lane string, bestRate float64, bestLane string) bool {
+// betterPick reports whether (rate,cfg) beats the incumbent under the total
+// order: higher rate; then cheaper lane; then lexical config key.
+func betterPick(rate float64, c Config, bestRate float64, best Config) bool {
 	if rate != bestRate {
 		return rate > bestRate
 	}
-	c, bc := laneCostOf(lane), laneCostOf(bestLane)
-	if c != bc {
-		return c < bc
+	cc, bc := laneCostOf(c.Lane), laneCostOf(best.Lane)
+	if cc != bc {
+		return cc < bc
 	}
-	return lane < bestLane
+	return c.Key() < best.Key()
 }
 
-// OracleBest picks, per task, the CHEAPEST lane whose pass rate is maximal.
+// OracleBest picks, per task, the CHEAPEST config whose pass rate is maximal.
 func OracleBest(t *Table) Policy {
-	return func(task string) string {
-		bestLane, bestRate := "", -1.0
-		for lane, c := range t.cells[task] {
+	return func(task string) Config {
+		var best Config
+		bestRate, have := -1.0, false
+		for key, c := range t.cells[task] {
 			if c.n == 0 {
 				continue
 			}
-			if r := float64(c.pass) / float64(c.n); bestLane == "" || betterPick(r, lane, bestRate, bestLane) {
-				bestLane, bestRate = lane, r
+			cfg := t.cfgs[key]
+			if r := float64(c.pass) / float64(c.n); !have || betterPick(r, cfg, bestRate, best) {
+				best, bestRate, have = cfg, r, true
 			}
 		}
-		return bestLane
+		return best
 	}
 }
 
@@ -113,7 +148,7 @@ type ClassCoverage map[string]map[string]int
 // objective Evaluate reports) and picks the best under the total betterPick
 // order. A class with no observed cell in any lane is ABSENT from the map:
 // unknown, never imputed.
-func ClassBest(t *Table, tasks []string, classOf map[string]string) (map[string]string, ClassCoverage) {
+func ClassBest(t *Table, tasks []string, classOf map[string]string) (map[string]Config, ClassCoverage) {
 	type agg struct {
 		sum float64 // sum of per-task rates (the EVAL objective: unweighted task mean)
 		n   int     // tasks observed
@@ -124,7 +159,7 @@ func ClassBest(t *Table, tasks []string, classOf map[string]string) (map[string]
 		if cls == "" {
 			continue
 		}
-		for lane, c := range t.cells[task] {
+		for key, c := range t.cells[task] {
 			if c.n == 0 {
 				continue
 			}
@@ -133,10 +168,10 @@ func ClassBest(t *Table, tasks []string, classOf map[string]string) (map[string]
 				m = map[string]*agg{}
 				acc[cls] = m
 			}
-			a, ok := m[lane]
+			a, ok := m[key]
 			if !ok {
 				a = &agg{}
-				m[lane] = a
+				m[key] = a
 			}
 			// Mean of per-task rates, NOT pooled pass/n: Evaluate scores the
 			// unweighted mean over tasks, and pooling would weight tasks by
@@ -146,26 +181,31 @@ func ClassBest(t *Table, tasks []string, classOf map[string]string) (map[string]
 			a.n++
 		}
 	}
-	out := map[string]string{}
+	out := map[string]Config{}
 	cov := ClassCoverage{}
 	for cls, m := range acc {
-		bestLane, bestRate := "", -1.0
+		var best Config
+		bestRate, have := -1.0, false
 		cov[cls] = map[string]int{}
-		for lane, a := range m {
-			cov[cls][lane] = a.n
-			if r := a.sum / float64(a.n); bestLane == "" || betterPick(r, lane, bestRate, bestLane) {
-				bestLane, bestRate = lane, r
+		for key, a := range m {
+			cfg := t.cfgs[key]
+			// Coverage stays reported per CONFIG key: a class covered only by
+			// one model of a lane is not the same evidence as the lane's, and
+			// collapsing them would hide exactly the blending this plan ends.
+			cov[cls][key] = a.n
+			if r := a.sum / float64(a.n); !have || betterPick(r, cfg, bestRate, best) {
+				best, bestRate, have = cfg, r, true
 			}
 		}
-		out[cls] = bestLane
+		out[cls] = best
 	}
 	return out, cov
 }
 
-// ByClass routes each task through a class→lane assignment ("" when the
-// task's class has no assignment — unknown, never imputed).
-func ByClass(assign map[string]string, classOf map[string]string) Policy {
-	return func(task string) string { return assign[classOf[task]] }
+// ByClass routes each task through a class→config assignment (the zero Config
+// when the task's class has no assignment — unknown, never imputed).
+func ByClass(assign map[string]Config, classOf map[string]string) Policy {
+	return func(task string) Config { return assign[classOf[task]] }
 }
 
 // Eval is a policy's value on the table.
@@ -174,21 +214,24 @@ type Eval struct {
 	PassRate       float64 `json:"pass_rate"`
 	ClaudeFraction float64 `json:"claude_fraction"` // unit-cost model: claude-routed share
 	Unknown        int     `json:"unknown_cells"`
-	Assignment     map[string]string
+	Assignment     map[string]Config
 	PerTask        map[string]float64
 }
 
 // Evaluate values π over tasks by table lookup.
 func Evaluate(t *Table, tasks []string, p Policy) Eval {
-	ev := Eval{Assignment: map[string]string{}, PerTask: map[string]float64{}}
+	ev := Eval{Assignment: map[string]Config{}, PerTask: map[string]float64{}}
 	claude := 0
 	for _, task := range tasks {
-		lane := p(task)
-		ev.Assignment[task] = lane
-		if lane == "claude" {
+		cfg := p(task)
+		ev.Assignment[task] = cfg
+		// IsLane, never a key-prefix or string comparison: a Config compared
+		// against "claude" is always false, which silently zeroes
+		// ClaudeFraction and makes the non-inferiority verdict unconditional.
+		if cfg.IsLane("claude") {
 			claude++
 		}
-		r, ok := t.Rate(task, lane)
+		r, ok := t.Rate(task, cfg)
 		if !ok {
 			ev.Unknown++
 			ev.PerTask[task] = 0
@@ -224,12 +267,13 @@ func Frontier(t *Table, tasks []string) []FrontierPoint {
 	gains := make([]gain, 0, len(tasks))
 	for _, task := range tasks {
 		g := gain{}
-		for lane := range t.cells[task] {
-			r, ok := t.Rate(task, lane)
+		for key := range t.cells[task] {
+			cfg := t.cfgs[key]
+			r, ok := t.Rate(task, cfg)
 			if !ok {
 				continue
 			}
-			if lane == "claude" {
+			if cfg.IsLane("claude") {
 				if r > g.withClaude {
 					g.withClaude = r
 				}
@@ -268,13 +312,17 @@ func Frontier(t *Table, tasks []string) []FrontierPoint {
 
 // RCI is the routing-collapse index: the share of tasks routed to the modal
 // lane (Q7 — deterministic routers degenerate toward the strongest lane).
-func RCI(assignment map[string]string) float64 {
+// RCI stays a LANE concentration: it answers "how much of the routing lands on
+// one subscription window", which is a lane question. Counting configs instead
+// would dilute the number whenever one lane runs two models and silently
+// change what the metric means across the v0.27→v0.28 boundary.
+func RCI(assignment map[string]Config) float64 {
 	if len(assignment) == 0 {
 		return 0
 	}
 	counts := map[string]int{}
-	for _, lane := range assignment {
-		counts[lane]++
+	for _, cfg := range assignment {
+		counts[cfg.Lane]++
 	}
 	max := 0
 	for _, c := range counts {

@@ -87,14 +87,29 @@ func AllFamilies() map[string][]Candidate {
 	}
 }
 
-// PolicyOf adapts a Candidate to policyeval.Policy over known tasks.
-func PolicyOf(c Candidate, byID map[string]Task) policyeval.Policy {
-	return func(id string) string {
+// LaneResolver maps a zoo candidate's chosen LANE to the full evidence cell
+// it stands for. Zoo candidates are lane-level policies (complexity floors,
+// context floors), but evidence is keyed by (lane, model, effort) — so
+// something must say WHICH config represents the lane, and that is a policy
+// decision, not a detail. It is injected rather than hardcoded here: the zoo
+// stays free of a router dependency, and the caller's choice (normally the
+// rank-table's top entry for that lane) is explicit and testable. Returning
+// the zero Config means "no config for this lane" — abstain, never guess.
+type LaneResolver func(lane string) policyeval.Config
+
+// PolicyOf adapts a Candidate to policyeval.Policy over known tasks, using
+// resolve to turn the candidate's lane into an evidence cell.
+func PolicyOf(c Candidate, byID map[string]Task, resolve LaneResolver) policyeval.Policy {
+	return func(id string) policyeval.Config {
 		t, ok := byID[id]
 		if !ok {
-			return "" // unknown task: abstain, never guess
+			return policyeval.Config{} // unknown task: abstain, never guess
 		}
-		return c.Route(t)
+		lane := c.Route(t)
+		if lane == "" || resolve == nil {
+			return policyeval.Config{}
+		}
+		return resolve(lane)
 	}
 }
 
@@ -102,10 +117,12 @@ func PolicyOf(c Candidate, byID map[string]Task) policyeval.Policy {
 // axis after quality (claude costs most; claude-fraction alone can't order
 // glm vs codex). An unknown/abstain lane costs MaxInt32, mirroring
 // policyeval.laneCostOf: it must never win a tie by accident.
-func assignCost(assignment map[string]string) int {
+func assignCost(assignment map[string]policyeval.Config) int {
 	cost := 0
-	for _, lane := range assignment {
-		if tier, ok := laneTier[lane]; ok {
+	for _, cfg := range assignment {
+		// Cost is per LANE (which subscription window burns), so it reads the
+		// config's lane — two models on one lane draw the same window.
+		if tier, ok := laneTier[cfg.Lane]; ok {
 			cost += tier
 		} else {
 			cost += math.MaxInt32
@@ -119,7 +136,10 @@ func assignCost(assignment map[string]string) int {
 // order: higher PassRate, then LOWER summed lane cost, then lexical Desc (the
 // pre-sort) — map iteration can never decide the pick. This is the only place
 // the zoo touches the oracle table before the heldout verdict.
-func SelectBest(cands []Candidate, tb *policyeval.Table, tuning []Task) (Candidate, policyeval.Eval) {
+// resolve turns each candidate's lane into the evidence cell it stands for
+// (see LaneResolver); a nil resolver abstains on every task, which shows up
+// honestly as Unknown cells rather than as a silently perfect score.
+func SelectBest(cands []Candidate, tb *policyeval.Table, tuning []Task, resolve LaneResolver) (Candidate, policyeval.Eval) {
 	byID := map[string]Task{}
 	ids := make([]string, 0, len(tuning))
 	for _, t := range tuning {
@@ -132,7 +152,7 @@ func SelectBest(cands []Candidate, tb *policyeval.Table, tuning []Task) (Candida
 	var bestEv policyeval.Eval
 	have := false
 	for _, c := range sorted {
-		ev := policyeval.Evaluate(tb, ids, PolicyOf(c, byID))
+		ev := policyeval.Evaluate(tb, ids, PolicyOf(c, byID, resolve))
 		if !have || ev.PassRate > bestEv.PassRate ||
 			(ev.PassRate == bestEv.PassRate && assignCost(ev.Assignment) < assignCost(bestEv.Assignment)) {
 			best, bestEv, have = c, ev, true

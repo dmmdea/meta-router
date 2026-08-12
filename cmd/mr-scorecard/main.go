@@ -22,6 +22,7 @@ import (
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
 	"github.com/dmmdea/meta-router/internal/orch/childenv"
+	"github.com/dmmdea/meta-router/internal/orch/router"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 	"github.com/dmmdea/meta-router/internal/policyeval"
 	"github.com/dmmdea/meta-router/internal/policyzoo"
@@ -30,11 +31,63 @@ import (
 const version = "0.1.0"
 
 type oracleRow struct {
-	Task         string `json:"task"`
-	Class        string `json:"class"`
-	Lane         string `json:"lane"`
+	Task  string `json:"task"`
+	Class string `json:"class"`
+	Lane  string `json:"lane"`
+	// Model and Effort complete the evidence cell. Legacy rows carry neither;
+	// NormalizeEffort turns a blank effort into EffortUnrecorded, which is a
+	// REAL config value — such evidence never satisfies an entry naming a
+	// pinned effort (B6: unknown counted, never imputed).
+	Model        string `json:"model"`
+	Effort       string `json:"effort"`
 	OutcomeClass string `json:"outcome_class"`
 	VerifierPass bool   `json:"verifier_pass"`
+}
+
+// config is the row's evidence cell.
+func (r oracleRow) config() policyeval.Config {
+	return policyeval.Config{Lane: r.Lane, Model: r.Model,
+		Effort: policyeval.NormalizeEffort(r.Effort)}
+}
+
+// seedConfigs maps each lane to the config the rank table ranks FIRST for it,
+// and lists every ranked config. It is the one place a lane-level policy
+// (always-<lane>, the zoo's floors, the live router's chosen lane) is resolved
+// to an evidence cell — stated here rather than hidden inside each caller.
+// Seed efforts go through NormalizeEffort too: the table carries entries with
+// no effort, and normalizing only the oracle side would make those configs
+// permanently uncoverable (their keys would never match).
+func seedConfigs() (byLane map[string]policyeval.Config, all []policyeval.Config) {
+	byLane = map[string]policyeval.Config{}
+	bestRank := map[string]int{}
+	seen := map[string]bool{}
+	for _, entries := range router.Seed() {
+		for _, e := range entries {
+			cfg := policyeval.Config{Lane: e.Lane, Model: e.Model,
+				Effort: policyeval.NormalizeEffort(e.Effort)}
+			if !seen[cfg.Key()] {
+				seen[cfg.Key()] = true
+				all = append(all, cfg)
+			}
+			if r, ok := bestRank[e.Lane]; !ok || e.Rank < r {
+				bestRank[e.Lane], byLane[e.Lane] = e.Rank, cfg
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Key() < all[j].Key() })
+	return byLane, all
+}
+
+// ConfigCoverage reports, per ranked config, how much evidence exists — at
+// BOTH levels. Model coverage is what B15 gates today; effort coverage is
+// reported, not gated, because every legacy row is effort-unrecorded and a
+// gate that fails all 18 ranked configs isolates nothing. The gap is loud
+// from day one so the re-baseline that closes it is visible work.
+type ConfigCoverage struct {
+	Config        string `json:"config"`
+	Observations  int    `json:"observations"`   // rows for the FULL (lane,model,effort) cell
+	CoveredModel  bool   `json:"covered_model"`  // any evidence for (lane,model)
+	CoveredEffort bool   `json:"covered_effort"` // evidence for the full cell
 }
 
 // PolicyReport is one row of the scorecard.
@@ -135,6 +188,11 @@ func main() {
 		os.Exit(2)
 	}
 	lanes := map[string]bool{}
+	obsByConfig := map[string]int{} // full (lane,model,effort) key → row count
+	obsByModel := map[string]bool{} // "lane|model" → any evidence
+	seedByLane, rankedCfgs := seedConfigs()
+	// resolve is the lane→cell seam every lane-level policy goes through.
+	resolve := func(lane string) policyeval.Config { return seedByLane[lane] }
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -146,8 +204,11 @@ func main() {
 		if r.OutcomeClass == "deferred" {
 			continue // a deferred cell is a hole, not an observation
 		}
-		tb.Add(r.Task, r.Lane, r.VerifierPass)
+		cfg := r.config()
+		tb.Add(r.Task, cfg, r.VerifierPass)
 		lanes[r.Lane] = true
+		obsByConfig[cfg.Key()]++
+		obsByModel[cfg.Lane+"|"+cfg.Model] = true
 	}
 
 	// B'2 (-split): the EVALUATION set becomes the heldout tasks only, and the
@@ -156,7 +217,7 @@ func main() {
 	// non-generalizable) ceiling. Without -split, behavior is unchanged.
 	evalIDs := taskIDs
 	policies := map[string]policyeval.Policy{"oracle-best": policyeval.OracleBest(tb)}
-	var classAssign map[string]string
+	var classAssign map[string]policyeval.Config
 	var classCov policyeval.ClassCoverage
 	if *split {
 		if len(tuningIDs) == 0 || len(heldoutIDs) == 0 {
@@ -177,7 +238,7 @@ func main() {
 	}
 	sort.Strings(laneList)
 	for _, l := range laneList {
-		policies["always-"+l] = policyeval.Fixed(l)
+		policies["always-"+l] = policyeval.Fixed(resolve(l))
 	}
 	var routerPick policyeval.Policy
 	if *routeBin != "" {
@@ -195,7 +256,7 @@ func main() {
 		for _, id := range probeIDs {
 			probePrompts[id] = promptOf[id]
 		}
-		if p, err := liveRouterPolicy(*routeBin, probePrompts, *liveQuota); err == nil {
+		if p, err := liveRouterPolicy(*routeBin, probePrompts, *liveQuota, resolve); err == nil {
 			policies["router-live"] = p
 			routerPick = p
 		} else {
@@ -211,7 +272,7 @@ func main() {
 		byID := map[string]policyzoo.Task{}
 		var tuningTasks, heldoutTasks []policyzoo.Task
 		for _, t := range tasks {
-			zt := policyzoo.Task{ID: t.ID, Class: t.Class, Prompt: t.Prompt, BaseLane: routerPick(t.ID)}
+			zt := policyzoo.Task{ID: t.ID, Class: t.Class, Prompt: t.Prompt, BaseLane: routerPick(t.ID).Lane}
 			byID[t.ID] = zt
 			if t.Split == "heldout" {
 				heldoutTasks = append(heldoutTasks, zt)
@@ -235,15 +296,15 @@ func main() {
 		}
 		sort.Strings(famNames)
 		for _, name := range famNames {
-			best, tuneEv := policyzoo.SelectBest(fams[name], tb, tuningTasks)
-			policies["zoo:"+name+"["+best.Desc+"]"] = policyzoo.PolicyOf(best, byID)
+			best, tuneEv := policyzoo.SelectBest(fams[name], tb, tuningTasks, resolve)
+			policies["zoo:"+name+"["+best.Desc+"]"] = policyzoo.PolicyOf(best, byID, resolve)
 			zooEntries = append(zooEntries, ZooEntry{Family: name, Chosen: best.Desc,
 				GridSize: len(fams[name]), TuningPassRate: tuneEv.PassRate, TuningClaudeFr: tuneEv.ClaudeFraction,
 				TuningDiverged: diverged(best, tuningTasks), HeldoutDiverged: diverged(best, heldoutTasks)})
 		}
 	}
 
-	ref := policyeval.Evaluate(tb, evalIDs, policyeval.Fixed("claude"))
+	ref := policyeval.Evaluate(tb, evalIDs, policyeval.Fixed(resolve("claude")))
 	var reports []PolicyReport
 	for name, p := range policies {
 		ev := policyeval.Evaluate(tb, evalIDs, p)
@@ -311,15 +372,27 @@ func main() {
 			note += " ZOO: zoo:* rows are tuned on the tuning split only (config in zoo[].chosen_config); their heldout verdict needs non_inferior_at_margin AND pareto_vs_router for promotion."
 		}
 	}
+	// config_coverage: every RANKED config with its evidence at both levels.
+	// Emitted always — a ranked config with no evidence is the hole B15 gates
+	// on (model level) or the gap the re-baseline must close (effort level),
+	// and either way the operator must be able to see it without running the
+	// canary.
+	cov := make([]ConfigCoverage, 0, len(rankedCfgs))
+	for _, c := range rankedCfgs {
+		n := obsByConfig[c.Key()]
+		cov = append(cov, ConfigCoverage{Config: c.Key(), Observations: n,
+			CoveredModel: obsByModel[c.Lane+"|"+c.Model], CoveredEffort: n > 0})
+	}
 	out := struct {
 		Margin   float64                    `json:"margin"`
 		Ref      string                     `json:"reference"`
 		Split    *SplitInfo                 `json:"split,omitempty"`
 		Zoo      []ZooEntry                 `json:"zoo,omitempty"`
 		Reports  []PolicyReport             `json:"policies"`
+		Coverage []ConfigCoverage           `json:"config_coverage"`
 		Frontier []policyeval.FrontierPoint `json:"frontier"`
 		Note     string                     `json:"note"`
-	}{*margin, "always-claude", splitInfo, zooEntries, reports, policyeval.Frontier(tb, evalIDs), note}
+	}{*margin, "always-claude", splitInfo, zooEntries, reports, cov, policyeval.Frontier(tb, evalIDs), note}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
@@ -327,11 +400,11 @@ func main() {
 
 // SplitInfo is the B'2 cross-validation block, emitted only with -split.
 type SplitInfo struct {
-	Mode            string                   `json:"mode"`
-	TuningN         int                      `json:"tuning_n"`
-	HeldoutN        int                      `json:"heldout_n"`
-	ClassAssignment map[string]string        `json:"class_assignment"`
-	ClassCoverage   policyeval.ClassCoverage `json:"class_coverage"`
+	Mode            string                       `json:"mode"`
+	TuningN         int                          `json:"tuning_n"`
+	HeldoutN        int                          `json:"heldout_n"`
+	ClassAssignment map[string]policyeval.Config `json:"class_assignment"`
+	ClassCoverage   policyeval.ClassCoverage     `json:"class_coverage"`
 }
 
 // liveRouterPolicy runs the shipped deterministic router on each task's RAW
@@ -348,7 +421,7 @@ type SplitInfo struct {
 // always-claude (observed 2026-07-23 — the same measurement-confound family
 // as the 2026-07-20 label→class proxy bug). It also spams the live dispatch
 // log with 56 consult receipts per scorecard run.
-func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool) (policyeval.Policy, error) {
+func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool, resolve func(string) policyeval.Config) (policyeval.Policy, error) {
 	stateOverride := "" // set when probing in a neutral state dir
 	if !liveQuota {
 		dir, err := os.MkdirTemp("", "mr-scorecard-neutral-*")
@@ -413,5 +486,8 @@ func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool) (p
 		}
 		laneFor[task] = r.Lane
 	}
-	return func(task string) string { return laneFor[task] }, nil
+	// The router chooses a LANE; resolve turns it into the evidence cell it
+	// stands for (the rank table's first entry for that lane). Without this
+	// the policy could not address a cell at all.
+	return func(task string) policyeval.Config { return resolve(laneFor[task]) }, nil
 }

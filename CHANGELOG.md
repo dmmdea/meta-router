@@ -4,6 +4,23 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.28.0] — 2026-08-12
+
+### Added — Plan 1: the evidence cell is `(lane, model, effort)` (charter queue item 5)
+**CONCEPT-CHANGE: B15 added to `ROUTER_BIBLE.md`** (invariants now run B1..B15 with no gap; `docs/bible.sum` regenerated).
+
+Routing evidence was keyed by lane alone, so every observation for a lane pooled regardless of which model or effort produced it — a model could be swapped and its history would silently inherit its predecessor's. Now:
+- **`policyeval.Config{Lane, Model, Effort}`** is the unit of evidence, with `Key()`/`ParseConfig` round-tripping and `NormalizeEffort` applied **symmetrically** to oracle rows and rank-table entries (normalizing one side only would make every blank-effort seed entry permanently uncoverable).
+- **`EffortUnrecorded` is a real config value, never a wildcard**: legacy evidence says nothing about how a pinned effort performs, so it satisfies no entry that names one (B6 — unknown counted, never imputed).
+- **`type Policy func(task string) Config`.** Returning a lane cannot address a cell; returning a bare key compiles everywhere and silently breaks the `lane == "claude"` comparison behind `ClaudeFraction`, which makes the non-inferiority verdict *unconditionally true*. Every such comparison now goes through `cfg.IsLane`, guarded by a regression test.
+- **Lane-level policies resolve through one explicit seam.** `always-<lane>`, the zoo's floors and the live router all choose a *lane*; `seedConfigs()` maps it to the rank table's first entry for that lane, and `policyzoo.LaneResolver` injects it rather than hiding the choice inside the zoo. Cost (`laneCost`, `assignCost`, `RCI`) stays lane-keyed on purpose — which subscription window burns is a lane property, and two models on one lane draw the same window.
+- **`mr-goldreplay` records AND sends effort.** An effort recorded but never dispatched is worse than none — the row would assert a configuration that never ran — so `replayArgs` appends `-effort` only for a real effort, never for the `unrecorded` marker, and `rowKey` is now `task|lane|model|effort|trial`.
+- **`migrateEffort`** (`-migrate-effort <path>`) stamps `unrecorded` on legacy rows, idempotently, writing tmp+rename rather than truncating in place.
+- **B15 + `config_coverage`, two levels.** B15 gates **model** coverage `(lane, model)`; full-cell coverage is *reported* in the scorecard, not gated, because every legacy row predates effort capture and a gate that fails all 18 ranked configs isolates nothing. Verified against the real oracle: B15 flags **5 of 9** ranked pairs (`claude-opus-4-8`, `gpt-5.5`, `glm-4.7`, `qwythos`, `qwythos-think`) — the genuinely unmeasured ones. It **skips** where the oracle is absent (it lives in the private repo), so a public clone stays green.
+
+### Complexity
+- B12 budget raised 23690 → 24160 (measured 24135). See `docs/complexity-budget.json`.
+
 ## [0.27.1] — 2026-08-12
 
 ### Fixed — the lossless contract now actually holds (W5 review round)

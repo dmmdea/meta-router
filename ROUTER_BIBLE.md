@@ -70,6 +70,17 @@ A concept change that arrives as a quiet test edit is a review-blocking defect.
   exists, which a mutation can satisfy while still leaking. Obedience is proved
   behaviourally on `effective_cwd` and the exit code.
   verify: `TestCanaryB14ThirdPartyLanesAreGated`, `cmd/mr-orchestrate/egress_dispatch_test.go`
+- **B15 — Every ranked `(lane, model)` pair has oracle evidence.** Routing
+  evidence is keyed by the CELL `(lane, model, effort)`, so a rank-table entry
+  naming a model nobody measured is a recommendation with nothing behind it —
+  and pooling it with a sibling model's history is exactly the blending the
+  cell exists to end (B6: unknown counted, never imputed). The gate is at the
+  MODEL level deliberately: every legacy row predates effort capture and
+  carries `effort: unrecorded`, so gating the full key today would flag all 18
+  ranked configs and isolate nothing. Full-cell coverage ships as
+  `config_coverage` in the scorecard — reported now, gated once the
+  re-baseline fills it. Deferred rows are holes, never evidence.
+  verify: `TestCanaryB15RankedModelsHaveEvidence`
 <!-- invariants:end -->
 
 ## Review protocol (W8)

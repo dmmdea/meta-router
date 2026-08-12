@@ -30,6 +30,7 @@ import (
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
 	"github.com/dmmdea/meta-router/internal/orch/childenv"
+	"github.com/dmmdea/meta-router/internal/policyeval"
 )
 
 const version = "0.1.0"
@@ -41,6 +42,7 @@ type Row struct {
 	Class        string `json:"class"`
 	Lane         string `json:"lane"`
 	Model        string `json:"model"`
+	Effort       string `json:"effort"`
 	Trial        int    `json:"trial"`
 	Dispatched   bool   `json:"dispatched"`
 	OutcomeClass string `json:"outcome_class"` // ok | deferred | error | <lane outcome>
@@ -49,20 +51,26 @@ type Row struct {
 	Note         string `json:"note,omitempty"`
 }
 
-// rowKey identifies an oracle cell. MODEL IS PART OF THE IDENTITY: a mandatory
-// pin that is not in the key is a no-op, because resume then treats a row
-// recorded under a DIFFERENT model as already-done. Review 2026-07-27
-// reproduced exactly that — with a claude-sonnet-5 row present, a rerun with
-// the corrected `-claude-model claude-opus-4-8` reported "0 run now, 1 already
-// recorded" and exited 0, leaving the mislabelled row standing while looking
-// fixed. Effort is NOT in the key yet because it is not recorded or applied to
-// the dispatch at all; it joins when both are true (see the evidence-cell plan).
-func rowKey(task, lane, model string, trial int) string {
-	return fmt.Sprintf("%s|%s|%s|%d", task, lane, model, trial)
+// rowKey identifies an oracle cell. MODEL AND EFFORT ARE PART OF THE IDENTITY:
+// a mandatory pin that is not in the key is a no-op, because resume then treats
+// a row recorded under a DIFFERENT configuration as already-done. Review
+// 2026-07-27 reproduced exactly that for the model — with a claude-sonnet-5 row
+// present, a rerun with the corrected `-claude-model claude-opus-4-8` reported
+// "0 run now, 1 already recorded" and exited 0, leaving the mislabelled row
+// standing while looking fixed. Effort joins the key here because it is now
+// both RECORDED on the row and APPLIED to the dispatch (replayArgs); recording
+// it without sending it would have been strictly worse than omitting it.
+func rowKey(task, lane, model, effort string, trial int) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%d", task, lane, model, effort, trial)
 }
 
 // loadDone reads an existing oracle file and returns the set of recorded
-// (task,lane,model,trial) keys, so a rerun only fills the holes.
+// (task,lane,model,effort,trial) keys, so a rerun only fills the holes.
+//
+// The effort is normalized on the way in, the SAME way the planned cell's is:
+// the 825 legacy rows carry no `effort` key at all, so without this every one
+// of them lands under a key ending "...|" that no planned cell can match, and
+// resume silently stops recognizing the entire existing table.
 func loadDone(path string) map[string]bool {
 	done := map[string]bool{}
 	b, err := os.ReadFile(path)
@@ -77,7 +85,7 @@ func loadDone(path string) map[string]bool {
 		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && r.OutcomeClass != "deferred" {
 			// A deferred row is a HOLE (admission was closed), not an
 			// observation — resume must refill it when the window reopens.
-			done[rowKey(r.Task, r.Lane, r.Model, r.Trial)] = true
+			done[rowKey(r.Task, r.Lane, r.Model, policyeval.NormalizeEffort(r.Effort), r.Trial)] = true
 		}
 	}
 	return done
@@ -195,11 +203,38 @@ func main() {
 	codexModel := flag.String("codex-model", "", "model pin for the codex lane (REQUIRED when -lanes includes codex)")
 	glmModel := flag.String("glm-model", "", "model pin for the glm lane (REQUIRED when -lanes includes glm)")
 	localModel := flag.String("local-model", "", "model tag for the local lane (REQUIRED when -lanes includes local)")
+	// Effort follows the model's rule exactly, and for the same reason: the row
+	// records the pin, so an unpassed flag writes evidence under a configuration
+	// nobody chose. A lane with no effort dial (local) is declared explicitly as
+	// `unrecorded` — saying "this ran at no recorded effort" is a deliberate act,
+	// where a silent default is precisely the mislabelling this gate exists for.
+	effortHelp := func(lane string) string {
+		return "effort pin for the " + lane + " lane (REQUIRED when -lanes includes " + lane +
+			"; pass " + policyeval.EffortUnrecorded + " when the lane has no effort dial)"
+	}
+	claudeEffort := flag.String("claude-effort", "", effortHelp("claude"))
+	codexEffort := flag.String("codex-effort", "", effortHelp("codex"))
+	glmEffort := flag.String("glm-effort", "", effortHelp("glm"))
+	localEffort := flag.String("local-effort", "", effortHelp("local"))
+	migrateEffortPath := flag.String("migrate-effort", "",
+		"MIGRATION MODE: stamp effort=\""+policyeval.EffortUnrecorded+"\" on every row of this oracle file that has none, then exit (idempotent; writes <path>.tmp and renames)")
 	timeoutSec := flag.Int("timeout", 900, "per-dispatch timeout (seconds)")
 	maxNotional := flag.Float64("max-notional", 10, "claude-lane notional guard ceiling (real coding tasks exceed the $2 default)")
 	claudeExtra := flag.String("claude-extra", "--dangerously-skip-permissions",
 		"extra claude-lane flags via run -extra (headless replay agents work tool-enabled in disposable worktrees; empty to disable)")
 	flag.Parse()
+
+	// Migration is a pure file rewrite: it must not require a goldset, lanes or
+	// pins, and it must never dispatch anything.
+	if *migrateEffortPath != "" {
+		changed, err := migrateEffortFile(*migrateEffortPath)
+		if err != nil {
+			fatal("migrate-effort: %v", err)
+		}
+		fmt.Printf("migrate-effort: %d row(s) stamped effort=%q → %s\n",
+			changed, policyeval.EffortUnrecorded, *migrateEffortPath)
+		return
+	}
 
 	tasks, err := goldtask.Load(*goldset)
 	if err != nil {
@@ -215,11 +250,14 @@ func main() {
 	// validation and then be RECORDED and DISPATCHED untrimmed, producing a
 	// model string unequal to every other row's — the same mislabelling this
 	// gate exists to prevent, one layer down (review 2026-07-27).
-	rawPins := map[string]string{
-		"claude": *claudeModel, "codex": *codexModel, "glm": *glmModel, "local": *localModel,
+	rawPins := map[string]policyeval.Config{
+		"claude": {Lane: "claude", Model: *claudeModel, Effort: *claudeEffort},
+		"codex":  {Lane: "codex", Model: *codexModel, Effort: *codexEffort},
+		"glm":    {Lane: "glm", Model: *glmModel, Effort: *glmEffort},
+		"local":  {Lane: "local", Model: *localModel, Effort: *localEffort},
 	}
 	// rawPins is passed on UNNORMALIZED and that is deliberate: buildRunPlan does
-	// its own normalization for the dispatch decision, and requireModelPins
+	// its own normalization for the dispatch decision, and requireConfigPins
 	// TrimSpaces internally. Normalizing here too would be dead code that looks
 	// load-bearing — an equivalent mutant a future reader would try to "fix".
 	lanes := parseLanes(*lanesFlag)
@@ -228,11 +266,11 @@ func main() {
 			fatal("unknown lane %q", l)
 		}
 	}
-	if missing := requireModelPins(lanes, rawPins); len(missing) > 0 {
-		fatal("model pin required for lane(s) %s: the oracle row records the PIN, so replaying "+
-			"a lane without one writes evidence under a model nobody chose (this is how 204 claude "+
-			"rows recorded sonnet-5 while the rank table dispatched opus-4-8). Pass %s",
-			strings.Join(missing, ", "), pinFlagsFor(missing))
+	if missing := requireConfigPins(lanes, rawPins); len(missing) > 0 {
+		fatal("model AND effort pins required for lane(s) %s: the oracle row records the PINS, so "+
+			"replaying a lane without them writes evidence under a configuration nobody chose (this "+
+			"is how 204 claude rows recorded sonnet-5 while the rank table dispatched opus-4-8). "+
+			"Pass %s", strings.Join(missing, ", "), pinFlagsFor(missing))
 	}
 
 	done := loadDone(*outPath)
@@ -244,22 +282,28 @@ func main() {
 
 	plan := buildRunPlan(tasks, *lanesFlag, rawPins, *trials, taskFilter, classFilter, done)
 	for _, c := range plan.Run {
-		row := replayOne(c.GoldTask, c.Lane, c.Model, c.Trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
+		row := replayOne(c.GoldTask, c.Config, c.Trial, *orchBin, *verifyBin, *reposFlag, *timeoutSec, *maxNotional, *claudeExtra)
 		b, _ := json.Marshal(row)
 		fmt.Fprintln(out, string(b))
-		fmt.Printf("[%s %s trial %d] dispatched=%v outcome=%s pass=%v (%dms) %s\n",
-			row.Task, row.Lane, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, row.Note)
+		fmt.Printf("[%s %s/%s/%s trial %d] dispatched=%v outcome=%s pass=%v (%dms) %s\n",
+			row.Task, row.Lane, row.Model, row.Effort, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, row.Note)
 	}
 	fmt.Printf("\nreplay complete: %d cells (%d run now, %d already recorded) → %s\n",
 		plan.Total, len(plan.Run), plan.Skipped, *outPath)
 }
 
-// plannedCell is one (task, lane, model, trial) the replay will dispatch.
+// plannedCell is one (task, config, trial) the replay will dispatch.
 type plannedCell struct {
-	Task, Lane, Model string
-	Trial             int
-	GoldTask          goldtask.Task
+	Task     string
+	Config   policyeval.Config
+	Trial    int
+	GoldTask goldtask.Task
 }
+
+// Lane and Model read the planned cell's config; the fields moved into Config
+// when the evidence cell became (lane, model, effort).
+func (c plannedCell) Lane() string  { return c.Config.Lane }
+func (c plannedCell) Model() string { return c.Config.Model }
 
 // runPlan is what a replay WOULD do, decided before anything is dispatched.
 type runPlan struct {
@@ -284,10 +328,10 @@ type runPlan struct {
 // deliberately: if it accepted already-normalized inputs, deleting the
 // normalization from main() would leave every test green again (MUT-2/MUT-3).
 // The dispatch decision owns its own normalization.
-func buildRunPlan(tasks []goldtask.Task, lanesCSV string, rawPins map[string]string,
+func buildRunPlan(tasks []goldtask.Task, lanesCSV string, rawPins map[string]policyeval.Config,
 	trials int, taskFilter, classFilter, done map[string]bool) runPlan {
 	lanes := parseLanes(lanesCSV)
-	laneModel := normalizePins(rawPins)
+	laneCfg := normalizePins(rawPins)
 	var p runPlan
 	for _, t := range tasks {
 		if len(taskFilter) > 0 && !taskFilter[t.ID] {
@@ -299,23 +343,45 @@ func buildRunPlan(tasks []goldtask.Task, lanesCSV string, rawPins map[string]str
 		for _, lane := range lanes {
 			for trial := 1; trial <= trials; trial++ {
 				p.Total++
-				model := laneModel[lane]
-				if done[rowKey(t.ID, lane, model, trial)] {
+				cfg := laneCfg[lane]
+				cfg.Lane = lane // the -lanes list owns the lane, not the pin map's key
+				if done[rowKey(t.ID, cfg.Lane, cfg.Model, cfg.Effort, trial)] {
 					p.Skipped++
 					continue
 				}
 				p.Run = append(p.Run, plannedCell{
-					Task: t.ID, Lane: lane, Model: model, Trial: trial, GoldTask: t})
+					Task: t.ID, Config: cfg, Trial: trial, GoldTask: t})
 			}
 		}
 	}
 	return p
 }
 
-// replayOne runs one (task,lane,trial) cell end to end.
-func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBin, repos string, timeoutSec int, maxNotional float64, claudeExtra string) Row {
+// replayArgs builds the `mr-orchestrate run` argv for one cell. It is a
+// separate function because the defect it guards is invisible in the row: an
+// effort we RECORD but never SEND produces a row asserting a configuration that
+// never ran — strictly worse than recording no effort at all, because it looks
+// like evidence. Testing the row is not enough; the ARGV is the claim.
+//
+// EffortUnrecorded is a marker, not an effort: it must never be dispatched, or
+// the orchestrator forwards the literal string "unrecorded" to the CLI. The
+// lane arg builders emit --effort / model_reasoning_effort only when non-empty,
+// so omitting it here is exactly "the lane's own default ran", which is what
+// the unrecorded marker means.
+func replayArgs(taskID string, cfg policyeval.Config, prompt string, maxNotional float64) []string {
+	args := []string{"run", prompt, "-lane", cfg.Lane, "-model", cfg.Model}
+	if cfg.Effort != policyeval.EffortUnrecorded && strings.TrimSpace(cfg.Effort) != "" {
+		args = append(args, "-effort", cfg.Effort)
+	}
+	return append(args, "-live", "-origin", "goldreplay", "-desc", "goldreplay "+taskID,
+		"-max-notional-usd", fmt.Sprintf("%g", maxNotional))
+}
+
+// replayOne runs one (task,config,trial) cell end to end.
+func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verifyBin, repos string, timeoutSec int, maxNotional float64, claudeExtra string) Row {
+	lane, model := cfg.Lane, cfg.Model
 	row := Row{TS: time.Now().UTC().Format(time.RFC3339), Task: t.ID, Class: t.Class,
-		Lane: lane, Model: model, Trial: trial}
+		Lane: lane, Model: model, Effort: cfg.Effort, Trial: trial}
 	start := time.Now()
 
 	// Exec tasks get a fresh agent worktree at the parent commit as cwd.
@@ -333,9 +399,7 @@ func replayOne(t goldtask.Task, lane, model string, trial int, orchBin, verifyBi
 		cwd = wt
 	}
 
-	args := []string{"run", t.Prompt, "-lane", lane, "-model", model, "-live",
-		"-origin", "goldreplay", "-desc", "goldreplay " + t.ID,
-		"-max-notional-usd", fmt.Sprintf("%g", maxNotional)}
+	args := replayArgs(t.ID, cfg, t.Prompt, maxNotional)
 	if lane == "claude" && claudeExtra != "" {
 		args = append(args, "-extra", claudeExtra)
 	}
@@ -495,10 +559,19 @@ func csvSet(s string) map[string]bool {
 
 // normalizePins trims every pin so the value VALIDATED is the value RECORDED
 // and DISPATCHED. Returns a new map; the caller's is not mutated.
-func normalizePins(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
+//
+// Effort goes through policyeval.NormalizeEffort — the SAME function the oracle
+// reader and the scorecard's rank-table side use. Symmetry is the whole point:
+// normalizing one side only leaves the other's keys ending "...|", which match
+// nothing and are permanently uncoverable.
+func normalizePins(in map[string]policyeval.Config) map[string]policyeval.Config {
+	out := make(map[string]policyeval.Config, len(in))
 	for lane, pin := range in {
-		out[lane] = strings.TrimSpace(pin)
+		out[lane] = policyeval.Config{
+			Lane:   strings.TrimSpace(pin.Lane),
+			Model:  strings.TrimSpace(pin.Model),
+			Effort: policyeval.NormalizeEffort(pin.Effort),
+		}
 	}
 	return out
 }
@@ -522,13 +595,20 @@ func parseLanes(csv string) []string {
 	return out
 }
 
-// requireModelPins returns the lanes being replayed that carry no model pin, in
-// the caller's lane order (deterministic message). Only lanes actually in the
-// run are required, so `-lanes claude` needs no glm pin.
-func requireModelPins(lanes []string, laneModel map[string]string) []string {
+// requireConfigPins returns the lanes being replayed that carry an incomplete
+// config pin — missing model OR missing effort — in the caller's lane order
+// (deterministic message). Only lanes actually in the run are required, so
+// `-lanes claude` needs no glm pin.
+//
+// It reads the RAW pins deliberately. Running it after normalization would be
+// vacuous: NormalizeEffort turns blank into EffortUnrecorded, so a lane whose
+// effort was never passed would silently pass the gate and record `unrecorded`
+// as though the operator had chosen it.
+func requireConfigPins(lanes []string, laneCfg map[string]policyeval.Config) []string {
 	var missing []string
 	for _, l := range lanes {
-		if strings.TrimSpace(laneModel[l]) == "" {
+		c := laneCfg[l]
+		if strings.TrimSpace(c.Model) == "" || strings.TrimSpace(c.Effort) == "" {
 			missing = append(missing, l)
 		}
 	}
@@ -540,7 +620,7 @@ func requireModelPins(lanes []string, laneModel map[string]string) []string {
 func pinFlagsFor(lanes []string) string {
 	flags := make([]string, 0, len(lanes))
 	for _, l := range lanes {
-		flags = append(flags, "-"+l+"-model <id>")
+		flags = append(flags, "-"+l+"-model <id> -"+l+"-effort <level|"+policyeval.EffortUnrecorded+">")
 	}
 	return strings.Join(flags, " ")
 }
