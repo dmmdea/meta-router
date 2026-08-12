@@ -27,7 +27,17 @@ type Candidate struct {
 var laneTier = map[string]int{"local": 0, "glm": 1, "codex": 2, "claude": 3}
 
 func floored(base, floor string) string {
-	if laneTier[base] < laneTier[floor] {
+	// An UNKNOWN base is not the cheapest lane, it is no lane. Go's zero value
+	// made laneTier[unknown] == 0, so a floor read an empty or unrecognized
+	// base as cheaper than everything and INVENTED a lane for it — turning a
+	// failed resolution into a confident assignment, and contradicting
+	// assignCost and policyeval.laneCostOf, which both cost an unknown lane at
+	// MaxInt32. A floor may only bump a lane it can rank.
+	bt, ok := laneTier[base]
+	if !ok {
+		return base // unresolvable: abstain, never invent
+	}
+	if bt < laneTier[floor] {
 		return floor
 	}
 	return base

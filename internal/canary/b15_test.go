@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/meta-router/internal/orch/router"
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
 // oraclePath resolves the replay oracle. It lives in the PRIVATE repo, so a
@@ -129,7 +130,16 @@ var knownUncovered = map[string]bool{
 }
 
 func TestCanaryB15RankedModelsHaveEvidence(t *testing.T) {
-	uncovered := rankedModelsWithoutEvidence(router.Seed(), loadOracleModels(t))
+	// The ACTIVE table, not the compiled default: an override that ranks a
+	// different model per lane is what the router actually dispatches, and
+	// gating the seed would pass while the real policy ranks unmeasured
+	// models (review 2026-08-12).
+	tbl, provenance, warn := router.LoadChecked(statepaths.RankTable())
+	if warn != "" {
+		t.Logf("rank table: %s", warn)
+	}
+	t.Logf("B15 gating the %s rank table", provenance)
+	uncovered := rankedModelsWithoutEvidence(tbl, loadOracleModels(t))
 	var unexpected []string
 	for _, k := range uncovered {
 		if !knownUncovered[k] {
