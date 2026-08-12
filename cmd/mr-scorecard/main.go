@@ -40,8 +40,29 @@ type oracleRow struct {
 	// pinned effort (B6: unknown counted, never imputed).
 	Model        string `json:"model"`
 	Effort       string `json:"effort"`
+	Dispatched   bool   `json:"dispatched"`
 	OutcomeClass string `json:"outcome_class"`
 	VerifierPass bool   `json:"verifier_pass"`
+}
+
+// ran reports whether this row is EVIDENCE — i.e. the dispatch actually
+// happened and produced a verdict. A hole is not evidence (B6): a deferral,
+// a spawn/exec failure, a nonzero exit, or a row the replay never dispatched
+// all mean "we did not measure this cell", and counting them as measured
+// FAILURES is strictly worse than counting them as unknown — it lets a lane
+// that never ran look like a lane that ran and lost, which then deflates the
+// reference and inflates every ratio computed against it (review 2026-08-12:
+// an all-error replay turned B15 green and gave the reference PassRate 0 with
+// Unknown 0).
+func (r oracleRow) ran() bool {
+	if !r.Dispatched {
+		return false
+	}
+	switch r.OutcomeClass {
+	case "deferred", "error", "spawn_error", "config_error", "parse_error", "api_error":
+		return false
+	}
+	return !strings.HasPrefix(r.OutcomeClass, "exit-")
 }
 
 // config is the row's evidence cell.
@@ -111,16 +132,32 @@ type ReferenceGap struct {
 
 // PolicyReport is one row of the scorecard.
 type PolicyReport struct {
-	Policy         string  `json:"policy"`
-	PassRate       float64 `json:"pass_rate"`
-	QualityRatio   float64 `json:"quality_ratio_vs_claude"`
-	RatioCILo      float64 `json:"ratio_ci_lo"`
-	RatioCIHi      float64 `json:"ratio_ci_hi"`
-	SignFlipP      float64 `json:"sign_flip_p"`
-	ClaudeFraction float64 `json:"claude_fraction"`
-	RCI            float64 `json:"rci"`
-	Unknown        int     `json:"unknown_cells"`
-	NonInferior    bool    `json:"non_inferior_at_margin"`
+	Policy   string  `json:"policy"`
+	PassRate float64 `json:"pass_rate"`
+	// The four DERIVED values are pointers so "not computed" serializes as
+	// ABSENT rather than 0. A zero here is an extreme answer, not a missing
+	// one: sign_flip_p 0 is the most significant p possible and passes any
+	// `p < 0.05` check, and quality_ratio 0 reads as "infinitely worse".
+	// Both were emitted on every row of the live artifact for tests that
+	// never ran (review 2026-08-12).
+	QualityRatio   *float64 `json:"quality_ratio_vs_claude,omitempty"`
+	RatioCILo      *float64 `json:"ratio_ci_lo,omitempty"`
+	RatioCIHi      *float64 `json:"ratio_ci_hi,omitempty"`
+	SignFlipP      *float64 `json:"sign_flip_p,omitempty"`
+	ClaudeFraction float64  `json:"claude_fraction"`
+	RCI            float64  `json:"rci"`
+	Unknown        int      `json:"unknown_cells"`
+	NonInferior    bool     `json:"non_inferior_at_margin"`
+	// Config names the evidence cell this row's numbers belong to. Without it
+	// a reader cannot tell WHICH model a pass_rate describes — the exact
+	// mislabelling this program exists to end, at the artifact layer.
+	Config string `json:"config,omitempty"`
+	// PairedN is how many tasks had evidence for BOTH this policy and the
+	// reference. The ratio/CI/p are computed on those tasks only; anything
+	// less than the full set means the verdict is narrower than the margin
+	// was pre-registered for.
+	PairedN    int    `json:"paired_n"`
+	PairedNote string `json:"paired_note,omitempty"`
 	// InSample marks a row whose assignment saw the cells it is scored on
 	// (the per-task oracle in split mode): a CEILING, never a deployable
 	// candidate - its non-inferiority verdict is suppressed.
@@ -220,8 +257,8 @@ func main() {
 		if json.Unmarshal([]byte(line), &r) != nil || r.Task == "" {
 			continue
 		}
-		if r.OutcomeClass == "deferred" {
-			continue // a deferred cell is a hole, not an observation
+		if !r.ran() {
+			continue // a hole is not an observation (see ran)
 		}
 		cfg := r.config()
 		tb.Add(r.Task, cfg, r.VerifierPass)
@@ -351,21 +388,47 @@ func main() {
 		ev := policyeval.Evaluate(tb, evalIDs, p)
 		rep := PolicyReport{Policy: name, PassRate: ev.PassRate,
 			ClaudeFraction: ev.ClaudeFraction, RCI: policyeval.RCI(ev.Assignment), Unknown: ev.Unknown}
-		if ref.PassRate > 0 {
-			rep.QualityRatio = ev.PassRate / ref.PassRate
-			// Paired per-task deltas vs always-claude drive both the CI and p.
-			deltas := make([]float64, 0, len(evalIDs))
-			ratios := make([]float64, 0, len(evalIDs))
-			for _, id := range evalIDs {
-				d := ev.PerTask[id] - ref.PerTask[id]
-				deltas = append(deltas, d)
-				ratios = append(ratios, d) // CI on the mean delta, mapped to ratio space below
+		// PAIRED on the tasks where BOTH arms have evidence. An unknown cell
+		// scores 0 in Evaluate (correct there — it is counted, not imputed),
+		// but feeding that 0 into a DIFFERENCE silently converts "we did not
+		// measure the reference here" into "the reference failed here". Both
+		// effects push the ratio and its CI lower bound UP, so the gate got
+		// easier to pass exactly in proportion to how much reference data was
+		// missing — a candidate measured half as good as the reference on
+		// their shared tasks was certified non_inferior=true at p=0.04
+		// (review 2026-08-12, reproduced on a synthetic oracle).
+		//
+		// The v0.28.1 guard keyed on ref.PassRate > 0 and only announced the
+		// all-unknown case; it therefore missed BOTH the partial-coverage case
+		// above and a reference that is fully measured and genuinely scores 0
+		// (where a strictly better policy was reported as ratio 0.0, p 0.0).
+		// Key on EVIDENCE, never on the score.
+		paired := make([]float64, 0, len(evalIDs))
+		var refPaired, evPaired float64
+		for _, id := range evalIDs {
+			if !ref.Measured[id] || !ev.Measured[id] {
+				continue // no shared evidence on this task: it informs nothing
 			}
-			lo, hi := policyeval.BootstrapCI(ratios, 0.95, *iters, 42)
-			rep.RatioCILo = (ref.PassRate + lo) / ref.PassRate
-			rep.RatioCIHi = (ref.PassRate + hi) / ref.PassRate
-			rep.SignFlipP = policyeval.SignFlipP(deltas, *iters, 42)
-			rep.NonInferior = rep.RatioCILo >= 1-*margin && ev.ClaudeFraction < 1
+			paired = append(paired, ev.PerTask[id]-ref.PerTask[id])
+			refPaired += ref.PerTask[id]
+			evPaired += ev.PerTask[id]
+		}
+		rep.PairedN = len(paired)
+		if rep.PairedN > 0 && refPaired > 0 {
+			refMean := refPaired / float64(rep.PairedN)
+			ratio := (evPaired / float64(rep.PairedN)) / refMean
+			lo, hi := policyeval.BootstrapCI(paired, 0.95, *iters, 42)
+			ciLo, ciHi := (refMean+lo)/refMean, (refMean+hi)/refMean
+			p := policyeval.SignFlipP(paired, *iters, 42)
+			rep.QualityRatio, rep.RatioCILo, rep.RatioCIHi, rep.SignFlipP = &ratio, &ciLo, &ciHi, &p
+			rep.NonInferior = ciLo >= 1-*margin && ev.ClaudeFraction < 1
+		}
+		// A verdict computed on a handful of shared tasks is not the verdict
+		// the margin was pre-registered for; say so rather than let a thin n
+		// pass as the real thing.
+		if rep.PairedN < len(evalIDs) {
+			rep.PairedNote = fmt.Sprintf("verdict computed on the %d/%d tasks where BOTH this policy and the reference have evidence",
+				rep.PairedN, len(evalIDs))
 		}
 		if *split && name == "oracle-best" {
 			// Per-task argmax over the FULL table, scored on heldout cells it
@@ -499,7 +562,7 @@ func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool, re
 		}
 		stateOverride = dir
 	}
-	laneFor := map[string]string{}
+	cfgFor := map[string]policyeval.Config{}
 	for task, prompt := range promptOf {
 		cmd := exec.Command(bin, "route", "-desc", prompt, "-no-receipt")
 		// R10 (canary B13): even a read-only child gets a scrubbed environment.
@@ -521,16 +584,30 @@ func liveRouterPolicy(bin string, promptOf map[string]string, liveQuota bool, re
 			}
 			return nil, fmt.Errorf("route %s: %v", task, err)
 		}
+		// The router decides a full CONFIG and says so — lane, model and effort
+		// are three of route's six contract keys. Parsing only the lane and
+		// re-deriving a config would collapse a per-class (lane, model, effort)
+		// decision onto one global per-lane cell, scoring a verify-gate task
+		// the router dispatches as claude|sonnet-5|medium against
+		// claude|opus-4-8|high. That is "a model swap silently inherits its
+		// predecessor's history" reintroduced at this seam — the precise thing
+		// the config key exists to prevent (review 2026-08-12).
 		var r struct {
-			Lane string `json:"lane"`
+			Lane   string `json:"lane"`
+			Model  string `json:"model"`
+			Effort string `json:"effort"`
 		}
 		if err := json.Unmarshal(out, &r); err != nil || r.Lane == "" {
 			return nil, fmt.Errorf("route %s: unparseable", task)
 		}
-		laneFor[task] = r.Lane
+		if r.Model != "" {
+			cfgFor[task] = policyeval.Config{Lane: r.Lane, Model: r.Model,
+				Effort: policyeval.NormalizeEffort(r.Effort)}
+		} else {
+			// Older binary with no model in the contract: fall back to the
+			// lane-level resolution rather than inventing a cell.
+			cfgFor[task] = resolve(r.Lane)
+		}
 	}
-	// The router chooses a LANE; resolve turns it into the evidence cell it
-	// stands for (the rank table's first entry for that lane). Without this
-	// the policy could not address a cell at all.
-	return func(task string) policyeval.Config { return resolve(laneFor[task]) }, nil
+	return func(task string) policyeval.Config { return cfgFor[task] }, nil
 }

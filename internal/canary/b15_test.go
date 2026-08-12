@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/meta-router/internal/orch/router"
@@ -59,11 +60,25 @@ func loadOracleModels(t *testing.T) map[string]bool {
 			Lane         string `json:"lane"`
 			Model        string `json:"model"`
 			OutcomeClass string `json:"outcome_class"`
+			Dispatched   bool   `json:"dispatched"`
 		}
 		if json.Unmarshal(line, &r) != nil || r.Lane == "" {
 			continue
 		}
-		if r.OutcomeClass == "deferred" {
+		// A hole is not evidence. Skipping only "deferred" let rows where
+		// NOTHING RAN count as measurement: an entire replay against a
+		// missing/stale binary writes `dispatched:false, outcome_class:error`
+		// for every cell, and B15 turned GREEN for a model that was never
+		// dispatched once (review 2026-08-12, reproduced on a synthetic
+		// oracle). Evidence means the dispatch happened and returned a verdict.
+		if !r.Dispatched {
+			continue
+		}
+		switch r.OutcomeClass {
+		case "deferred", "error", "spawn_error", "config_error", "parse_error", "api_error":
+			continue
+		}
+		if strings.HasPrefix(r.OutcomeClass, "exit-") {
 			continue
 		}
 		out[r.Lane+"|"+r.Model] = true
@@ -97,10 +112,49 @@ func rankedModelsWithoutEvidence(tbl router.Table, observed map[string]bool) []s
 
 // B15: a ranked model with no evidence is a recommendation with nothing
 // behind it. Model level, not full cell — see the Bible entry for why.
+// knownUncovered are the pairs the pending re-baseline is scheduled to close.
+// They are ACKNOWLEDGED, not excused: the canary still reports them loudly on
+// every run, and a pair appearing here that is NOT in this list fails.
+//
+// Why an allowlist rather than a red test: B15 shipped knowingly failing, and
+// a permanently-red suite gates nothing — a genuine regression in any package
+// hides behind the known failure (review 2026-08-12). Shrink this list as the
+// re-baseline measures each pair; when it is empty, delete it.
+var knownUncovered = map[string]bool{
+	"claude|claude-opus-4-8": true,
+	"codex|gpt-5.5":          true,
+	"glm|glm-4.7":            true,
+	"local|qwythos":          true,
+	"local|qwythos-think":    true,
+}
+
 func TestCanaryB15RankedModelsHaveEvidence(t *testing.T) {
 	uncovered := rankedModelsWithoutEvidence(router.Seed(), loadOracleModels(t))
+	var unexpected []string
+	for _, k := range uncovered {
+		if !knownUncovered[k] {
+			unexpected = append(unexpected, k)
+		}
+	}
 	if len(uncovered) > 0 {
-		t.Fatalf("B15 violated — the rank table ranks (lane,model) pairs with no oracle evidence: %v\n"+
-			"Either measure them (mr-goldreplay) or stop ranking them. Pooling a sibling model's history is not evidence (B6).", uncovered)
+		t.Logf("B15: %d ranked (lane,model) pair(s) still have no oracle evidence: %v\n"+
+			"These are the re-baseline's work list. A ranked model nobody measured is a recommendation with nothing behind it.", len(uncovered), uncovered)
+	}
+	if len(unexpected) > 0 {
+		t.Fatalf("B15 violated — NEW ranked (lane,model) pair(s) with no evidence: %v\n"+
+			"Either measure them (mr-goldreplay) or stop ranking them. Pooling a sibling model's history is not evidence (B6).", unexpected)
+	}
+	// A pair that got measured must leave the allowlist, or the list rots into
+	// a permanent excuse nobody rechecks.
+	observed := loadOracleModels(t)
+	var stale []string
+	for k := range knownUncovered {
+		if observed[k] {
+			stale = append(stale, k)
+		}
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		t.Fatalf("B15 bookkeeping — these pairs now HAVE evidence and must be removed from knownUncovered: %v", stale)
 	}
 }

@@ -4,6 +4,21 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.29.0] — 2026-08-12
+
+### Fixed — Stage-2b review of Plan 1 (the review that should have run before v0.28.0)
+Two fresh-context specialists returned **4 CRITICAL + 4 HIGH**, every one reproduced against built binaries and several against the live 825-row oracle. The unifying defect: *"I have no evidence"* and *"the evidence says zero"* were the same float, so v0.28.1 patched one entry point into that hole and three more remained.
+
+- **FALSE GREEN on the non-inferiority gate.** A *partially* unmeasured reference failed **open**, not closed: holes deflate the ratio's denominator **and** credit the candidate a free positive delta on every task the reference never measured. A config measured a third **worse** than the reference on their shared tasks was certified `non_inferior_at_margin: true` at `ratio_ci_lo 1.47`. Quota exhaustion mid-run is the normal way this arises, and the live oracle already carries 245 deferred rows. Verdicts are now computed on the **paired-complete subset** — tasks where *both* arms have evidence (`Eval.Measured`, new) — with `paired_n` and a note reported.
+- **Uncomputed values no longer serialize as extreme ones.** `quality_ratio`, `ratio_ci_lo`, `ratio_ci_hi` and `sign_flip_p` are pointers with `omitempty`. An uncomputed `sign_flip_p: 0` is the most significant p possible and passed any `p < 0.05` check; `quality_ratio: 0` read as "infinitely worse".
+- **A reference measured everywhere that scores exactly 0** was completely mute (`unknown_cells: 0`, no flag) and reported a strictly-better candidate as `ratio 0`. The guard now keys on **evidence**, never on the score.
+- **`router-live` uses the router's own model and effort.** It parsed only `lane` and re-derived a config, collapsing a per-class `(lane, model, effort)` decision onto one global per-lane cell — the 204-sonnet-rows-under-opus-decisions defect recreated at the seam Plan 1 exists to close.
+- **Evidence means the dispatch RAN.** Skipping only `deferred` let `dispatched:false` / `error` / `exit-N` rows count as measurement; an all-error replay turned **B15 green** for a model never dispatched once, and fed the scorecard 56 phantom failures.
+- **B15 no longer ships red.** A knowingly-failing canary gates nothing — a real regression anywhere hides behind it. It is now an explicit shrinking allowlist that still logs the full uncovered list every run, fails on any **new** uncovered pair, and fails if a pair got measured and was left in the list.
+
+### Added
+- **`mr-goldreplay -plan-only`** and a **resume-mismatch refusal.** The resume key includes effort, so a real effort pin against the pre-effort oracle matched *nothing* and would have re-dispatched **476 cloud cells** unattended (147 claude, tool-enabled, `-max-notional 10` each). The guard refuses before dispatching and names the cause; `-re-measure` is the deliberate override. The plan is now printed **before** the dispatch loop, not after it.
+
 ## [0.28.2] — 2026-08-12
 
 ### Fixed
