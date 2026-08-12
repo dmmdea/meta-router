@@ -495,10 +495,33 @@ func TestDetectDrift_ModelRekeyDrifts(t *testing.T) {
 	}
 }
 
-// When BOTH pins drift for one cell, the effort tier claims it (more specific:
-// the cell identity matched through the model) and the cell is not double-counted.
+// A cell that drifts on effort is reported ONCE, by the effort tier — never
+// double-counted into both.
+//
+// From a loadDone-built state the two tiers are mutually exclusive by
+// construction: a non-empty effortsByCell entry for the PLANNED model implies
+// loadDone also indexed that model, which silences the model tier. The
+// `continue` is therefore defensive, not load-bearing — so this test builds
+// the INCONSISTENT state loadDone cannot produce (effort recorded for the
+// planned model, the model index missing it) and pins that the cell is still
+// counted exactly once, in the effort tier. Without the fixture the test named
+// a precedence it could not reach (review round 4).
 func TestDetectDrift_EffortTierTakesPrecedence(t *testing.T) {
-	rs := resumeState{
+	inconsistent := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
+		},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-01", "claude", 1): {"other-model": true}, // does NOT contain "m"
+		},
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, inconsistent)
+	if len(d.effortDrift) != 1 || len(d.modelDrift) != 0 {
+		t.Fatalf("a cell satisfying BOTH tiers must be reported once, by the effort tier: %+v", d)
+	}
+
+	// And the ordinary consistent case still reports effort drift alone.
+	consistent := resumeState{
 		effortsByCell: map[string]map[string]bool{
 			cellKey("T-01", "claude", "m", 1): {policyeval.EffortUnrecorded: true},
 		},
@@ -506,9 +529,58 @@ func TestDetectDrift_EffortTierTakesPrecedence(t *testing.T) {
 			identKey("T-01", "claude", 1): {"m": true},
 		},
 	}
-	d := detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, rs)
+	d = detectDrift([]plannedCell{driftCell("T-01", "claude", "m", "high", 1)}, consistent)
 	if len(d.effortDrift) != 1 || len(d.modelDrift) != 0 {
 		t.Fatalf("same-model different-effort is effort drift, once: %+v", d)
+	}
+}
+
+// The recorded-value lists reach an operator-facing refusal, so their order is
+// part of the contract: map iteration must never decide it. Removing either
+// sort.Strings left the whole suite green (review round 4).
+func TestDetectDriftRecordedListsAreSorted(t *testing.T) {
+	rs := resumeState{
+		effortsByCell: map[string]map[string]bool{
+			cellKey("T-01", "claude", "m", 1): {"xhigh": true, "high": true, "low": true, "medium": true},
+		},
+		modelsByIdent: map[string]map[string]bool{
+			identKey("T-02", "claude", 1): {"zeta": true, "alpha": true, "mu": true, "beta": true},
+		},
+	}
+	run := []plannedCell{
+		driftCell("T-01", "claude", "m", policyeval.EffortUnrecorded, 1),
+		driftCell("T-02", "claude", "omega", policyeval.EffortUnrecorded, 1),
+	}
+	for i := 0; i < 40; i++ {
+		d := detectDrift(run, rs)
+		if strings.Join(d.recordedEfforts, ",") != "high,low,medium,xhigh" {
+			t.Fatalf("efforts not sorted: %v", d.recordedEfforts)
+		}
+		if strings.Join(d.recordedModels, ",") != "alpha,beta,mu,zeta" {
+			t.Fatalf("models not sorted: %v", d.recordedModels)
+		}
+	}
+}
+
+// A recorded row with NO model indexes under the named sentinel, so the
+// refusal says what the rows carry instead of naming nothing — and it points
+// at the only escape, since no pin can match an empty recorded model.
+func TestLoadDoneNamesAModellessRow(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "oracle.jsonl")
+	body := `{"task":"T-01","lane":"local","trial":1,"dispatched":true,"outcome_class":"ok","verifier_pass":true}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs := loadDone(p)
+	if !rs.modelsByIdent[identKey("T-01", "local", 1)][modelUnrecorded] {
+		t.Fatalf("a model-less row must index under the sentinel: %v", rs.modelsByIdent)
+	}
+	d := detectDrift([]plannedCell{driftCell("T-01", "local", "gemma4-cascade", policyeval.EffortUnrecorded, 1)}, rs)
+	if len(d.modelDrift) != 1 {
+		t.Fatalf("the model-less row must still trip the tier: %+v", d)
+	}
+	if len(d.recordedModels) != 1 || d.recordedModels[0] != modelUnrecorded {
+		t.Fatalf("the refusal must NAME the condition, got %v", d.recordedModels)
 	}
 }
 

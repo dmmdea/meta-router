@@ -8,7 +8,9 @@ package main
 // (trimmed lane registration, non_evidence_oracle_rows, the zero-config
 // diagnostics, the eval-set resolution tier) were all invisible to the suite.
 //
-// Probes never run: -route is never passed, so nothing spawns.
+// Probes never run: -route is never passed, so nothing spawns; and every run
+// pins MR_ORCH_STATE to the test's own temp dir, so the rank table under test
+// is the fixture's, never the machine's.
 
 import (
 	"encoding/json"
@@ -21,10 +23,32 @@ import (
 )
 
 var (
+	orchOnce sync.Once
+	orchBin  string
+	orchDir  string
+	orchOut  string
+	orchErr  error
+
 	scBuildOnce sync.Once
 	scBin       string
+	scBuildDir  string
+	scBuildOut  string
 	scBuildErr  error
 )
+
+// TestMain owns the build directory's lifetime: sync.Once means no single
+// test can, and without it every suite run leaked a temp dir holding a
+// multi-MB binary (review round 4).
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if scBuildDir != "" {
+		_ = os.RemoveAll(scBuildDir)
+	}
+	if orchDir != "" {
+		_ = os.RemoveAll(orchDir)
+	}
+	os.Exit(code)
+}
 
 func scorecardBin(t *testing.T) string {
 	t.Helper()
@@ -34,20 +58,48 @@ func scorecardBin(t *testing.T) string {
 			scBuildErr = err
 			return
 		}
-		scBin = filepath.Join(dir, "mr-scorecard-test.exe")
-		out, err := exec.Command("go", "build", "-o", scBin, ".").CombinedOutput()
-		if err != nil {
-			scBuildErr = err
-			scBin = string(out)
+		scBuildDir = dir
+		bin := filepath.Join(dir, "mr-scorecard-test.exe")
+		// scBuildOut, never scBin: overwriting a variable whose declared
+		// meaning is a PATH with compiler stdout is a trap for the next reader.
+		if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+			scBuildErr, scBuildOut = err, string(out)
+			return
 		}
+		scBin = bin
 	})
 	if scBuildErr != nil {
-		t.Fatalf("go build: %v\n%s", scBuildErr, scBin)
+		t.Fatalf("go build: %v\n%s", scBuildErr, scBuildOut)
 	}
 	return scBin
 }
 
-const scGoldset = `{"id":"T-01","class":"research","split":"tuning","repo":"meta-router","prompt":"p1","verify":{"kind":"pure","keys":[{"name":"k","pattern":"x"}]}}
+// orchestrateBin builds the ROUTER binary the zoo needs for its baseline.
+// The router is deterministic and LLM-free (B2) and `route` is a local
+// sub-ms decision with -no-receipt, so this stays zero-spend.
+func orchestrateBin(t *testing.T) string {
+	t.Helper()
+	orchOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "mr-orch-int-*")
+		if err != nil {
+			orchErr = err
+			return
+		}
+		orchDir = dir
+		bin := filepath.Join(dir, "mr-orchestrate-test.exe")
+		if out, err := exec.Command("go", "build", "-o", bin, "../mr-orchestrate").CombinedOutput(); err != nil {
+			orchErr, orchOut = err, string(out)
+			return
+		}
+		orchBin = bin
+	})
+	if orchErr != nil {
+		t.Fatalf("go build mr-orchestrate: %v\n%s", orchErr, orchOut)
+	}
+	return orchBin
+}
+
+const scGoldset = `{"id":"T-01","class":"research","split":"tuning","repo":"meta-router","prompt":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","verify":{"kind":"pure","keys":[{"name":"k","pattern":"x"}]}}
 {"id":"T-02","class":"research","split":"tuning","repo":"meta-router","prompt":"p2","verify":{"kind":"pure","keys":[{"name":"k","pattern":"x"}]}}
 {"id":"T-03","class":"research","split":"heldout","repo":"meta-router","prompt":"p3","verify":{"kind":"pure","keys":[{"name":"k","pattern":"x"}]}}
 `
@@ -69,6 +121,13 @@ type scArtifact struct {
 		PassRate       float64 `json:"pass_rate"`
 	} `json:"frontier"`
 	FrontierFreeUnmeasured int `json:"frontier_free_unmeasured_tasks"`
+	Zoo                    []struct {
+		Family          string  `json:"family"`
+		Chosen          string  `json:"chosen_config"`
+		TuningPassRate  float64 `json:"tuning_pass_rate"`
+		TuningDiverged  int     `json:"tuning_diverged"`
+		HeldoutDiverged int     `json:"heldout_diverged"`
+	} `json:"zoo"`
 }
 
 // scRun executes the built scorecard with MR_ORCH_STATE pointed at stateDir

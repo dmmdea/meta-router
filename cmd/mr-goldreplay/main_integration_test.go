@@ -9,9 +9,15 @@ package main
 // behaviors: the drift guard firing before the -plan-only exit, and the
 // output oracle opening only after the preflight and the guard.
 //
-// Zero-spend by construction: -orchestrate always points at a nonexistent
-// binary, so a run that passes the guard records spawn-error rows and
-// nothing dispatches.
+// Zero-spend by construction, enforced on BOTH axes rather than asserted:
+// EVERY intRun passes -orchestrate at a nonexistent path (so a run that
+// passes the guard records spawn-error rows and dispatches nothing), and
+// intRun pins MR_ORCH_STATE to a temp dir (so even an accidental dispatch
+// could not touch the operator's real ledger or receipts). The plan-only
+// cases relied on the plan-only early return alone — which is the very
+// behavior they exist to pin, so a regression there would have dispatched
+// through the REAL installed orchestrator against the REAL state dir
+// (review round 4).
 
 import (
 	"os"
@@ -25,8 +31,21 @@ import (
 var (
 	buildOnce sync.Once
 	builtBin  string
+	buildDir  string
+	buildOut  string
 	buildErr  error
 )
+
+// TestMain owns the build directory's lifetime: sync.Once means no single
+// test can, and without it every suite run leaked a temp dir holding a
+// multi-MB binary (review round 4).
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if buildDir != "" {
+		_ = os.RemoveAll(buildDir)
+	}
+	os.Exit(code)
+}
 
 func goldreplayBin(t *testing.T) string {
 	t.Helper()
@@ -36,15 +55,18 @@ func goldreplayBin(t *testing.T) string {
 			buildErr = err
 			return
 		}
-		builtBin = filepath.Join(dir, "mr-goldreplay-test.exe")
-		out, err := exec.Command("go", "build", "-o", builtBin, ".").CombinedOutput()
-		if err != nil {
-			buildErr = err
-			builtBin = string(out)
+		buildDir = dir
+		bin := filepath.Join(dir, "mr-goldreplay-test.exe")
+		// buildOut, never builtBin: overwriting a variable whose declared
+		// meaning is a PATH with compiler stdout is a trap for the next reader.
+		if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+			buildErr, buildOut = err, string(out)
+			return
 		}
+		builtBin = bin
 	})
 	if buildErr != nil {
-		t.Fatalf("go build: %v\n%s", buildErr, builtBin)
+		t.Fatalf("go build: %v\n%s", buildErr, buildOut)
 	}
 	return builtBin
 }
@@ -59,6 +81,9 @@ func intRun(t *testing.T, dir string, args ...string) (int, string, string) {
 	t.Helper()
 	cmd := exec.Command(goldreplayBin(t), args...)
 	cmd.Dir = dir
+	// The orchestrator state is pinned to the run's own temp dir: no test
+	// here may read or write the operator's real ledger, receipts or latches.
+	cmd.Env = append(os.Environ(), "MR_ORCH_STATE="+filepath.Join(dir, "state"))
 	var so, se strings.Builder
 	cmd.Stdout, cmd.Stderr = &so, &se
 	err := cmd.Run()
@@ -104,7 +129,7 @@ func TestIntegrationEffortDriftRefuses(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 (refusal)\nstderr: %s", code, se)
 	}
-	if !strings.Contains(se, "EFFORT DRIFT") || !strings.Contains(se, "drift:") {
+	if !strings.Contains(se, "EFFORT DRIFT") || !strings.Contains(se, "RE-SPENDS") {
 		t.Fatalf("refusal must name the drift: %s", se)
 	}
 	b, _ := os.ReadFile(oracle)
@@ -138,18 +163,20 @@ func TestIntegrationPlanOnlyIsReadOnlyAndShowsDrift(t *testing.T) {
 	dir, goldset, oracle := intFixture(t, legacyLocalRows)
 	code, so, _ := intRun(t, dir,
 		"-goldset", goldset, "-out", oracle, "-lanes", "local",
-		"-local-model", "gemma4-cascade", "-local-effort", "high", "-plan-only")
+		"-local-model", "gemma4-cascade", "-local-effort", "high", "-plan-only",
+		"-orchestrate", filepath.Join(dir, "no-such-orchestrate.exe"))
 	if code != 0 {
 		t.Fatalf("plan-only must exit 0, got %d", code)
 	}
-	if !strings.Contains(so, "DRIFT") || !strings.Contains(so, "would REFUSE") {
+	if !strings.Contains(so, "EFFORT DRIFT") || !strings.Contains(so, "would REFUSE") {
 		t.Fatalf("plan-only must show what a live run refuses on: %s", so)
 	}
 
 	fresh := filepath.Join(dir, "fresh.jsonl")
 	code, _, _ = intRun(t, dir,
 		"-goldset", goldset, "-out", fresh, "-lanes", "local",
-		"-local-model", "gemma4-cascade", "-local-effort", "unrecorded", "-plan-only")
+		"-local-model", "gemma4-cascade", "-local-effort", "unrecorded", "-plan-only",
+		"-orchestrate", filepath.Join(dir, "no-such-orchestrate.exe"))
 	if code != 0 {
 		t.Fatalf("plan-only exit = %d", code)
 	}

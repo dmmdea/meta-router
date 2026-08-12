@@ -684,7 +684,7 @@ func main() {
 	// either repo computes, records, or reads, on the artifact whose design
 	// brief names cap-blow accounting as one of the two facts that must hold
 	// (Q6 explicitly forbids asserting it uninstrumented; review 2026-08-12).
-	note := "Q6 quota gate: throttles/defers during replay are graceful degradation, not violations (cap-blow accounting is not instrumented here; this artifact asserts nothing about it). Unknown cells are holes (e.g. a lane's unfilled window), never imputed."
+	note := "Q6 quota gate: throttles/defers during replay are graceful degradation, not violations (cap-blow accounting is not instrumented here; this artifact asserts nothing about it). Unknown cells are holes (e.g. a lane's unfilled window), counted and never imputed IN THE POLICY ROWS. The frontier is the ONE exception and says so: a task measured only on the claude side is swept with an imputed free base of 0, because excluding it would drop its measured claude evidence and break the curve's envelope over the policy rows — frontier_free_unmeasured_tasks counts exactly those, and while it is nonzero the low-budget points are a LOWER BOUND, not a measurement."
 	var splitInfo *SplitInfo
 	if *split {
 		var notRankable []string
@@ -725,6 +725,11 @@ func main() {
 			CoveredModel: obsByModel[c.Lane+"|"+c.Model], CoveredEffort: n > 0})
 	}
 	frontier, frontierUnmeasured, frontierFreeUnmeasured := policyeval.Frontier(tb, evalIDs)
+	if frontierFreeUnmeasured > 0 {
+		// The artifact's one imputation, said out loud on the noisy channel
+		// too — a counter nobody reads discharges nothing (review round 4).
+		fmt.Fprintf(os.Stderr, "WARNING: the frontier imputes a free-lane base of 0 for %d task(s) measured only on the claude side — its low-budget points are a LOWER BOUND, not a measurement (frontier_free_unmeasured_tasks)\n", frontierFreeUnmeasured)
+	}
 	out := struct {
 		Margin    float64 `json:"margin"`
 		Ref       string  `json:"reference"`
@@ -743,15 +748,23 @@ func main() {
 		Reports     []PolicyReport   `json:"policies"`
 		Coverage    []ConfigCoverage `json:"config_coverage"`
 		// Frontier rates share the policies' denominator (all evaluated
-		// tasks); its budget axis spans only the sweepable tasks below.
+		// tasks); its budget axis spans only the tasks the sweep can place.
 		Frontier []policyeval.FrontierPoint `json:"frontier"`
-		// Tasks the frontier EXCLUDED for having no measured cell at all. The
-		// curve sweeps measured tasks only; imputing holes as zeros made an
-		// all-holes table and an all-failures table produce identical curves.
+		// Tasks the frontier EXCLUDED for having no measured cell at all —
+		// no evidence on either side, so nothing to place. Imputing them as
+		// zeros made an all-holes table and an all-failures table produce
+		// identical curves.
 		FrontierUnmeasured int `json:"frontier_unmeasured_tasks"`
-		// Tasks EXCLUDED for having no measured NON-claude cell: their free
-		// value (the curve's base) is unknown, and a zero base is the same
-		// hole-as-failure imputation one level down.
+		// Tasks SWEPT WITH AN IMPUTED FREE BASE OF 0: measured on the claude
+		// side only, so their free-lane value is unknown. They are NOT
+		// excluded — dropping them discarded measured claude evidence from
+		// the numerator while the shared denominator kept their slot, which
+		// let a policy row exceed the curve's own maximum (the envelope the
+		// frontier exists to draw). The imputation is the price of the
+		// envelope, and THIS COUNT is what discharges it: when it is nonzero,
+		// the low-budget points are a LOWER BOUND ("at least this"), not a
+		// measurement, because each such task's free side could only score
+		// higher than the 0 assumed for it.
 		FrontierFreeUnmeasured int    `json:"frontier_free_unmeasured_tasks"`
 		Note                   string `json:"note"`
 	}{*margin, "always-claude", refCfg.Key(), tblProvenance, malformed, nonEvidence, unranked, refUnmeasured, splitInfo, zooEntries, reports, cov, frontier, frontierUnmeasured, frontierFreeUnmeasured, note}
