@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -52,6 +53,11 @@ type Alternatives func(step Step, excludeLane string) (lane, model, effort strin
 type ExecConfig struct {
 	MaxConcurrency int // default 2
 	ReLaneMaxDepth int // default 1
+	// CompactionOff disables W5's lossless embed-time dep-context compaction
+	// (kill-switch; the mechanism ships ON because it is provably lossless —
+	// DG-3: anything lossy would instead be gated behind a fidelity eval and
+	// does not exist in this repo).
+	CompactionOff bool
 }
 
 // ── S3R-8: honest failure taxonomy ─────────────────────────────────────────
@@ -200,9 +206,23 @@ func Execute(dir string, run NodeRunner, resolve Resolve, alt Alternatives, cfg 
 			if err := Journal(dir, "step_started", s.ID, ts); err != nil {
 				return fmt.Errorf("journal step_started %d: %w", s.ID, err)
 			}
-			ctx, cerr := ResolveContext(dir, s.Deps, st.StepStatus)
+			var ctx string
+			var saved int
+			var cerr error
+			if cfg.CompactionOff {
+				ctx, cerr = ResolveContext(dir, s.Deps, st.StepStatus)
+			} else {
+				// W5: lossless embed-time compaction; stored artifacts untouched.
+				ctx, saved, cerr = ResolveContextCompact(dir, s.Deps, st.StepStatus)
+			}
 			if cerr != nil {
 				ctx = "" // fail-open: a missing dep artifact degrades to no context
+			}
+			if saved > 0 {
+				// The R14 side-effect metric: savings are REPORTED, never the
+				// goal. Best-effort — a journal hiccup must not fail the step.
+				_ = JournalDetail(dir, "ctx_compacted", s.ID,
+					fmt.Sprintf("lossless dep-context compaction saved %d bytes (W5; stored artifacts untouched)", saved), ts)
 			}
 			// S3R-10a: a root/solo node with NO dep context gets the BARE instruction
 			// — never a dangling "\n" separator — so the 1-node solo DAG is
@@ -211,6 +231,11 @@ func Execute(dir string, run NodeRunner, resolve Resolve, alt Alternatives, cfg 
 			prompt := s.Instruction
 			if ctx != "" {
 				prompt = s.Instruction + "\n" + ctx
+			}
+			// W5 context handoff: a re-laned retry carries what the FAILED
+			// attempt learned — the new lane starts from state, not cold.
+			if ss := st.StepStatus[s.ID]; ss != nil && ss.Handoff != "" {
+				prompt += "\n<handoff prior-attempt>\n" + ss.Handoff + "\n</handoff>"
 			}
 			wg.Add(1)
 			go func() {
@@ -233,6 +258,38 @@ func Execute(dir string, run NodeRunner, resolve Resolve, alt Alternatives, cfg 
 	}
 
 	return finalize(dir, now)
+}
+
+// buildHandoff serializes the failed attempt's state for the re-laned retry:
+// compact JSON with the from-lane, outcome class, attempt number, and a
+// rune-safe bounded excerpt of the failed result (enough to say WHAT went
+// wrong, never the whole transcript — the handoff is a briefing, not a log).
+func buildHandoff(r NodeResult, attempt int) string {
+	h := map[string]any{
+		"from_lane":     r.Lane,
+		"outcome_class": r.OutcomeClass,
+		"attempt":       attempt,
+	}
+	if r.ResultContent != "" {
+		h["result_excerpt"] = runeExcerpt(r.ResultContent, 600)
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		return "" // a handoff is advisory; the retry still runs cold
+	}
+	return string(b)
+}
+
+// runeExcerpt caps s at n runes without splitting a UTF-8 sequence.
+func runeExcerpt(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	rs := []rune(s)
+	if len(rs) <= n {
+		return s
+	}
+	return string(rs[:n]) + "…"
 }
 
 // persistOutcome records one node's result. A genuine hard-fail (S3R-8
@@ -262,6 +319,9 @@ func persistOutcome(dir string, s Step, r NodeResult, cfg ExecConfig, alt Altern
 			if err := JournalDetail(dir, "replan", s.ID, detail, fin); err != nil {
 				return fmt.Errorf("journal replan step %d: %w", s.ID, err)
 			}
+			// W5 context handoff: carry what the failed attempt learned to the
+			// alternative lane — compacted, bounded, and honest about origin.
+			handoff := buildHandoff(r, curAttempt)
 			// bounded reactive re-lane: bump Attempt, clear the started/outcome so
 			// readySet re-picks it next wave on the alternative lane. The failed
 			// attempt's receipt was already written by the runner; the retry writes a
@@ -271,6 +331,7 @@ func persistOutcome(dir string, s Step, r NodeResult, cfg ExecConfig, alt Altern
 				ss.Attempt = curAttempt + 1
 				ss.OutcomeClass = ""
 				ss.StartedAt = nil
+				ss.Handoff = handoff
 			}, fin); err != nil {
 				return fmt.Errorf("reset for re-lane step %d: %w", s.ID, err)
 			}

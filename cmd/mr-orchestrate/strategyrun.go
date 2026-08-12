@@ -398,7 +398,7 @@ func driveDispatch(id string, resume bool) error {
 	// supervisor was frozen under laptop sleep, Execute steps aside instead of
 	// re-dispatching a wave the reaper already dispatched (double-spend on wake).
 	err := strategy.Execute(dir, prodNodeRunner(id, prodAlternatives), prodResolve, prodAlternatives,
-		strategy.ExecConfig{MaxConcurrency: cfg.StrategyMaxConcurrency, ReLaneMaxDepth: 1},
+		strategy.ExecConfig{MaxConcurrency: cfg.StrategyMaxConcurrency, ReLaneMaxDepth: 1, CompactionOff: cfg.CompactionOff},
 		func() time.Time { return time.Now().UTC() },
 		// State predicate: still ours iff the (locked/loaded) state records THIS pid.
 		// No Load inside — the executor supplies the state, so a transient Windows

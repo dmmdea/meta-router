@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/dmmdea/meta-router/internal/orch/compact"
 )
 
 type Artifact struct {
@@ -64,9 +66,26 @@ func ReadArtifact(ref string) (Artifact, error) {
 // A root node (no deps) gets an empty block, so its prompt is the bare
 // instruction with no injected context.
 func ResolveContext(dir string, deps []int, st map[int]*StepState) (string, error) {
+	s, _, err := resolveContext(dir, deps, st, false)
+	return s, err
+}
+
+// ResolveContextCompact is ResolveContext with W5's LOSSLESS embed-time
+// compaction: a dep whose artifact content is JSON is embedded in its
+// compacted form (minified + columnar rotation — provable round-trip, see
+// internal/orch/compact). The STORED artifact is never rewritten, so the
+// original bytes stay recoverable regardless; savings are the returned
+// byte count (the R14 side-effect metric — reported, never the goal).
+// Prose content embeds byte-identical: only JSON has a lossless compact form.
+func ResolveContextCompact(dir string, deps []int, st map[int]*StepState) (string, int, error) {
+	return resolveContext(dir, deps, st, true)
+}
+
+func resolveContext(dir string, deps []int, st map[int]*StepState, compactOn bool) (string, int, error) {
 	if len(deps) == 0 {
-		return "", nil
+		return "", 0, nil
 	}
+	saved := 0
 	var b strings.Builder
 	for _, d := range deps {
 		ss := st[d]
@@ -76,9 +95,16 @@ func ResolveContext(dir string, deps []int, st map[int]*StepState) (string, erro
 		}
 		a, err := ReadArtifact(ss.ResultRef)
 		if err != nil {
-			return "", fmt.Errorf("resolve context for dep %d: %w", d, err)
+			return "", 0, fmt.Errorf("resolve context for dep %d: %w", d, err)
 		}
-		fmt.Fprintf(&b, "<context from=step-%d>\n%s\n</context>\n", d, a.Content)
+		content := a.Content
+		if compactOn {
+			if c, applied := compact.Compact(content); applied && len(c) < len(content) {
+				saved += len(content) - len(c)
+				content = c
+			}
+		}
+		fmt.Fprintf(&b, "<context from=step-%d>\n%s\n</context>\n", d, content)
 	}
-	return b.String(), nil
+	return b.String(), saved, nil
 }

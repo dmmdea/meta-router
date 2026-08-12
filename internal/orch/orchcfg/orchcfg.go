@@ -85,6 +85,11 @@ type Config struct {
 	// 0 = absent field → default 20; negative = limiter OFF (explicit
 	// operator intent, distinguishable from hand-edit zero damage).
 	LocalMaxPerMin int `json:"local_max_per_min"`
+
+	// CompactionOff (W5) disables the LOSSLESS embed-time dep-context
+	// compaction in strategy DAGs. Ships ON: the transform is provably
+	// round-trippable (DG-3 lossless-first; nothing lossy exists here).
+	CompactionOff bool `json:"compaction_off"`
 }
 
 func Defaults() Config {
