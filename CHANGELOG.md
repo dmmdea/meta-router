@@ -4,6 +4,12 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.28.2] — 2026-08-12
+
+### Fixed
+- **The scorecard's reference config was non-deterministic.** `seedConfigs` resolves a lane to its best-ranked config, but `router.Seed()` is a **map** and rank *ties* were broken by Go's randomized iteration order. Two runs over identical input resolved the claude reference to `claude-opus-4-8|xhigh` and then `|high` — silently changing the reference, and therefore every quality ratio, run to run. Ties now break on the config key, the same total-order rule `betterPick` already enforces on the routing side. The test repeats the call 200× because a single call cannot observe the randomization; verified red under the exact mutation.
+- Caught by running the weekly driver twice and comparing its two alerts — not by any test.
+
 ## [0.28.1] — 2026-08-12
 
 ### Fixed
