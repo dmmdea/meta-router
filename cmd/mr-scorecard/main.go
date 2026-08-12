@@ -90,6 +90,16 @@ type ConfigCoverage struct {
 	CoveredEffort bool   `json:"covered_effort"` // evidence for the full cell
 }
 
+// ReferenceGap marks a scorecard whose REFERENCE policy has no evidence. Its
+// presence means the comparative verdicts are undefined rather than negative —
+// a distinction the artifact could not otherwise express, since an
+// uncomputed ratio and a genuinely-1.0 one both serialize as absent/zero.
+type ReferenceGap struct {
+	Config  string `json:"config"`
+	Tasks   int    `json:"evaluated_tasks"`
+	Message string `json:"message"`
+}
+
 // PolicyReport is one row of the scorecard.
 type PolicyReport struct {
 	Policy         string  `json:"policy"`
@@ -304,7 +314,29 @@ func main() {
 		}
 	}
 
-	ref := policyeval.Evaluate(tb, evalIDs, policyeval.Fixed(resolve("claude")))
+	refCfg := resolve("claude")
+	ref := policyeval.Evaluate(tb, evalIDs, policyeval.Fixed(refCfg))
+	// The reference is now a CONFIG, and a config can be unmeasured. When it
+	// is, EVERY derived number below (quality ratio, its CI, the sign-flip p,
+	// the non-inferiority verdict) is skipped by the `ref.PassRate > 0` guard
+	// — silently, in the artifact's normal shape. That is the whole scorecard
+	// answering nothing while looking like it answered.
+	//
+	// Reachable on day one, not hypothetically: the rank table ranks
+	// claude-opus-4-8 first for the claude lane and the oracle has zero rows
+	// for it, so the reference resolved to a cell with no evidence and all 56
+	// verdicts vanished. Caught by running the deployed binary, not by a test.
+	// Say it loudly on both channels rather than emitting a mute artifact.
+	var refUnmeasured *ReferenceGap
+	if ref.Unknown == len(evalIDs) && len(evalIDs) > 0 {
+		refUnmeasured = &ReferenceGap{
+			Config:  refCfg.Key(),
+			Tasks:   len(evalIDs),
+			Message: "the reference config has NO evidence in this oracle: every quality_ratio, CI, sign_flip_p and non_inferior_at_margin below is UNDEFINED, not computed. Measure this config (mr-goldreplay) or point -oracle at a run that covers it.",
+		}
+		fmt.Fprintf(os.Stderr, "WARNING: reference %s is unmeasured across all %d evaluated tasks — the non-inferiority verdict is UNDEFINED, not false.\n",
+			refCfg.Key(), len(evalIDs))
+	}
 	var reports []PolicyReport
 	for name, p := range policies {
 		ev := policyeval.Evaluate(tb, evalIDs, p)
@@ -386,13 +418,15 @@ func main() {
 	out := struct {
 		Margin   float64                    `json:"margin"`
 		Ref      string                     `json:"reference"`
+		RefCfg   string                     `json:"reference_config"`
+		RefGap   *ReferenceGap              `json:"reference_unmeasured,omitempty"`
 		Split    *SplitInfo                 `json:"split,omitempty"`
 		Zoo      []ZooEntry                 `json:"zoo,omitempty"`
 		Reports  []PolicyReport             `json:"policies"`
 		Coverage []ConfigCoverage           `json:"config_coverage"`
 		Frontier []policyeval.FrontierPoint `json:"frontier"`
 		Note     string                     `json:"note"`
-	}{*margin, "always-claude", splitInfo, zooEntries, reports, cov, policyeval.Frontier(tb, evalIDs), note}
+	}{*margin, "always-claude", refCfg.Key(), refUnmeasured, splitInfo, zooEntries, reports, cov, policyeval.Frontier(tb, evalIDs), note}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)

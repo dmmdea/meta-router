@@ -4,6 +4,12 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.28.1] — 2026-08-12
+
+### Fixed
+- **An unmeasured reference config silently voided every comparative verdict.** Plan 1 made the scorecard's reference a *config*, and a config can have no evidence: the rank table ranks `claude-opus-4-8` first for the claude lane, the oracle has **zero** rows for it, so `always-claude` resolved to an empty cell, `ref.PassRate` was 0, and the `ref.PassRate > 0` guard skipped every `quality_ratio`, its CI, `sign_flip_p` and `non_inferior_at_margin` — while the artifact kept its normal shape. An uncomputed verdict and a failed one were indistinguishable. The scorecard now always emits `reference_config`, and emits a `reference_unmeasured` block plus a stderr `WARNING` when the reference has no evidence across every evaluated task, so **undefined** can no longer be read as **not non-inferior**.
+- Found by running the **deployed** binary against the real oracle immediately after the deploy — not by any test. The underlying gap (the scorecard has no end-to-end artifact assertion) is recorded in the budget note.
+
 ## [0.28.0] — 2026-08-12
 
 ### Added — Plan 1: the evidence cell is `(lane, model, effort)` (charter queue item 5)
