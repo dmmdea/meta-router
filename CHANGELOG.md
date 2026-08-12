@@ -4,6 +4,19 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.31.0] — 2026-08-12
+
+### Fixed — the CRITICALs from a review OF the v0.30.0 fix round
+A 50-agent adversarial review (36 findings confirmed after independent refutation) predicted the fix round would re-enter the pattern it fixed. **It did — in the same file, three lines below a comment instructing otherwise.**
+
+- **The verdict is now tri-state.** Making the four derived statistics pointers moved the absent/zero conflation off the *inputs* and straight onto the *output*: `NonInferior` stayed a plain `bool`, so "could not compute" and "measured and failed the gate" were the same byte. Reproduced: a candidate that beat the reference **6-0** was reported `non_inferior_at_margin: false` with no statistics and no note, and the weekly driver printed `ALARM: lost non-inferiority (ratio , CI lo )` with blank numbers. `non_inferior_at_margin` is now nullable, with `verdict_undefined` naming which of the three causes applies: no paired evidence, too-thin n, or a reference that is measured and scores zero (a ratio against zero is undefined — the candidate is not worse, there is nothing to divide by).
+- **A minimum paired n.** `BootstrapCI` degenerates to **zero width** at n=1, so a single tied shared task produced `ratio_ci_lo` exactly 1.0 and the gate went **green** — a false green that *silences* the weekly regression alarm, on precisely the sparse oracle that most needs it. That is the v0.29.0 CRITICAL re-entered through its own fix.
+- **`-plan-only` was blind to the hazard it exists to reveal.** It returned *before* the resume guard, so the pre-flight the guard's own error message tells you to run could not show the mismatch. Detection now precedes the exit, and both paths print the recorded-cell count and the mismatch.
+- **One evidence definition, shared.** `loadDone` treated only `deferred` as a hole while the scorecard's `ran()` also excludes `error`/`exit-N`, so those cells were simultaneously "already recorded" (resume never refilled them) and "not evidence" (scoring ignored them) — a hole that could never fill. **Consequence to expect:** ~4 live cells become re-attemptable; `-plan-only` shows them before they cost anything.
+
+### Fixed — the ops weekly driver was silently dropping every effort pin
+`ops/mr-weekly-replay.ps1` had the pins inside a backtick line-continuation that a **comment block terminates**. PowerShell ends the command at the comment: the replay ran with model pins only and the remainder became a separate bogus statement. It still *parses*, so the parser check used when this was introduced could not catch it. Verified by capturing the real argv through a shim — now one command carrying all four pins and the tail. `scripts/a2-weekly-replay.ps1` was checked the same way and was always correct.
+
 ## [0.30.0] — 2026-08-12
 
 ### Fixed — the rest of the Stage-2b review

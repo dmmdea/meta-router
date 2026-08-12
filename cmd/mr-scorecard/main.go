@@ -30,6 +30,12 @@ import (
 
 const version = "0.1.0"
 
+// minPairedN is the floor below which a non-inferiority verdict is refused.
+// BootstrapCI degenerates to zero width at very small n, so a lucky tie
+// clears any margin. Not a statistical threshold — a refusal to dress a
+// coincidence as the pre-registered verdict.
+const minPairedN = 8
+
 type oracleRow struct {
 	Task  string `json:"task"`
 	Class string `json:"class"`
@@ -193,7 +199,10 @@ type PolicyReport struct {
 	ClaudeFraction float64  `json:"claude_fraction"`
 	RCI            float64  `json:"rci"`
 	Unknown        int      `json:"unknown_cells"`
-	NonInferior    bool     `json:"non_inferior_at_margin"`
+	NonInferior    *bool    `json:"non_inferior_at_margin"`
+	// VerdictUndefined says WHY there is no verdict. Present exactly when
+	// NonInferior is nil.
+	VerdictUndefined string `json:"verdict_undefined,omitempty"`
 	// Configs names the evidence cells this row's numbers belong to, sorted.
 	// A fixed policy has one; a per-task policy (oracle-best, router-live)
 	// has several. Without it a reader cannot tell WHICH model a pass_rate
@@ -497,19 +506,42 @@ func main() {
 			evPaired += ev.PerTask[id]
 		}
 		rep.PairedN = len(paired)
-		if rep.PairedN > 0 && refPaired > 0 {
+		// The verdict is TRI-STATE. Leaving NonInferior a plain bool made
+		// "we could not compute this" and "measured, and it failed the gate"
+		// the same byte — so the previous round moved the absent/zero
+		// conflation off the inputs (now pointers) and straight onto the
+		// output. A nil verdict means UNDEFINED and every consumer must
+		// branch on it.
+		switch {
+		case rep.PairedN == 0:
+			rep.VerdictUndefined = "no task has evidence for BOTH this policy and the reference"
+		case rep.PairedN < minPairedN:
+			// A single shared task yields a ZERO-WIDTH bootstrap CI (the
+			// degenerate branch returns (d,d)), so a tie scores ci_lo exactly
+			// 1.0 and the gate goes GREEN — silencing the weekly regression
+			// alarm on the very oracle that has almost no shared evidence.
+			// The margin was pre-registered for n≈55; refuse rather than
+			// dress a 1-task coincidence as that verdict.
+			rep.VerdictUndefined = fmt.Sprintf("only %d paired task(s); the margin is pre-registered for a full set and a CI this narrow is degenerate, not strong (minimum %d)", rep.PairedN, minPairedN)
+		case refPaired == 0:
+			// The reference was MEASURED and scored zero. A ratio against it
+			// is a division by zero, not a failure — and a policy that beat
+			// it 6-0 was being reported as non_inferior:false.
+			rep.VerdictUndefined = "the reference is measured and scores 0 on every paired task: a quality RATIO against it is undefined (the candidate is not worse — there is nothing to divide by)"
+		default:
 			refMean := refPaired / float64(rep.PairedN)
 			ratio := (evPaired / float64(rep.PairedN)) / refMean
 			lo, hi := policyeval.BootstrapCI(paired, 0.95, *iters, 42)
 			ciLo, ciHi := (refMean+lo)/refMean, (refMean+hi)/refMean
 			p := policyeval.SignFlipP(paired, *iters, 42)
 			rep.QualityRatio, rep.RatioCILo, rep.RatioCIHi, rep.SignFlipP = &ratio, &ciLo, &ciHi, &p
-			rep.NonInferior = ciLo >= 1-*margin && ev.ClaudeFraction < 1
+			verdict := ciLo >= 1-*margin && ev.ClaudeFraction < 1
+			rep.NonInferior = &verdict
 		}
 		// A verdict computed on a handful of shared tasks is not the verdict
 		// the margin was pre-registered for; say so rather than let a thin n
 		// pass as the real thing.
-		if rep.PairedN < len(evalIDs) {
+		if rep.PairedN > 0 && rep.PairedN < len(evalIDs) {
 			rep.PairedNote = fmt.Sprintf("verdict computed on the %d/%d tasks where BOTH this policy and the reference have evidence",
 				rep.PairedN, len(evalIDs))
 		}
@@ -518,7 +550,8 @@ func main() {
 			// has seen: the in-sample ceiling. Marked, and its verdict is
 			// suppressed so the artifact can never present it as deployable.
 			rep.InSample = true
-			rep.NonInferior = false
+			rep.NonInferior = nil
+			rep.VerdictUndefined = "in-sample ceiling: this policy saw the cells it is scored on, so its verdict is not a deployability claim"
 		}
 		reports = append(reports, rep)
 	}

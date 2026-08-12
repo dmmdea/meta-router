@@ -64,6 +64,21 @@ func rowKey(task, lane, model, effort string, trial int) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%d", task, lane, model, effort, trial)
 }
 
+// rowIsEvidence is the ONE definition of "this cell was measured", shared by
+// the resume set here and mirrored by mr-scorecard's oracleRow.ran. A cell
+// that did not dispatch, deferred, or ended in an error/exit-N is a HOLE:
+// never counted as measurement, and always re-attemptable.
+func rowIsEvidence(r Row) bool {
+	if !r.Dispatched {
+		return false
+	}
+	switch r.OutcomeClass {
+	case "deferred", "error", "spawn_error", "config_error", "parse_error", "api_error":
+		return false
+	}
+	return !strings.HasPrefix(r.OutcomeClass, "exit-")
+}
+
 // loadDone reads an existing oracle file and returns the set of recorded
 // (task,lane,model,effort,trial) keys, so a rerun only fills the holes.
 //
@@ -82,7 +97,14 @@ func loadDone(path string) map[string]bool {
 			continue
 		}
 		var r Row
-		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && r.OutcomeClass != "deferred" {
+		// The SAME evidence definition the scorecard applies (oracleRow.ran).
+		// Treating only "deferred" as a hole left error/exit-N cells
+		// simultaneously "already recorded" (resume never refills them) and
+		// "not evidence" (the scorecard and B15 ignore them) — a hole that
+		// can never fill. They are holes on BOTH sides now, so a rerun
+		// re-attempts them; -plan-only shows the count before it costs
+		// anything (review 2026-08-12).
+		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && rowIsEvidence(r) {
 			// A deferred row is a HOLE (admission was closed), not an
 			// observation — resume must refill it when the window reopens.
 			done[rowKey(r.Task, r.Lane, r.Model, policyeval.NormalizeEffort(r.Effort), r.Trial)] = true
@@ -289,9 +311,23 @@ func main() {
 	// an unattended weekly driver never reads.
 	fmt.Fprintf(os.Stderr, "plan: %d cells (%d to run, %d already recorded)\n",
 		plan.Total, len(plan.Run), plan.Skipped)
+	// The mismatch is detected BEFORE the plan-only exit. -plan-only is the
+	// pre-flight the guard's own error message tells you to run, so it must
+	// SHOW the condition the guard trips on; returning first made the safety
+	// tool structurally blind to the hazard it exists to reveal.
+	resumeMismatch := len(done) > 0 && plan.Skipped == 0 && len(plan.Run) > 0
+	if len(done) > 0 {
+		fmt.Fprintf(os.Stderr, "resume: %d recorded cell(s) in the output oracle, %d matched this run's keys\n", len(done), plan.Skipped)
+	}
+	if resumeMismatch {
+		fmt.Fprintf(os.Stderr, "RESUME MISMATCH: none of the %d recorded cells match the (task, lane, model, EFFORT, trial) keys this run would write\n", len(done))
+	}
 	if *planOnly {
-		fmt.Printf("plan-only: %d cells (%d would run, %d already recorded) → %s\n",
-			plan.Total, len(plan.Run), plan.Skipped, *outPath)
+		fmt.Printf("plan-only: %d cells (%d would run, %d already recorded, %d recorded in file) → %s\n",
+			plan.Total, len(plan.Run), plan.Skipped, len(done), *outPath)
+		if resumeMismatch {
+			fmt.Printf("plan-only: RESUME MISMATCH — a live run would REFUSE (pass -re-measure to override)\n")
+		}
 		return
 	}
 
@@ -304,7 +340,7 @@ func main() {
 	// The tell is unambiguous: a non-empty resume set that matched NOTHING.
 	// That is either a genuine first run against someone else's oracle or a
 	// key mismatch, and the safe reading is the expensive one.
-	if len(done) > 0 && plan.Skipped == 0 && len(plan.Run) > 0 {
+	if resumeMismatch {
 		if !*reMeasure {
 			fatal("resume matched NOTHING: the output oracle already holds %d recorded cells, "+
 				"but none match the (task, lane, model, EFFORT, trial) keys this run would write, "+
