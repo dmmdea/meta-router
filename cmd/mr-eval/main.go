@@ -184,10 +184,12 @@ func main() {
 func printTable(title string, results []eval.Metrics) {
 	fmt.Println()
 	fmt.Println(title + ":")
-	fmt.Printf("| retriever     | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n")
-	fmt.Printf("|---------------|----------|----------|----------|-------|-----------|\n")
+	// 34 wide: identity-carrying labels ("hybrid-rrf-embeddinggemma/tpl1",
+	// "embed-egemma+rerank-qwen3-reranker-4b/tpl1") must not shear the table.
+	fmt.Printf("| %-34s | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n", "retriever")
+	fmt.Printf("|------------------------------------|----------|----------|----------|-------|-----------|\n")
 	for _, m := range results {
-		fmt.Printf("| %-13s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n",
+		fmt.Printf("| %-34s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n",
 			m.Retriever,
 			m.RecallAt[1],
 			m.RecallAt[3],

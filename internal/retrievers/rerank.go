@@ -61,7 +61,21 @@ func NewEmbedRerank(primary scoredNamed, skills []catalog.Skill, endpoint string
 	return &EmbedRerank{primary: primary, docByID: docs, endpoint: endpoint, timeout: timeout, rspec: rspec}
 }
 
-func (e *EmbedRerank) Name() string { return "embed+rerank" }
+// Name keeps the historical "embed+rerank" for the production shape
+// (untemplated embeddinggemma primary + raw bge) and derives every other
+// combination from the primary's identity-carrying label plus the reranker's
+// own — two arms differing only by template or reranker formatting must never
+// share a results-table label (the Embed.Name rule, applied to this sibling).
+func (e *EmbedRerank) Name() string {
+	rr := e.rspec.Model
+	if e.rspec.Version != "" {
+		rr += "/" + e.rspec.Version
+	}
+	if e.primary.Name() == "embed-egemma" && rr == DefaultRerankModel {
+		return "embed+rerank"
+	}
+	return e.primary.Name() + "+rerank-" + rr
+}
 
 // Retrieve pulls rerankDepth candidates from the primary, re-scores them with
 // the cross-encoder, and returns the top k IDs by relevance (ties broken by

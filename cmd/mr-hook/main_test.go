@@ -7,6 +7,7 @@ import (
 
 	"github.com/dmmdea/meta-router/internal/catalog"
 	"github.com/dmmdea/meta-router/internal/retrievers"
+	"github.com/dmmdea/meta-router/internal/usagelog"
 )
 
 type fakePrimary struct {
@@ -192,17 +193,38 @@ func TestFormatContext_UsesInvocableID(t *testing.T) {
 	}
 }
 
-// The deadline branch must FOLD INTO an existing attribution, never replace
-// it: overwriting erased the only record that a tpl-mismatched index needs a
-// rebuild whenever the quota-hint read overran (review 2026-08-16).
-func TestAppendDeadlinePreservesAttribution(t *testing.T) {
-	if got := appendDeadline(""); got != "deadline exceeded" {
+// The deadline branch must FOLD INTO an existing attribution at the RECORD
+// level, never replace it: overwriting erased the only record that a
+// tpl-mismatched index needs a rebuild whenever the quota-hint read overran
+// (review 2026-08-16; round 2 proved the pure-function test alone left the
+// call site a mutation survivor, so this exercises the record the branch
+// actually stamps).
+func TestStampDeadlinePreservesAttribution(t *testing.T) {
+	prior := "index identity: index built with embedding template embeddinggemma/tpl9, unknown to this binary"
+	rec := usagelog.Record{Mode: "tpl-mismatch", Err: prior}
+	stampDeadline(&rec)
+	if rec.Mode != "error" {
+		t.Fatalf("mode: %q", rec.Mode)
+	}
+	if !strings.Contains(rec.Err, prior) || !strings.Contains(rec.Err, "deadline exceeded") {
+		t.Fatalf("attribution lost: %q", rec.Err)
+	}
+	fresh := usagelog.Record{}
+	stampDeadline(&fresh)
+	if fresh.Err != "deadline exceeded" || fresh.Mode != "error" {
+		t.Fatalf("fresh record: %+v", fresh)
+	}
+}
+
+// joinErr never drops a cause on conflict — the round-2 finding: a pre-set
+// -ranker notice permanently masked the primary retriever's failure.
+func TestJoinErrKeepsBothCauses(t *testing.T) {
+	if got := joinErr("", "b"); got != "b" {
 		t.Fatalf("empty prior: %q", got)
 	}
-	prior := "index identity: index built with embedding template embeddinggemma/tpl9, unknown to this binary"
-	got := appendDeadline(prior)
-	if !strings.Contains(got, prior) || !strings.Contains(got, "deadline exceeded") {
-		t.Fatalf("attribution lost: %q", got)
+	got := joinErr("unknown -ranker \"bogus\" — running embed", "primary retriever: boom")
+	if !strings.Contains(got, "unknown -ranker") || !strings.Contains(got, "primary retriever: boom") {
+		t.Fatalf("a cause was dropped: %q", got)
 	}
 }
 

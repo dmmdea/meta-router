@@ -162,6 +162,38 @@ func TestEmbedNameCarriesTemplateVersion(t *testing.T) {
 	}
 }
 
+// Label canary for EVERY spec-taking retriever: two arms differing only by
+// template must never share a results-table label (round 2: the Embed fix
+// alone left Hybrid and EmbedRerank collapsing their raw and tpl1 arms).
+func TestRetrieverNamesDifferAcrossSpecs(t *testing.T) {
+	raw := embedtpl.Raw("embeddinggemma")
+	tpl, _ := embedtpl.Lookup("embeddinggemma", embedtpl.TplV1)
+	skills := []catalog.Skill{{ID: "s1", Name: "n1", Description: "d1"}}
+
+	if a, b := (&Hybrid{embed: NewEmbedFromVectors(nil, nil, "http://127.0.0.1:1", time.Second, raw)}).Name(),
+		(&Hybrid{embed: NewEmbedFromVectors(nil, nil, "http://127.0.0.1:1", time.Second, tpl)}).Name(); a == b {
+		t.Fatalf("hybrid labels collapse: %q", a)
+	}
+	rawEmb := NewEmbedFromVectors(nil, nil, "http://127.0.0.1:1", time.Second, raw)
+	tplEmb := NewEmbedFromVectors(nil, nil, "http://127.0.0.1:1", time.Second, tpl)
+	bge := embedtpl.RerankRaw(DefaultRerankModel)
+	if a, b := NewEmbedRerank(rawEmb, skills, "e", time.Second, bge).Name(),
+		NewEmbedRerank(tplEmb, skills, "e", time.Second, bge).Name(); a == b {
+		t.Fatalf("embed+rerank labels collapse across embed specs: %q", a)
+	}
+	if a, b := NewEmbedRerank(rawEmb, skills, "e", time.Second, bge).Name(),
+		NewEmbedRerank(rawEmb, skills, "e", time.Second, embedtpl.RerankFor("qwen3-reranker-4b")).Name(); a == b {
+		t.Fatalf("embed+rerank labels collapse across rerank specs: %q", a)
+	}
+	// Historical production labels stay stable.
+	if got := NewEmbedRerank(rawEmb, skills, "e", time.Second, bge).Name(); got != "embed+rerank" {
+		t.Fatalf("production rerank label changed: %q", got)
+	}
+	if got := (&Hybrid{embed: rawEmb}).Name(); got != "hybrid-rrf" {
+		t.Fatalf("production hybrid label changed: %q", got)
+	}
+}
+
 // Rerank side: model id, formatted query, and formatted docs on the wire.
 func TestRerankFormattingReachesTheWire(t *testing.T) {
 	var gotModel, gotQuery string

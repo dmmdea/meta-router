@@ -42,7 +42,16 @@ func NewHybridFromIndex(skills []catalog.Skill, vecs [][]float64, endpoint strin
 	}, nil
 }
 
-func (h *Hybrid) Name() string { return "hybrid-rrf" }
+// Name keeps the historical "hybrid-rrf" for the untemplated-embeddinggemma
+// leg and carries the full embed identity otherwise — same mislabeled-arm
+// rule as Embed.Name (two hybrid arms differing only by template must never
+// share a results-table label).
+func (h *Hybrid) Name() string {
+	if h.embed.Name() == "embed-egemma" {
+		return "hybrid-rrf"
+	}
+	return "hybrid-rrf-" + h.embed.spec.Identity()
+}
 
 // RetrieveScored returns the top-k RRF-fused results (with fused scores) and the
 // maximum embedding cosine over all skills — a confidence signal for gating.

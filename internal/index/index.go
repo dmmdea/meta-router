@@ -256,6 +256,16 @@ func (idx *Index) PlanRefresh(cur []catalog.Skill, spec embedtpl.Spec) *RefreshP
 // spec the plan carries) with that same spec's model and installs the new
 // entry set. On embed failure the index is left untouched.
 func (idx *Index) ApplyRefresh(p *RefreshPlan, endpoint string, timeout time.Duration) error {
+	// The plan's spec must MATCH the index's recorded identity — refresh
+	// never migrates. Today's callers resolve the spec via SpecForIndex so
+	// this cannot fire; it exists for the future caller who builds a plan
+	// under the wrong spec (the call site lost its explicit spec parameter),
+	// where applying would write mixed-space vectors and mis-stamp the guard
+	// (review 2026-08-16 round 2: the previous unconditional re-stamp was
+	// the one line that could silently STRIP a guard).
+	if _, ver := embedtpl.ParseIdentity(idx.Model); p.spec.Version != ver {
+		return fmt.Errorf("index: refresh plan built under template version %q but the index identity %q requires %q — plan and index disagree; rebuild the plan from this index's own spec", p.spec.Version, idx.Model, ver)
+	}
 	if len(p.toText) > 0 {
 		vecs, err := embedTexts(endpoint, timeout, p.spec.Model, p.toText)
 		if err != nil {

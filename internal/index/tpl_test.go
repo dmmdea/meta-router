@@ -185,6 +185,41 @@ func TestSpecForIndexGuardTripwire(t *testing.T) {
 	}
 }
 
+// ApplyRefresh refuses a plan whose spec disagrees with the index's own
+// identity — the future-caller foot-gun round 2 named: after the explicit
+// spec parameter was removed, a wrong-spec plan would have written
+// mixed-space vectors and mis-stamped the guard with no signal anywhere.
+func TestApplyRefreshRefusesForeignSpecPlan(t *testing.T) {
+	fakeEmbed(t)
+	spec, _ := embedtpl.Lookup("embeddinggemma", embedtpl.TplV1)
+	a := catalog.Skill{ID: "skills:a", Name: "a", Description: "alpha"}
+	tplIdx, err := Build([]catalog.Skill{a}, "ep", time.Second, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := catalog.Skill{ID: "skills:b", Name: "b", Description: "beta"}
+	// Plan built under the RAW spec against the templated index → refuse.
+	rawPlan := tplIdx.PlanRefresh([]catalog.Skill{a, b}, embedtpl.Raw("embeddinggemma"))
+	if err := tplIdx.ApplyRefresh(rawPlan, "ep", time.Second); err == nil {
+		t.Fatal("raw-spec plan against a templated index must refuse")
+	}
+	if tplIdx.TplGuard != "tpl1" || len(tplIdx.Entries) != 1 {
+		t.Fatalf("refused apply must not touch the index: guard=%q entries=%d", tplIdx.TplGuard, len(tplIdx.Entries))
+	}
+	// And the mirror: a templated plan against a raw index → refuse.
+	rawIdx, err := Build([]catalog.Skill{a}, "ep", time.Second, embedtpl.Raw("embeddinggemma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tplPlan := rawIdx.PlanRefresh([]catalog.Skill{a, b}, spec)
+	if err := rawIdx.ApplyRefresh(tplPlan, "ep", time.Second); err == nil {
+		t.Fatal("templated plan against a raw index must refuse")
+	}
+	if rawIdx.TplGuard != "" {
+		t.Fatalf("refused apply must not stamp the guard: %q", rawIdx.TplGuard)
+	}
+}
+
 // Build stamps the guard; a refresh under the same spec re-stamps it.
 func TestGuardStampedByBuildAndRefresh(t *testing.T) {
 	fakeEmbed(t)

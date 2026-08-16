@@ -600,14 +600,18 @@ func main() {
 	select {
 	case r := <-ch:
 		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
-		// One Err slot, first cause wins: a pre-set flag/identity refusal
-		// outranks the retrieval-time failures, and the primary retriever's
-		// own error outranks the optional cross-encoder's degradation.
-		if r.primaryErr != "" && rec.Err == "" {
-			rec.Err = "primary retriever: " + r.primaryErr
+		// One Err slot, causes JOINED — never dropped on conflict. A
+		// first-cause-wins chain here let three non-fatal -ranker notices
+		// (sub-floor timeout, no live rerank endpoint, unknown ranker) mask
+		// the primary retriever's failure on EVERY prompt of such a host —
+		// permanently hiding the one message that says "rebuild the index or
+		// pin the right endpoint" (review 2026-08-16 round 2, the same
+		// attribution-loss class appendDeadline fixed one branch down).
+		if r.primaryErr != "" {
+			rec.Err = joinErr(rec.Err, "primary retriever: "+r.primaryErr)
 		}
-		if r.degradeErr != "" && rec.Err == "" {
-			rec.Err = "ranker degraded to embed: " + r.degradeErr
+		if r.degradeErr != "" {
+			rec.Err = joinErr(rec.Err, "ranker degraded to embed: "+r.degradeErr)
 		}
 		ctx := formatContext(byID, r.ids)
 		// The nudge is prompt-shaped, not index-shaped — but the tpl-mismatch
@@ -625,21 +629,29 @@ func main() {
 			fmt.Fprintln(os.Stdout, out)
 		}
 	case <-time.After(time.Duration(*timeoutMs) * time.Millisecond):
-		rec.Mode = "error"
 		// Never CLOBBER an earlier attribution: on a tpl-mismatch whose
 		// quota-hint ledger read overran the deadline, overwriting Err erased
 		// the only durable record that the index needs a rebuild — every such
 		// row read as a perf problem (review 2026-08-16).
-		rec.Err = appendDeadline(rec.Err)
+		stampDeadline(&rec)
 		// surface nothing
 	}
 }
 
-// appendDeadline folds the deadline overrun into an existing error
-// attribution instead of replacing it.
-func appendDeadline(prev string) string {
+// stampDeadline marks a record as deadline-killed, folding the overrun into
+// any existing attribution. Extracted so the clobber-vs-fold semantics are
+// unit-testable at the record level (the select branch itself cannot be
+// deterministically forced in an e2e).
+func stampDeadline(rec *usagelog.Record) {
+	rec.Mode = "error"
+	rec.Err = joinErr(rec.Err, "deadline exceeded")
+}
+
+// joinErr folds a new cause into an existing error attribution instead of
+// replacing or dropping either — the single Err slot carries every cause.
+func joinErr(prev, add string) string {
 	if prev == "" {
-		return "deadline exceeded"
+		return add
 	}
-	return prev + "; deadline exceeded"
+	return prev + "; " + add
 }

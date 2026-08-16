@@ -280,6 +280,33 @@ func TestHookMismatchKeepsQuotaHintE2E(t *testing.T) {
 	}
 }
 
+// The usage row must carry EVERY cause: a -ranker notice pre-sets rec.Err,
+// and the primary retriever's failure must JOIN it, not be masked by it —
+// round 2 proved the primaryErr wiring was a mutation survivor and that a
+// first-cause-wins slot hid the "rebuild the index" diagnostic permanently
+// on any host with a ranker misconfiguration.
+func TestHookRowJoinsRankerNoticeAndPrimaryErrorE2E(t *testing.T) {
+	bin := buildMRHook(t)
+	work := t.TempDir()
+	idxPath := writeIndex(t, work, "embeddinggemma", "")
+	logPath := filepath.Join(work, "usage.jsonl")
+	// Unknown ranker (pre-sets rec.Err, degrades to embed) + a dead endpoint
+	// (primary retriever fails) + a prompt with no lexical pull (no fallback).
+	runHook(t, bin, "completely unrelated wording with no lexical pull",
+		"-index", idxPath, "-log", logPath, "-endpoint", "http://127.0.0.1:1",
+		"-ranker", "bogus", "-quota-hint=false", "-timeout-ms", "5000")
+	rec := readLastRecord(t, logPath)
+	if rec.Mode != "embedder-down" {
+		t.Fatalf("mode: %q", rec.Mode)
+	}
+	if !strings.Contains(rec.Err, "unknown -ranker") {
+		t.Fatalf("row lost the ranker notice: %q", rec.Err)
+	}
+	if !strings.Contains(rec.Err, "primary retriever:") {
+		t.Fatalf("row lost the primary error: %q", rec.Err)
+	}
+}
+
 // templatedRankerServer fakes llama-swap for the hybrid/rerank ranker paths:
 // /v1/models 200 (liveEndpoint probe), /v1/embeddings capturing model|input,
 // /v1/rerank capturing model and query.
