@@ -69,7 +69,7 @@ func TestApplyRefresh_EmbedFailureLeavesIndexUntouched(t *testing.T) {
 		{ID: "d", Name: "d", Description: "delta"}, // new → needs embed
 	}
 	p := idx.PlanRefresh(cur, rawSpec)
-	if err := idx.ApplyRefresh(p, "ep", time.Second, rawSpec); err == nil {
+	if err := idx.ApplyRefresh(p, "ep", time.Second); err == nil {
 		t.Fatal("expected embed error")
 	}
 	if len(idx.Entries) != 3 || idx.Entries[0].Skill.ID != "a" {

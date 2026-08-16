@@ -35,6 +35,10 @@ type binIndex struct {
 	Dim       int
 	BuiltUnix int64
 	Entries   []binEntry
+	// TplGuard mirrors Index.TplGuard (the stale-binary tripwire). Gob
+	// tolerates the field's absence in old sidecars — those were written by
+	// raw-identity builds, where an empty guard is correct.
+	TplGuard string
 }
 
 // BinPath maps an index path to its sidecar path (index.json → index.bin).
@@ -50,7 +54,7 @@ func (idx *Index) saveBin(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	bi := binIndex{Version: binFormatVersion, Model: idx.Model, Dim: idx.Dim, BuiltUnix: idx.BuiltUnix}
+	bi := binIndex{Version: binFormatVersion, Model: idx.Model, Dim: idx.Dim, BuiltUnix: idx.BuiltUnix, TplGuard: idx.TplGuard}
 	bi.Entries = make([]binEntry, len(idx.Entries))
 	for i, e := range idx.Entries {
 		v := make([]float32, len(e.Vec))
@@ -94,7 +98,7 @@ func loadBin(path string) (*Index, error) {
 	if bi.Version != binFormatVersion {
 		return nil, fmt.Errorf("index.bin: format version %d (want %d)", bi.Version, binFormatVersion)
 	}
-	idx := &Index{Model: bi.Model, Dim: bi.Dim, BuiltUnix: bi.BuiltUnix, Entries: make([]Entry, len(bi.Entries))}
+	idx := &Index{Model: bi.Model, Dim: bi.Dim, BuiltUnix: bi.BuiltUnix, TplGuard: bi.TplGuard, Entries: make([]Entry, len(bi.Entries))}
 	for i, e := range bi.Entries {
 		v := make([]float64, len(e.Vec))
 		for j, x := range e.Vec {

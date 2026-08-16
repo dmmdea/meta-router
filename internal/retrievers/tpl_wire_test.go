@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -118,6 +119,46 @@ func TestBlankModelRefusesBeforeTheWire(t *testing.T) {
 	}
 	if len(cap.inputs) != 0 {
 		t.Fatalf("no request may be sent with a blank model, got %+v", cap.inputs)
+	}
+}
+
+// The rerank twin of the blank-model guard: a zero RerankSpec must refuse
+// loudly before any bytes leave the process (review 2026-08-16, G4 — the
+// guard existed with zero coverage, i.e. deletable without a test going red).
+func TestRerankBlankModelRefusesBeforeTheWire(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+	skills := []catalog.Skill{{ID: "s1", Name: "n1", Description: "d1"}}
+	er := NewEmbedRerank(fixedOrder{ids: []string{"s1"}}, skills, srv.URL, time.Second, embedtpl.RerankSpec{})
+	_, _, err := er.RetrieveScored("prompt", 1)
+	if err == nil || !strings.Contains(err.Error(), "no model") {
+		t.Fatalf("blank rerank model must error, got %v", err)
+	}
+	if hits != 0 {
+		t.Fatalf("no request may be sent with a blank rerank model (%d)", hits)
+	}
+}
+
+// The embed label must carry the FULL identity: the bake-off's headline
+// comparison is raw vs tpl1 of the same model, and a label that collapses
+// them poisons the results table (review 2026-08-16, MAJOR).
+func TestEmbedNameCarriesTemplateVersion(t *testing.T) {
+	raw := NewEmbedFromVectors(nil, nil, "http://127.0.0.1:1", time.Second, embedtpl.Raw("embeddinggemma"))
+	if raw.Name() != "embed-egemma" {
+		t.Fatalf("raw embeddinggemma label changed: %q", raw.Name())
+	}
+	spec, _ := embedtpl.Lookup("embeddinggemma", embedtpl.TplV1)
+	tpl := NewEmbedFromVectors(nil, nil, "http://127.0.0.1:1", time.Second, spec)
+	if tpl.Name() != "embed-embeddinggemma/tpl1" {
+		t.Fatalf("templated label must carry the version: %q", tpl.Name())
+	}
+	qwen, _ := embedtpl.Lookup("qwen3-embedding-4b-q4", embedtpl.TplV1)
+	if got := NewEmbedFromVectors(nil, nil, "http://127.0.0.1:1", time.Second, qwen).Name(); got != "embed-qwen3-embedding-4b-q4/tpl1" {
+		t.Fatalf("qwen templated label: %q", got)
 	}
 }
 

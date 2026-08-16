@@ -216,18 +216,24 @@ const logDepth = 8
 // precision gate (mode "bm25-fallback") or stay silent (mode
 // "embedder-down"); if the prompt is too short, surface nothing (mode
 // "too-short"). Returns the ids to surface, the top cosine (0 when not
-// applicable), the mode for logging, and the scored candidate list (W9
+// applicable), the mode for logging, the scored candidate list (W9
 // R9.2b) — populated on BOTH surfaced and gated-empty cosine paths (the
 // gated region is 27% of live traffic and exactly where the gate decision
 // needs scores), nil on modes where no cosine ran, so a BM25 score can never
-// recontaminate the cosine denominator the R9.2 analysis just cleaned.
+// recontaminate the cosine denominator the R9.2 analysis just cleaned — and
+// the primary retriever's error string ("" when it didn't fail). That last
+// return exists because dropping the error made every failure class read as
+// a generic outage: a dim mismatch, an index-recorded model the endpoint
+// doesn't serve, and a genuinely down embedder all logged an EMPTY Err under
+// "embedder-down", and the one message that says "rebuild the index or pin
+// the right endpoint" never reached any log (review 2026-08-16, HIGH).
 //
 // Retrieval depth is max(k, logDepth) but ONLY the first k surface: the
 // ranking is one deterministic sort, so the top-k of a deeper retrieval is
 // identical to a k-retrieval — pinned by TestSurfacedIsPrefixOfCandidates.
-func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string, []usagelog.Cand) {
+func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string, []usagelog.Cand, string) {
 	if len(strings.TrimSpace(prompt)) < minLen {
-		return nil, 0, "too-short", nil
+		return nil, 0, "too-short", nil, ""
 	}
 	kRetrieve := k
 	if kRetrieve < logDepth {
@@ -236,9 +242,9 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 	res, topCos, err := primary.RetrieveScored(prompt, kRetrieve)
 	if err != nil {
 		if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
-			return ids, 0, "bm25-fallback", nil
+			return ids, 0, "bm25-fallback", nil, err.Error()
 		}
-		return nil, 0, "embedder-down", nil
+		return nil, 0, "embedder-down", nil, err.Error()
 	}
 	// cands carries COSINES OR NOTHING. Hybrid's RetrieveScored returns RRF
 	// fused scores in .Score (~0.03 scale, 1/(60+rank) sums) — real cosines
@@ -260,7 +266,7 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 		}
 	}
 	if topCos < minCos {
-		return nil, topCos, "gated-empty", cands
+		return nil, topCos, "gated-empty", cands, ""
 	}
 	if len(res) > k {
 		res = res[:k]
@@ -269,7 +275,7 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 	for i, s := range res {
 		ids[i] = s.ID
 	}
-	return ids, topCos, primaryMode, cands
+	return ids, topCos, primaryMode, cands, ""
 }
 
 func formatContext(byID map[string]catalog.Skill, ids []string) string {
@@ -418,13 +424,15 @@ func main() {
 
 	// W9-P item 1: the index identity names the model AND template version its
 	// vectors were embedded under; the query must be embedded identically. An
-	// identity this binary cannot resolve (a template it does not know) is a
-	// REFUSAL: embedding the query raw against templated vectors — or under a
-	// guessed template — is a silent vector-space mix that ranks garbage while
-	// looking healthy. Fail open: no retrieval at all (not even the BM25
-	// fallback — per the W9-P spec the mismatch surfaces nothing but the quota
-	// hint), exit 0, and the row says exactly why.
-	spec, tplErr := embedtpl.SpecForIndex(idx.Model)
+	// identity this binary cannot resolve (a template it does not know, or a
+	// templated identity whose TplGuard tripwire says the vectors were last
+	// written raw by a pre-template binary) is a REFUSAL: embedding the query
+	// raw against templated vectors — or under a guessed template — is a
+	// silent vector-space mix that ranks garbage while looking healthy. Fail
+	// open: no retrieval at all (not even the BM25 fallback — per the W9-P
+	// spec the mismatch surfaces nothing but the quota hint), exit 0, and the
+	// row says exactly why.
+	spec, tplErr := idx.SpecForIndex()
 	if tplErr != nil {
 		rec.Err = "index identity: " + tplErr.Error()
 	}
@@ -547,20 +555,25 @@ func main() {
 		// healthy ones. A subsystem silently not running, with a log that looks
 		// correct, is the exact failure this system already paid weeks for.
 		degradeErr string
+		// primaryErr carries the primary retriever's failure the same way:
+		// without it, "embedder-down" rows logged an empty Err and a
+		// per-index model misconfiguration was indistinguishable from a dead
+		// endpoint.
+		primaryErr string
 	}
 	ch := make(chan result, 1)
 	go func() {
 		var ids []string
 		var topCos float64
 		var cands []usagelog.Cand
-		var degradeErr string
+		var degradeErr, primaryErr string
 		// The mismatch refusal surfaces NOTHING — not even the BM25 fallback
 		// (a lexical consolation would mask an index the operator must
 		// rebuild) — but the quota hint below still runs: it reads ledgers,
 		// not vectors, and is the one thing the W9-P spec says survives.
 		mode := "tpl-mismatch"
 		if tplErr == nil {
-			ids, topCos, mode, cands = decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
+			ids, topCos, mode, cands, primaryErr = decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
 			// If the cross-encoder failed and the embed ordering was used
 			// instead, the row must say "embed" — never claim a rerank that
 			// did not run. Only rewrite the ranker modes; decide's own
@@ -581,17 +594,26 @@ func main() {
 		if *quotaHintOn {
 			hint = quotaHint(time.Now().UTC())
 		}
-		ch <- result{ids, topCos, mode, cands, hint, degradeErr}
+		ch <- result{ids, topCos, mode, cands, hint, degradeErr, primaryErr}
 	}()
 
 	select {
 	case r := <-ch:
 		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
+		// One Err slot, first cause wins: a pre-set flag/identity refusal
+		// outranks the retrieval-time failures, and the primary retriever's
+		// own error outranks the optional cross-encoder's degradation.
+		if r.primaryErr != "" && rec.Err == "" {
+			rec.Err = "primary retriever: " + r.primaryErr
+		}
 		if r.degradeErr != "" && rec.Err == "" {
 			rec.Err = "ranker degraded to embed: " + r.degradeErr
 		}
 		ctx := formatContext(byID, r.ids)
-		if offloadNudge(in.Prompt) {
+		// The nudge is prompt-shaped, not index-shaped — but the tpl-mismatch
+		// contract is "nothing but the quota hint", and appendNudge("") would
+		// happily emit the bare nudge on a refusal (review 2026-08-16).
+		if tplErr == nil && offloadNudge(in.Prompt) {
 			rec.NudgeOffload = true
 			ctx = appendNudge(ctx)
 		}
@@ -604,7 +626,20 @@ func main() {
 		}
 	case <-time.After(time.Duration(*timeoutMs) * time.Millisecond):
 		rec.Mode = "error"
-		rec.Err = "deadline exceeded"
+		// Never CLOBBER an earlier attribution: on a tpl-mismatch whose
+		// quota-hint ledger read overran the deadline, overwriting Err erased
+		// the only durable record that the index needs a rebuild — every such
+		// row read as a perf problem (review 2026-08-16).
+		rec.Err = appendDeadline(rec.Err)
 		// surface nothing
 	}
+}
+
+// appendDeadline folds the deadline overrun into an existing error
+// attribution instead of replacing it.
+func appendDeadline(prev string) string {
+	if prev == "" {
+		return "deadline exceeded"
+	}
+	return prev + "; deadline exceeded"
 }

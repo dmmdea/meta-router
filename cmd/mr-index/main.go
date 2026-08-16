@@ -48,13 +48,20 @@ func parseArgs(argv []string) (config, error) {
 		embedModel: *embedModel, tpl: *tpl}
 	// refresh PRESERVES the index's recorded identity — accepting these flags
 	// there would imply a migration that silently never happens (or worse,
-	// one that half-happens). Changing model or template is a rebuild.
+	// one that half-happens). Changing model or template is a rebuild. The
+	// check is on flag PRESENCE (fs.Visit), not value: `refresh -embed-model
+	// embeddinggemma` at the default value is still an operator asking for a
+	// migration that won't run, and a value check silently inverts if the
+	// default ever changes (review 2026-08-16).
 	if cmd == "refresh" {
-		if cfg.tpl != "" {
-			return config{}, fmt.Errorf("-tpl applies to build only: refresh preserves the index's recorded model/template; use `mr-index build -tpl %s` to change it", cfg.tpl)
-		}
-		if cfg.embedModel != "embeddinggemma" {
-			return config{}, fmt.Errorf("-embed-model applies to build only: refresh preserves the index's recorded model/template; use `mr-index build -embed-model %s` to change it", cfg.embedModel)
+		var visitErr error
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "tpl" || f.Name == "embed-model" {
+				visitErr = fmt.Errorf("-%s applies to build only: refresh preserves the index's recorded model/template; use `mr-index build` to change it", f.Name)
+			}
+		})
+		if visitErr != nil {
+			return config{}, visitErr
 		}
 	}
 	return cfg, nil
@@ -404,6 +411,7 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 			fail("save: %v", err)
 		}
 		st.OK = true
+		st.Identity = idx.Model
 		st.EntriesAfter = len(idx.Entries)
 		st.Added = len(idx.Entries)
 		st.Reembedded = len(idx.Entries)
@@ -415,11 +423,16 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 		return
 	}
 	st.EntriesBefore = len(idx.Entries)
+	// Every row from here carries the identity this run operated on (or
+	// refused on) — refresh.log must never be identity-blind.
+	st.Identity = idx.Model
 
 	// Refresh embeds under the index's OWN recorded identity. An identity
-	// this binary cannot resolve (a template version it does not know) is
-	// fatal BEFORE any harvest or embed: proceeding raw would mix vector
-	// spaces inside one index — update the binary or rebuild instead.
+	// this binary cannot resolve (a template version it does not know, or a
+	// templated identity whose guard says the vectors were written raw by a
+	// pre-template binary) is fatal BEFORE any harvest or embed: proceeding
+	// would mix vector spaces inside one index — update the binary or
+	// rebuild instead.
 	spec, err := idx.SpecForIndex()
 	if err != nil {
 		fail("refresh: %v", err)
@@ -442,7 +455,7 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 		fail("refresh aborted: would remove %d/%d entries (>30%%); rerun with --force if intended", len(plan.RemovedIDs), len(idx.Entries))
 	}
 
-	if err := idx.ApplyRefresh(plan, cfg.endpoint, 60*time.Second, spec); err != nil {
+	if err := idx.ApplyRefresh(plan, cfg.endpoint, 60*time.Second); err != nil {
 		fail("refresh: %v", err)
 	}
 	// MR-16: keep exactly one dated .bak of the index being replaced.

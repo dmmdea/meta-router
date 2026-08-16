@@ -261,13 +261,18 @@ func NewEmbedFromVectors(ids []string, vecs [][]float64, endpoint string, timeou
 	return &Embed{ids: ids, vecs: vecs, eps: resolveEndpoints(endpoint), hc: newHTTPClient(timeout), spec: spec}
 }
 
-// Name keeps the historical "embed-egemma" label for embeddinggemma (eval
-// outputs and analyses join on it) and derives the rest.
+// Name keeps the historical "embed-egemma" label for UNTEMPLATED
+// embeddinggemma (eval outputs and analyses join on it) and derives every
+// other label from the full identity — model AND template version. The
+// version must be in the label: the bake-off's headline comparison is
+// embeddinggemma raw vs embeddinggemma/tpl1, and a label that collapses the
+// two puts indistinguishable rows in the results table (the mislabeled-arm
+// class this repo has already paid for — review 2026-08-16, MAJOR).
 func (e *Embed) Name() string {
-	if e.spec.Model == "" || e.spec.Model == "embeddinggemma" {
+	if (e.spec.Model == "" || e.spec.Model == "embeddinggemma") && e.spec.Version == "" {
 		return "embed-egemma"
 	}
-	return "embed-" + e.spec.Model
+	return "embed-" + e.spec.Identity()
 }
 
 // rankByCosine embeds the prompt once and returns every skill ranked by cosine

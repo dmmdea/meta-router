@@ -132,7 +132,9 @@ func TestSpecForIndexTemplated(t *testing.T) {
 // The refusal branch: an identity naming a version (or model) this binary's
 // registry does not carry must ERROR — never fall back to raw text.
 func TestSpecForIndexUnknownRefuses(t *testing.T) {
-	for _, id := range []string{"embeddinggemma/tpl9", "mystery-model/tpl1"} {
+	// tpl01 matches the version regex but names no registered version — it
+	// must refuse (fail closed), not normalize to tpl1.
+	for _, id := range []string{"embeddinggemma/tpl9", "embeddinggemma/tpl01", "mystery-model/tpl1"} {
 		if _, err := SpecForIndex(id); err == nil {
 			t.Fatalf("SpecForIndex(%q) must refuse", id)
 		}

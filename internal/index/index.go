@@ -60,6 +60,17 @@ type Index struct {
 	Dim       int     `json:"dim"`
 	BuiltUnix int64   `json:"built_unix"`
 	Entries   []Entry `json:"entries"`
+	// TplGuard is the stale-binary tripwire for templated indexes: every
+	// template-aware writer stamps the template version here alongside the
+	// identity in Model. A PRE-template binary's structs don't have this
+	// field, so its refresh — which re-embeds everything RAW (its hashes all
+	// miss) while preserving Model verbatim — drops the guard on save. That
+	// is the one poisoning this file format can detect: same model, same
+	// dim, templated identity, raw vectors. SpecForIndex refuses a templated
+	// identity whose guard is missing or mismatched, turning a silently
+	// corrupted index into a loud rebuild instruction. Empty (and omitted)
+	// on untemplated indexes, so raw JSON stays byte-identical.
+	TplGuard string `json:"tpl_guard,omitempty"`
 }
 
 // HashSkill hashes exactly the raw canonical text of a skill (the legacy,
@@ -80,14 +91,25 @@ func HashSkillSpec(s catalog.Skill, spec embedtpl.Spec) string {
 }
 
 // SpecForIndex resolves the spec that built (and must query) this index.
+// Beyond the registry lookup, it enforces the TplGuard tripwire: a templated
+// identity whose guard is absent or names a different version means the
+// vectors were last written by a binary that doesn't speak templates (or a
+// different one) — raw vectors under a templated label, the silent mix.
 func (idx *Index) SpecForIndex() (embedtpl.Spec, error) {
-	return embedtpl.SpecForIndex(idx.Model)
+	spec, err := embedtpl.SpecForIndex(idx.Model)
+	if err != nil {
+		return embedtpl.Spec{}, err
+	}
+	if spec.Version != "" && idx.TplGuard != spec.Version {
+		return embedtpl.Spec{}, fmt.Errorf("index claims template %s but its template guard reads %q — the vectors were likely re-embedded raw by a pre-template mr-index (deploy binaries fleet-wide before building templated indexes); rebuild with `mr-index build -tpl %s`", idx.Model, idx.TplGuard, spec.Version)
+	}
+	return spec, nil
 }
 
 // Build embeds all skills in one batch and returns a fresh index whose
 // identity records spec (model + template version).
 func Build(skills []catalog.Skill, endpoint string, timeout time.Duration, spec embedtpl.Spec) (*Index, error) {
-	idx := &Index{Model: spec.Identity(), BuiltUnix: time.Now().Unix()}
+	idx := &Index{Model: spec.Identity(), TplGuard: spec.Version, BuiltUnix: time.Now().Unix()}
 	if len(skills) == 0 {
 		return idx, nil // nothing to embed; empty index (Dim 0)
 	}
@@ -174,9 +196,10 @@ type RefreshPlan struct {
 	Updated    int
 	RemovedIDs []string
 
-	entries []Entry  // next entry set; re-embeds have empty Vec
-	toText  []string // texts to embed, parallel to toPos
-	toPos   []int    // positions in entries to receive the vectors
+	entries []Entry       // next entry set; re-embeds have empty Vec
+	toText  []string      // texts to embed, parallel to toPos
+	toPos   []int         // positions in entries to receive the vectors
+	spec    embedtpl.Spec // the spec the texts were templated under; Apply embeds with it
 }
 
 // Reembeds is the number of entries whose vectors must be recomputed
@@ -195,7 +218,8 @@ func RemovalExceeds(before, removed int, maxFrac float64) bool {
 // PlanRefresh diffs the index against a harvested skill snapshot under spec
 // (the index's OWN spec — see SpecForIndex; a refresh never changes model or
 // template, it preserves the identity it loaded). Pure: it does not mutate
-// the index and calls no embedder.
+// the index and calls no embedder. The plan CARRIES the spec so Apply can
+// never embed under a different one than templated the texts.
 func (idx *Index) PlanRefresh(cur []catalog.Skill, spec embedtpl.Spec) *RefreshPlan {
 	old := make(map[string]Entry, len(idx.Entries))
 	for _, e := range idx.Entries {
@@ -203,7 +227,7 @@ func (idx *Index) PlanRefresh(cur []catalog.Skill, spec embedtpl.Spec) *RefreshP
 	}
 	curIDs := make(map[string]bool, len(cur))
 
-	p := &RefreshPlan{entries: make([]Entry, 0, len(cur))}
+	p := &RefreshPlan{entries: make([]Entry, 0, len(cur)), spec: spec}
 	for _, s := range cur {
 		curIDs[s.ID] = true
 		h := HashSkillSpec(s, spec)
@@ -228,12 +252,12 @@ func (idx *Index) PlanRefresh(cur []catalog.Skill, spec embedtpl.Spec) *RefreshP
 	return p
 }
 
-// ApplyRefresh embeds the plan's changed texts (already doc-templated by
-// PlanRefresh) with spec's model and installs the new entry set. On embed
-// failure the index is left untouched.
-func (idx *Index) ApplyRefresh(p *RefreshPlan, endpoint string, timeout time.Duration, spec embedtpl.Spec) error {
+// ApplyRefresh embeds the plan's changed texts (already doc-templated by the
+// spec the plan carries) with that same spec's model and installs the new
+// entry set. On embed failure the index is left untouched.
+func (idx *Index) ApplyRefresh(p *RefreshPlan, endpoint string, timeout time.Duration) error {
 	if len(p.toText) > 0 {
-		vecs, err := embedTexts(endpoint, timeout, spec.Model, p.toText)
+		vecs, err := embedTexts(endpoint, timeout, p.spec.Model, p.toText)
 		if err != nil {
 			return err
 		}
@@ -256,6 +280,9 @@ func (idx *Index) ApplyRefresh(p *RefreshPlan, endpoint string, timeout time.Dur
 		}
 	}
 	idx.Entries = p.entries
+	// Re-stamp the tripwire: a template-aware writer always leaves its mark,
+	// so only a pre-template binary's save can strip it.
+	idx.TplGuard = p.spec.Version
 	idx.BuiltUnix = time.Now().Unix()
 	return nil
 }
@@ -279,7 +306,7 @@ func (idx *Index) Refresh(roots []catalog.Root, endpoint string, timeout time.Du
 		return 0, 0, 0, err
 	}
 	p := idx.PlanRefresh(cur, spec)
-	if err := idx.ApplyRefresh(p, endpoint, timeout, spec); err != nil {
+	if err := idx.ApplyRefresh(p, endpoint, timeout); err != nil {
 		return 0, 0, 0, err
 	}
 	return p.Added, p.Updated, len(p.RemovedIDs), nil

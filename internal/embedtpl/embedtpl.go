@@ -39,10 +39,15 @@ const TplV1 = "tpl1"
 
 const (
 	// qwenEOS is Qwen3-Embedding's EOS token; its card requires it appended
-	// to every input (query AND document) under last-token pooling. Whether
-	// the served endpoint (llama-server --pooling last) also appends one must
-	// be verified once against the real artifact before any measurement —
-	// see the W9-P program spec §1 — and a double-EOS finding mints tpl2.
+	// to every input (query AND document) under last-token pooling. TWO
+	// things must be verified once against the served endpoint (llama-server
+	// --pooling last) before any measurement — see the W9-P program spec §1:
+	// (a) that the server does not ALSO append one (double EOS), and (b)
+	// that this literal string TOKENIZES to the special EOS token rather
+	// than ordinary text tokens (query /tokenize or compare token counts) —
+	// under last-token pooling the pooled vector is whatever token actually
+	// lands last, so both failures silently degrade every embedding. Either
+	// finding mints tpl2.
 	qwenEOS = "<|endoftext|>"
 	// qwenTask is the job-specific instruction baked into the qwen3 tpl1
 	// query template (the card's f"Instruct: {task}\nQuery:{q}" shape).
@@ -185,6 +190,11 @@ func SpecForIndex(identity string) (Spec, error) {
 // RerankSpec formats (query, document) pairs for a specific cross-encoder.
 // Same registry idea as Spec: bge-reranker-v2-m3 takes both sides raw,
 // Qwen3-Reranker is instruction-formatted.
+//
+// Unlike Spec.Version, RerankSpec.Version is INFORMATIONAL (a label for eval
+// output rows): rerank scores are computed per query and never persisted, so
+// there is no rerank index identity, no guard, and no mismatch branch —
+// nothing enforces this field.
 type RerankSpec struct {
 	Model   string
 	Version string

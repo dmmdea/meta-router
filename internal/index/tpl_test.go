@@ -5,6 +5,7 @@ package index
 // impossible to mix into an existing index silently.
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -134,21 +135,81 @@ func TestRefreshUnknownTemplateRefuses(t *testing.T) {
 	}
 }
 
-// The sidecar round-trips the templated identity (Model is the identity
-// carrier; a sidecar that dropped it would resurrect the silent mix).
+// The sidecar round-trips the templated identity AND the guard through the
+// PURE bin path — the JSON is deleted before LoadFast, so a decode failure
+// cannot silently pass via the JSON fallback (review 2026-08-16, G7).
 func TestSidecarRoundTripsIdentity(t *testing.T) {
 	dir := t.TempDir()
-	idx := &Index{Model: "embeddinggemma/tpl1", Dim: 2, BuiltUnix: 42,
+	idx := &Index{Model: "embeddinggemma/tpl1", TplGuard: "tpl1", Dim: 2, BuiltUnix: 42,
 		Entries: []Entry{{Skill: catalog.Skill{ID: "a"}, Vec: []float64{1, 0}, Hash: "h"}}}
 	p := dir + "/index.json"
 	if err := idx.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(p); err != nil { // force the bin path
 		t.Fatal(err)
 	}
 	got, err := LoadFast(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Model != "embeddinggemma/tpl1" {
-		t.Fatalf("identity lost through save/load: %q", got.Model)
+	if got.Model != "embeddinggemma/tpl1" || got.TplGuard != "tpl1" {
+		t.Fatalf("identity/guard lost through the sidecar: model=%q guard=%q", got.Model, got.TplGuard)
+	}
+	if _, err := got.SpecForIndex(); err != nil {
+		t.Fatalf("a bin-loaded templated index must resolve: %v", err)
+	}
+}
+
+// The TplGuard tripwire: a templated identity whose guard is missing (a
+// pre-template binary's save strips the unknown field) or names another
+// version must refuse — that is the ONLY detectable trace of an old
+// mr-index re-embedding a templated index raw (review 2026-08-16, MAJOR).
+func TestSpecForIndexGuardTripwire(t *testing.T) {
+	stripped := &Index{Model: "embeddinggemma/tpl1"}
+	if _, err := stripped.SpecForIndex(); err == nil || !strings.Contains(err.Error(), "template guard") {
+		t.Fatalf("stripped guard must refuse naming the guard, got %v", err)
+	}
+	mismatched := &Index{Model: "embeddinggemma/tpl1", TplGuard: "tpl2"}
+	if _, err := mismatched.SpecForIndex(); err == nil {
+		t.Fatal("mismatched guard must refuse")
+	}
+	ok := &Index{Model: "embeddinggemma/tpl1", TplGuard: "tpl1"}
+	if _, err := ok.SpecForIndex(); err != nil {
+		t.Fatalf("matching guard must resolve: %v", err)
+	}
+	// Raw identities carry no guard and never consult it.
+	raw := &Index{Model: "embeddinggemma"}
+	if _, err := raw.SpecForIndex(); err != nil {
+		t.Fatalf("raw identity must resolve without a guard: %v", err)
+	}
+}
+
+// Build stamps the guard; a refresh under the same spec re-stamps it.
+func TestGuardStampedByBuildAndRefresh(t *testing.T) {
+	fakeEmbed(t)
+	spec, _ := embedtpl.Lookup("embeddinggemma", embedtpl.TplV1)
+	a := catalog.Skill{ID: "skills:a", Name: "a", Description: "alpha"}
+	idx, err := Build([]catalog.Skill{a}, "ep", time.Second, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.TplGuard != "tpl1" {
+		t.Fatalf("build must stamp the guard, got %q", idx.TplGuard)
+	}
+	harvestFn = func(roots []catalog.Root) ([]catalog.Skill, error) { return []catalog.Skill{a}, nil }
+	t.Cleanup(func() { harvestFn = nil })
+	if _, _, _, err := idx.Refresh(nil, "ep", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if idx.TplGuard != "tpl1" {
+		t.Fatalf("refresh must preserve the guard, got %q", idx.TplGuard)
+	}
+	raw, err := Build([]catalog.Skill{a}, "ep", time.Second, embedtpl.Raw("embeddinggemma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.TplGuard != "" {
+		t.Fatalf("raw build must leave the guard empty, got %q", raw.TplGuard)
 	}
 }
