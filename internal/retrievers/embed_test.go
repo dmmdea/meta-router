@@ -1,10 +1,12 @@
 package retrievers
 
 import (
-	"github.com/dmmdea/meta-router/internal/catalog"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 func liveOrSkip(t *testing.T) {
@@ -21,7 +23,7 @@ func TestEmbedSemanticMatch(t *testing.T) {
 		{ID: "gstack:gstack-qa", Name: "gstack-qa", Description: "QA test a web application and fix bugs"},
 		{ID: "gsd:gsd-new-project", Name: "gsd-new-project", Description: "initialize a new project with a roadmap"},
 	}
-	r, err := NewEmbed(skills, "http://127.0.0.1:11436")
+	r, err := NewEmbed(skills, "http://127.0.0.1:11436", embedtpl.Raw("embeddinggemma"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,7 +10,12 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
+
+// DefaultRerankModel is the production cross-encoder: resident on the local
+// endpoint, plain (uninstructed) formatting per its registry entry.
+const DefaultRerankModel = "bge-reranker-v2-m3"
 
 // W9 R9.3: EmbedRerank is the cross-encoder eval leg — embed retrieves
 // rerankDepth candidates, bge-reranker-v2-m3 (already resident on the local
@@ -41,17 +46,19 @@ type EmbedRerank struct {
 	docByID  map[string]string
 	endpoint string // base URL; /v1/rerank appended
 	timeout  time.Duration
+	rspec    embedtpl.RerankSpec
 }
 
 // NewEmbedRerank composes an embed-style retriever with the local reranker.
-// Documents are each skill's EmbedText — the SAME canonical text the embedder
-// indexed, so the two stages rank the same representation.
-func NewEmbedRerank(primary scoredNamed, skills []catalog.Skill, endpoint string, timeout time.Duration) *EmbedRerank {
+// Documents derive from each skill's EmbedText — the same canonical text the
+// embedder indexed — wrapped in the RERANKER's own formatting (rspec): each
+// model ranks the representation it was trained on (embedtpl registry).
+func NewEmbedRerank(primary scoredNamed, skills []catalog.Skill, endpoint string, timeout time.Duration, rspec embedtpl.RerankSpec) *EmbedRerank {
 	docs := make(map[string]string, len(skills))
 	for _, s := range skills {
-		docs[s.ID] = s.EmbedText()
+		docs[s.ID] = rspec.ApplyDoc(s.EmbedText())
 	}
-	return &EmbedRerank{primary: primary, docByID: docs, endpoint: endpoint, timeout: timeout}
+	return &EmbedRerank{primary: primary, docByID: docs, endpoint: endpoint, timeout: timeout, rspec: rspec}
 }
 
 func (e *EmbedRerank) Name() string { return "embed+rerank" }
@@ -131,7 +138,7 @@ func (e *EmbedRerank) rerankOrder(prompt string, cands []Scored) ([]int, error) 
 		}
 		docs[i] = d
 	}
-	scores, err := rerankScores(e.endpoint, e.timeout, prompt, docs)
+	scores, err := rerankScores(e.endpoint, e.timeout, e.rspec.Model, e.rspec.ApplyQuery(prompt), docs)
 	if err != nil {
 		return nil, fmt.Errorf("rerank: %w", err)
 	}
@@ -167,10 +174,16 @@ func (e *EmbedRerank) Retrieve(prompt string, k int) ([]string, error) {
 
 // rerankScores calls the Jina-compatible /v1/rerank endpoint and returns one
 // relevance score per input document, in DOCUMENT ORDER (the server returns
-// results sorted by score; the index field maps them back).
-func rerankScores(endpoint string, timeout time.Duration, query string, docs []string) ([]float64, error) {
+// results sorted by score; the index field maps them back). query and docs
+// must already carry the model's formatting (the caller owns it via rspec).
+func rerankScores(endpoint string, timeout time.Duration, model, query string, docs []string) ([]float64, error) {
+	if model == "" {
+		// Same discipline as embed(): a blank model would rank under whatever
+		// the server picks — a score nobody can attribute. Loud, no default.
+		return nil, fmt.Errorf("rerank: no model specified")
+	}
 	body, err := json.Marshal(map[string]any{
-		"model":     "bge-reranker-v2-m3",
+		"model":     model,
 		"query":     query,
 		"documents": docs,
 	})

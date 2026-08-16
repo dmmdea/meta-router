@@ -6,7 +6,11 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
+
+// rawSpec is the untemplated legacy spec these plan tests run under.
+var rawSpec = embedtpl.Raw("embeddinggemma")
 
 func seedIndex() *Index {
 	a := catalog.Skill{ID: "a", Name: "a", Description: "alpha"}
@@ -22,7 +26,7 @@ func seedIndex() *Index {
 func TestPlanRefresh_ReportsRemovals(t *testing.T) {
 	idx := seedIndex()
 	cur := []catalog.Skill{{ID: "a", Name: "a", Description: "alpha"}}
-	p := idx.PlanRefresh(cur)
+	p := idx.PlanRefresh(cur, rawSpec)
 	if p.Added != 0 || p.Updated != 0 {
 		t.Fatalf("added=%d updated=%d, want 0/0", p.Added, p.Updated)
 	}
@@ -56,7 +60,7 @@ func TestRemovalExceeds(t *testing.T) {
 
 func TestApplyRefresh_EmbedFailureLeavesIndexUntouched(t *testing.T) {
 	idx := seedIndex()
-	embedFn = func(ep string, to time.Duration, in []string) ([][]float64, error) {
+	embedFn = func(ep string, to time.Duration, model string, in []string) ([][]float64, error) {
 		return nil, errors.New("embedder down")
 	}
 	t.Cleanup(func() { embedFn = nil })
@@ -64,8 +68,8 @@ func TestApplyRefresh_EmbedFailureLeavesIndexUntouched(t *testing.T) {
 		{ID: "a", Name: "a", Description: "alpha"},
 		{ID: "d", Name: "d", Description: "delta"}, // new → needs embed
 	}
-	p := idx.PlanRefresh(cur)
-	if err := idx.ApplyRefresh(p, "ep", time.Second); err == nil {
+	p := idx.PlanRefresh(cur, rawSpec)
+	if err := idx.ApplyRefresh(p, "ep", time.Second, rawSpec); err == nil {
 		t.Fatal("expected embed error")
 	}
 	if len(idx.Entries) != 3 || idx.Entries[0].Skill.ID != "a" {

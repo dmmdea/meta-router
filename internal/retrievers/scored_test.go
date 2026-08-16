@@ -1,19 +1,21 @@
 package retrievers
 
 import (
-	"github.com/dmmdea/meta-router/internal/catalog"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 func TestNewHybridFromIndex_CountMismatch(t *testing.T) {
 	_, err := NewHybridFromIndex(
 		[]catalog.Skill{{ID: "skills:a"}},
 		[][]float64{}, // 0 vecs for 1 skill
-		"http://127.0.0.1:11436", time.Second)
+		"http://127.0.0.1:11436", time.Second, embedtpl.Raw("embeddinggemma"))
 	if err == nil {
 		t.Fatal("expected error on skills/vecs length mismatch")
 	}
@@ -23,7 +25,7 @@ func TestEmbedFromVectors_RankByCosine_NoNetwork(t *testing.T) {
 	// rankByCosine needs the query embedded, which hits the network — so this
 	// test only checks construction + that Retrieve degrades to an error (not a
 	// panic) when the endpoint is bogus.
-	e := NewEmbedFromVectors([]string{"skills:a"}, [][]float64{{1, 0}}, "http://127.0.0.1:1", 200*time.Millisecond)
+	e := NewEmbedFromVectors([]string{"skills:a"}, [][]float64{{1, 0}}, "http://127.0.0.1:1", 200*time.Millisecond, embedtpl.Raw("embeddinggemma"))
 	if _, err := e.Retrieve("anything", 1); err == nil {
 		t.Fatal("expected error from unreachable endpoint")
 	}
@@ -35,7 +37,7 @@ func TestRankByCosine_HTTPStub_RanksByCosine(t *testing.T) {
 		io.WriteString(w, `{"data":[{"index":0,"embedding":[1,0]}]}`)
 	}))
 	defer srv.Close()
-	e := NewEmbedFromVectors([]string{"skills:a", "skills:b"}, [][]float64{{1, 0}, {0, 1}}, srv.URL, time.Second)
+	e := NewEmbedFromVectors([]string{"skills:a", "skills:b"}, [][]float64{{1, 0}, {0, 1}}, srv.URL, time.Second, embedtpl.Raw("embeddinggemma"))
 	ids, err := e.Retrieve("q", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +52,7 @@ func TestRankByCosine_EmptyResponseErrors(t *testing.T) {
 		io.WriteString(w, `{"data":[]}`)
 	}))
 	defer srv.Close()
-	e := NewEmbedFromVectors([]string{"skills:a"}, [][]float64{{1, 0}}, srv.URL, time.Second)
+	e := NewEmbedFromVectors([]string{"skills:a"}, [][]float64{{1, 0}}, srv.URL, time.Second, embedtpl.Raw("embeddinggemma"))
 	if _, err := e.Retrieve("q", 1); err == nil {
 		t.Fatal("expected error when embed response is empty")
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 	"github.com/dmmdea/meta-router/internal/eval"
 	"github.com/dmmdea/meta-router/internal/goldset"
 	"github.com/dmmdea/meta-router/internal/retrievers"
@@ -122,14 +123,18 @@ func main() {
 	rlist = append(rlist, bm25)
 
 	if embedUp {
-		emb, err := retrievers.NewEmbed(skills, *endpoint)
+		// Untemplated embeddinggemma — the production configuration this eval
+		// measures. Template/model arms are the W9-P bake-off's to add
+		// (item 3), each as its own explicitly-labeled retriever.
+		spec := embedtpl.Raw("embeddinggemma")
+		emb, err := retrievers.NewEmbed(skills, *endpoint, spec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: embed init failed: %v — skipping\n", err)
 		} else {
 			rlist = append(rlist, emb)
 		}
 
-		hyb, err := retrievers.NewHybrid(skills, *endpoint)
+		hyb, err := retrievers.NewHybrid(skills, *endpoint, spec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: hybrid init failed: %v — skipping\n", err)
 		} else {
@@ -146,7 +151,7 @@ func main() {
 		if emb != nil {
 			for _, ep := range eps {
 				if isEndpointUp(ep) {
-					rlist = append(rlist, retrievers.NewEmbedRerank(emb, skills, ep, 30*time.Second))
+					rlist = append(rlist, retrievers.NewEmbedRerank(emb, skills, ep, 30*time.Second, embedtpl.RerankFor(retrievers.DefaultRerankModel)))
 					break
 				}
 			}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 func testTimeout() time.Duration { return 5 * time.Second }
@@ -107,7 +108,7 @@ func TestEmbedRerankScoredKeepsCosinesAndGate(t *testing.T) {
 	defer srv.Close()
 
 	primary := fixedOrder{ids: []string{"ship", "diagram", "deploy"}}
-	er := NewEmbedRerank(primary, rerankSkills(), srv.URL, 2*time.Second)
+	er := NewEmbedRerank(primary, rerankSkills(), srv.URL, 2*time.Second, embedtpl.RerankRaw(DefaultRerankModel))
 
 	got, topCos, err := er.RetrieveScored("does not matter", 3)
 	if err != nil {
@@ -149,7 +150,7 @@ func TestEmbedRerankScoredRerankspDepthButReturnsK(t *testing.T) {
 	defer srv.Close()
 
 	primary := &countingPrimary{inner: fixedOrder{ids: []string{"ship", "diagram", "deploy"}}}
-	er := NewEmbedRerank(primary, rerankSkills(), srv.URL, 2*time.Second)
+	er := NewEmbedRerank(primary, rerankSkills(), srv.URL, 2*time.Second, embedtpl.RerankRaw(DefaultRerankModel))
 
 	got, _, err := er.RetrieveScored("q", 1)
 	if err != nil {
@@ -182,7 +183,7 @@ func TestEmbedRerankReorders(t *testing.T) {
 	}), nil)
 	defer srv.Close()
 
-	er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram", "deploy"}}, rerankSkills(), srv.URL, testTimeout())
+	er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram", "deploy"}}, rerankSkills(), srv.URL, testTimeout(), embedtpl.RerankRaw(DefaultRerankModel))
 	got, err := er.Retrieve("deploy the fleet", 2)
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +202,7 @@ func TestEmbedRerankErrorPropagates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram"}}, rerankSkills(), srv.URL, testTimeout())
+	er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram"}}, rerankSkills(), srv.URL, testTimeout(), embedtpl.RerankRaw(DefaultRerankModel))
 	if _, err := er.Retrieve("anything at all", 2); err == nil {
 		t.Fatal("rerank failure must propagate in the eval retriever, not silently fall back")
 	}
@@ -216,7 +217,7 @@ func TestEmbedRerankPullsDepthCandidates(t *testing.T) {
 	}), nil)
 	defer srv.Close()
 
-	er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram", "deploy"}}, rerankSkills(), srv.URL, testTimeout())
+	er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram", "deploy"}}, rerankSkills(), srv.URL, testTimeout(), embedtpl.RerankRaw(DefaultRerankModel))
 	got, err := er.Retrieve("deploy the fleet", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +232,7 @@ func TestEmbedRerankPullsDepthCandidates(t *testing.T) {
 func TestEmbedRerankUnknownIDFails(t *testing.T) {
 	srv := rerankServer(t, nil, nil)
 	defer srv.Close()
-	er := NewEmbedRerank(fixedOrder{ids: []string{"ghost"}}, rerankSkills(), srv.URL, testTimeout())
+	er := NewEmbedRerank(fixedOrder{ids: []string{"ghost"}}, rerankSkills(), srv.URL, testTimeout(), embedtpl.RerankRaw(DefaultRerankModel))
 	if _, err := er.Retrieve("anything at all", 1); err == nil {
 		t.Fatal("an unresolvable candidate id must be an error, not a silent skip")
 	}
@@ -256,7 +257,7 @@ func TestRerankRefusalBranches(t *testing.T) {
 				_, _ = w.Write([]byte(c.body))
 			}))
 			defer srv.Close()
-			er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram"}}, rerankSkills(), srv.URL, testTimeout())
+			er := NewEmbedRerank(fixedOrder{ids: []string{"ship", "diagram"}}, rerankSkills(), srv.URL, testTimeout(), embedtpl.RerankRaw(DefaultRerankModel))
 			if _, err := er.Retrieve("anything at all", 2); err == nil {
 				t.Fatalf("%s must refuse, not partially score", c.name)
 			}
