@@ -235,6 +235,18 @@ func TestApplyRefreshRefusesForeignSpecPlan(t *testing.T) {
 	if err := legacy.ApplyRefresh(legacyPlan, "ep", time.Second); err != nil {
 		t.Fatalf("legacy index + embeddinggemma raw plan must pass: %v", err)
 	}
+	// …and a foreign-model plan against a LEGACY index must refuse with a
+	// message naming the NORMALIZED identity — the raw idx.Model is "" here,
+	// so printing it verbatim would hide the one value explaining the refusal.
+	legacy2 := &Index{Entries: []Entry{{Skill: a, Vec: []float64{1}, Hash: HashSkill(a)}}}
+	foreignLegacy := legacy2.PlanRefresh([]catalog.Skill{a, b}, embedtpl.Raw("qwen3-embedding-4b-q4"))
+	err = legacy2.ApplyRefresh(foreignLegacy, "ep", time.Second)
+	if err == nil {
+		t.Fatal("foreign-model plan against a legacy index must refuse")
+	}
+	if !strings.Contains(err.Error(), `"embeddinggemma"`) {
+		t.Fatalf("the refusal must name the normalized identity: %v", err)
+	}
 }
 
 // Build stamps the guard; a refresh under the same spec re-stamps it.

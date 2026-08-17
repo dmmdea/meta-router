@@ -271,7 +271,12 @@ func (idx *Index) ApplyRefresh(p *RefreshPlan, endpoint string, timeout time.Dur
 		model = "embeddinggemma" // pre-Model-field index: SpecForIndex's own normalization
 	}
 	if p.spec.Model != model || p.spec.Version != ver {
-		return fmt.Errorf("index: refresh plan built under spec %s but the index identity is %s — plan and index disagree; rebuild the plan from this index's own spec", p.spec.Identity(), idx.Model)
+		// Print the NORMALIZED identity the guard actually compared, %q-quoted:
+		// on a pre-Model-field index the raw idx.Model is "" and rendering it
+		// would drop the one value (embeddinggemma) that explains the refusal
+		// (the blank-display class this repo has paid for before).
+		want := embedtpl.Spec{Model: model, Version: ver}.Identity()
+		return fmt.Errorf("index: refresh plan built under spec %q but the index requires %q — plan and index disagree; rebuild the plan from this index's own spec", p.spec.Identity(), want)
 	}
 	if len(p.toText) > 0 {
 		vecs, err := embedTexts(endpoint, timeout, p.spec.Model, p.toText)

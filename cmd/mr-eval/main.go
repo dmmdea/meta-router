@@ -184,16 +184,21 @@ func main() {
 func printTable(title string, results []eval.Metrics) {
 	fmt.Println()
 	fmt.Println(title + ":")
-	// 56 wide: the longest producible identity-carrying label is
-	// "embed-embeddinggemma/tpl1+rerank-qwen3-reranker-4b/tpl1" (55 chars —
-	// templated primary + qwen reranker); %-Ns pads but never truncates, so
-	// the column must fit the worst case or the table shears anyway (round-3
-	// review: the first width fix was narrower than its own comment's
-	// example).
-	fmt.Printf("| %-56s | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n", "retriever")
-	fmt.Printf("|----------------------------------------------------------|----------|----------|----------|-------|-----------|\n")
+	// The retriever column sizes to its data: identity-carrying labels
+	// ("embed-qwen3-embedding-4b-q4/tpl1+rerank-qwen3-reranker-4b/tpl1") are
+	// free-form — model ids come from the operator — and %-Ns pads but never
+	// truncates, so ANY literal width eventually shears the table (two fixed
+	// widths in a row were each narrower than a producible label).
+	w := len("retriever")
 	for _, m := range results {
-		fmt.Printf("| %-56s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n",
+		if len(m.Retriever) > w {
+			w = len(m.Retriever)
+		}
+	}
+	fmt.Printf("| %-*s | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n", w, "retriever")
+	fmt.Printf("|%s|----------|----------|----------|-------|-----------|\n", strings.Repeat("-", w+2))
+	for _, m := range results {
+		fmt.Printf("| %-*s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n", w,
 			m.Retriever,
 			m.RecallAt[1],
 			m.RecallAt[3],
