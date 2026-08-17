@@ -41,7 +41,7 @@ func TestEmbed_FailsOverToLiveEndpoint(t *testing.T) {
 	deadURL := dead.URL
 	dead.Close()
 
-	vs, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: deadURL}, {URL: live.URL}}, []string{"hello"})
+	vs, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: deadURL}, {URL: live.URL}}, "embeddinggemma", []string{"hello"})
 	if err != nil {
 		t.Fatalf("expected failover to the live endpoint, got error: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestEmbed_FailsOverOnServerError(t *testing.T) {
 	live := embedOK(t, &liveHits)
 	defer live.Close()
 
-	if _, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: live.URL}}, []string{"hi"}); err != nil {
+	if _, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: live.URL}}, "embeddinggemma", []string{"hi"}); err != nil {
 		t.Fatalf("503 should fail over, got: %v", err)
 	}
 	if atomic.LoadInt32(&badHits) != 1 || atomic.LoadInt32(&liveHits) != 1 {
@@ -80,7 +80,7 @@ func TestEmbed_DoesNotFailOverOnClientError(t *testing.T) {
 	next := embedOK(t, &nextHits)
 	defer next.Close()
 
-	_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: next.URL}}, []string{"hi"})
+	_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: next.URL}}, "embeddinggemma", []string{"hi"})
 	if err == nil {
 		t.Fatal("a 400 from a live embedder must surface as an error")
 	}
@@ -103,7 +103,7 @@ func TestEmbed_AllEndpointsDownReportsLastError(t *testing.T) {
 	u2 := s2.URL
 	s2.Close()
 
-	_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: u1}, {URL: u2}}, []string{"hi"})
+	_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: u1}, {URL: u2}}, "embeddinggemma", []string{"hi"})
 	if err == nil {
 		t.Fatal("expected an error when every endpoint is down")
 	}
@@ -113,7 +113,7 @@ func TestEmbed_AllEndpointsDownReportsLastError(t *testing.T) {
 }
 
 func TestEmbed_NoEndpointsIsAnError(t *testing.T) {
-	if _, err := embed(newHTTPClient(time.Second), nil, []string{"hi"}); err == nil {
+	if _, err := embed(newHTTPClient(time.Second), nil, "embeddinggemma", []string{"hi"}); err == nil {
 		t.Fatal("embedding with no configured endpoint must error, not panic or hang")
 	}
 }

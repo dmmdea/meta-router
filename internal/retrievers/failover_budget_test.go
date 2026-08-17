@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 // slowServer accepts the connection and then stalls past the caller's budget —
@@ -40,7 +42,7 @@ func TestEmbed_WalkSharesOneDeadline(t *testing.T) {
 	eps := []Endpoint{{URL: s1.URL}, {URL: s2.URL}}
 
 	start := time.Now()
-	_, err := embed(newHTTPClient(budget), eps, []string{"hi"})
+	_, err := embed(newHTTPClient(budget), eps, "embeddinggemma", []string{"hi"})
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -61,7 +63,7 @@ func TestEmbed_DoesNotDialAfterBudgetSpent(t *testing.T) {
 	defer s2.Close()
 
 	eps := []Endpoint{{URL: s1.URL}, {URL: s2.URL}}
-	if _, err := embed(newHTTPClient(200*time.Millisecond), eps, []string{"hi"}); err == nil {
+	if _, err := embed(newHTTPClient(200*time.Millisecond), eps, "embeddinggemma", []string{"hi"}); err == nil {
 		t.Fatal("expected failure")
 	}
 	if atomic.LoadInt32(&h2) != 0 {
@@ -80,7 +82,7 @@ func TestEmbed_FailsOverOnAuthAndRateLimitStatuses(t *testing.T) {
 		bad := embedStatus(t, code, &badHits)
 		live := embedOK(t, &liveHits)
 
-		_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: live.URL}}, []string{"hi"})
+		_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: live.URL}}, "embeddinggemma", []string{"hi"})
 		if err != nil {
 			t.Fatalf("status %d must fail over to the healthy endpoint, got: %v", code, err)
 		}
@@ -100,7 +102,7 @@ func TestEmbed_RequestRejectionIsFatal(t *testing.T) {
 		bad := embedStatus(t, code, &badHits)
 		next := embedOK(t, &nextHits)
 
-		_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: next.URL}}, []string{"hi"})
+		_, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: bad.URL}, {URL: next.URL}}, "embeddinggemma", []string{"hi"})
 		if err == nil {
 			t.Fatalf("status %d from a live embedder must surface", code)
 		}
@@ -141,7 +143,7 @@ func TestEmbed_UnverifiedEndpointIsProbedBeforeReceivingPrompt(t *testing.T) {
 	defer live.Close()
 
 	eps := []Endpoint{{URL: foreign.URL, Unverified: true}, {URL: live.URL, Unverified: true}}
-	if _, err := embed(newHTTPClient(2*time.Second), eps, []string{"my secret prompt"}); err != nil {
+	if _, err := embed(newHTTPClient(2*time.Second), eps, "embeddinggemma", []string{"my secret prompt"}); err != nil {
 		t.Fatalf("should have used the real embedder: %v", err)
 	}
 	if n := atomic.LoadInt32(&gotPrompt); n != 0 {
@@ -167,7 +169,7 @@ func TestEmbed_ConfiguredEndpointIsNotProbed(t *testing.T) {
 	}))
 	defer s.Close()
 
-	if _, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: s.URL}}, []string{"hi"}); err != nil {
+	if _, err := embed(newHTTPClient(2*time.Second), []Endpoint{{URL: s.URL}}, "embeddinggemma", []string{"hi"}); err != nil {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&models) != 0 {
@@ -195,6 +197,7 @@ func TestRankByCosine_DimensionMismatchErrorsNotPanics(t *testing.T) {
 		vecs: [][]float64{{1, 0, 0}, {0, 1, 0}},
 		eps:  []Endpoint{{URL: wrongDim.URL}},
 		hc:   newHTTPClient(2 * time.Second),
+		spec: embedtpl.Raw("embeddinggemma"),
 	}
 
 	defer func() {

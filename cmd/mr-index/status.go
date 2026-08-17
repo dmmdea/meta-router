@@ -21,6 +21,12 @@ type refreshStatus struct {
 	OK            bool   `json:"ok"`
 	Error         string `json:"error,omitempty"`
 	Forced        bool   `json:"forced,omitempty"`
+	// Identity is the index's recorded model/template identity after this
+	// run (or the one it refused on). Without it refresh.log is
+	// identity-blind: a fresh rebuild after a templated index went missing
+	// silently reverts the deployment to raw, and no row anywhere records
+	// the flip (review 2026-08-16).
+	Identity string `json:"identity,omitempty"`
 	// StaleRoots records roots.json entries whose path no longer exists. It is
 	// here rather than only on stderr because refresh runs from the
 	// SessionStart hook with nobody watching stderr — refresh.log is the only

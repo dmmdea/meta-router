@@ -2,9 +2,11 @@ package retrievers
 
 import (
 	"fmt"
-	"github.com/dmmdea/meta-router/internal/catalog"
 	"sort"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 // Hybrid fuses BM25 (lexical) and embeddinggemma (semantic) rankings via
@@ -15,8 +17,8 @@ type Hybrid struct {
 	embed *Embed
 }
 
-func NewHybrid(skills []catalog.Skill, endpoint string) (*Hybrid, error) {
-	e, err := NewEmbed(skills, endpoint)
+func NewHybrid(skills []catalog.Skill, endpoint string, spec embedtpl.Spec) (*Hybrid, error) {
+	e, err := NewEmbed(skills, endpoint, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -26,7 +28,7 @@ func NewHybrid(skills []catalog.Skill, endpoint string) (*Hybrid, error) {
 // NewHybridFromIndex builds a Hybrid from cached skill vectors (the persisted
 // index): BM25 from the skill texts, Embed from the stored vectors. Only the
 // query is embedded at retrieve time. Used by the per-prompt hook.
-func NewHybridFromIndex(skills []catalog.Skill, vecs [][]float64, endpoint string, timeout time.Duration) (*Hybrid, error) {
+func NewHybridFromIndex(skills []catalog.Skill, vecs [][]float64, endpoint string, timeout time.Duration, spec embedtpl.Spec) (*Hybrid, error) {
 	if len(skills) != len(vecs) {
 		return nil, fmt.Errorf("hybrid: %d skills but %d vectors", len(skills), len(vecs))
 	}
@@ -36,11 +38,20 @@ func NewHybridFromIndex(skills []catalog.Skill, vecs [][]float64, endpoint strin
 	}
 	return &Hybrid{
 		bm25:  NewBM25(skills),
-		embed: NewEmbedFromVectors(ids, vecs, endpoint, timeout),
+		embed: NewEmbedFromVectors(ids, vecs, endpoint, timeout, spec),
 	}, nil
 }
 
-func (h *Hybrid) Name() string { return "hybrid-rrf" }
+// Name keeps the historical "hybrid-rrf" for the untemplated-embeddinggemma
+// leg and carries the full embed identity otherwise — same mislabeled-arm
+// rule as Embed.Name (two hybrid arms differing only by template must never
+// share a results-table label).
+func (h *Hybrid) Name() string {
+	if h.embed.Name() == "embed-egemma" {
+		return "hybrid-rrf"
+	}
+	return "hybrid-rrf-" + h.embed.spec.Identity()
+}
 
 // RetrieveScored returns the top-k RRF-fused results (with fused scores) and the
 // maximum embedding cosine over all skills — a confidence signal for gating.

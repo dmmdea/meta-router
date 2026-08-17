@@ -3,6 +3,8 @@ package retrievers
 import (
 	"testing"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 // TestDeadEndpointFailsFast verifies the MR-13 connect/total timeout split:
@@ -13,7 +15,7 @@ import (
 // routable; the dial either times out at ConnectTimeout or is rejected
 // immediately — both well under the 1.5s assertion.
 func TestDeadEndpointFailsFast(t *testing.T) {
-	e := NewEmbedFromVectors([]string{"a"}, [][]float64{{1, 0}}, "http://203.0.113.1:9", 5*time.Second)
+	e := NewEmbedFromVectors([]string{"a"}, [][]float64{{1, 0}}, "http://203.0.113.1:9", 5*time.Second, embedtpl.Raw("embeddinggemma"))
 	start := time.Now()
 	_, _, err := e.RetrieveScored("some prompt", 1)
 	elapsed := time.Since(start)

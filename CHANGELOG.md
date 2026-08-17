@@ -4,6 +4,20 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.33.0] — 2026-08-16
+
+### Added — W9-P item 1: the per-model embedding template registry (operator-approved program, opt-in)
+Embedding models are prompt-trained; embedding raw text under-serves every one of them, and a query templated differently from the index's vectors is a silent vector-space mix. `internal/embedtpl` is the versioned registry that fixes both, **without changing production behavior until an operator rebuild** — raw specs reproduce pre-registry bytes and hashes exactly (pinned by regression tests), so merging and deploying this release re-embeds nothing.
+
+- **Registry** (`internal/embedtpl`): versioned `(query, doc)` template pairs per model — `embeddinggemma/tpl1` (the card's `task: search result | query:` / `title: none | text:` prompts), `qwen3-embedding-*/tpl1` (instruct-prefixed query + `<|endoftext|>`, plain doc + EOS, for `--pooling last`) — plus reranker formatting specs (`bge-reranker-v2-m3` raw; `qwen3-reranker-*` instructed, UNVERIFIED against a served endpoint until the bake-off). Template bytes are immutable per version; exact-byte and EOS-presence unit tests pin them.
+- **Identity**: the index `model` field now carries model **and** template version (`embeddinggemma/tpl1`); hashes cover the *templated* text, so a template change invalidates every cached vector. The embed/rerank HTTP calls take the model from the spec instead of a hardcoded literal.
+- **Opt-in build**: `mr-index build -tpl tpl1 [-embed-model …]`; `refresh` preserves the recorded identity, rejects `-tpl`/`-embed-model` by flag *presence*, refuses identities it cannot resolve before touching anything, and `refresh.log` rows now carry the identity they operated on (an identity-blind log let a fresh rebuild silently revert a templated deployment to raw).
+- **Query-time guard** (`mr-hook`): queries are templated to match the index identity; an unresolvable identity refuses **fail-open** — nothing surfaces (not even the BM25 fallback or the offload nudge), the quota hint survives, the row logs `mode:"tpl-mismatch"` with the reason, exit 0.
+- **TplGuard tripwire**: template-aware writers stamp the template version in a `tpl_guard` field that pre-template binaries *drop on save* — so an old `mr-index refresh` that re-embeds a templated index raw (same model, same dim, coherent hashes: otherwise undetectable) strips the guard, and the new hook/refresh refuse the poisoned index loudly instead of serving the mix. Deploy binaries fleet-wide **before** building a templated index; an old *hook* querying a new templated index raw remains structurally undetectable from inside the files and is controlled by that ordering.
+- **Diagnostics hardening** (adversarial review of this change, 3 specialists): `decide()` now returns the primary retriever's error so `embedder-down`/`bm25-fallback` rows carry the real cause (a per-index model misconfiguration was indistinguishable from a dead endpoint); the hook's deadline branch folds into an existing error attribution instead of clobbering it; `Embed.Name()` carries the full identity (`embed-embeddinggemma/tpl1`) so bake-off arms cannot collapse into one label; `RefreshPlan` carries its spec so plan and apply can never disagree.
+- B12 complexity budget raised 25120 → 25675 (measured 25666; the registry + wiring + four review rounds of guards above).
+- Deferred by the program's own ordering: the `embeddinggemma+tpl1` before/after recall measurement waits on the label-clean eval slice (W9-P item 2); no production index is templated by this release.
+
 ## [0.32.0] — 2026-08-12
 
 ### Fixed — the round-3 review remainder (19 MAJOR + 8 MINOR + 4 NIT, all confirmed by reproduction)

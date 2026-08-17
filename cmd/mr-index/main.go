@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 	"github.com/dmmdea/meta-router/internal/index"
 	"github.com/dmmdea/meta-router/internal/roots"
 )
@@ -21,6 +22,8 @@ type config struct {
 	endpoint   string
 	out        string
 	force      bool
+	embedModel string
+	tpl        string
 }
 
 func parseArgs(argv []string) (config, error) {
@@ -36,10 +39,46 @@ func parseArgs(argv []string) (config, error) {
 	endpoint := fs.String("endpoint", "", "embedder endpoint; empty = resolve for this machine ($MR_EMBED_ENDPOINT, ~/.meta-router/endpoints.json, then the built-in :11436→:18793 failover chain). Setting it pins that endpoint exactly.")
 	out := fs.String("out", "", "index path (default ~/.meta-router/index.json)")
 	force := fs.Bool("force", false, "refresh: allow removing more than 30% of existing entries")
+	embedModel := fs.String("embed-model", "embeddinggemma", "build only: embedding model to request and record in the index identity")
+	tpl := fs.String("tpl", "", `build only: embedding template version to apply (e.g. "tpl1"); empty = untemplated raw text (current production behavior). Recorded in the index identity so mr-hook templates queries to match — deploy new binaries fleet-wide BEFORE building a templated index, or older hooks will query it raw.`)
 	if err := fs.Parse(argv[1:]); err != nil {
 		return config{}, err
 	}
-	return config{cmd: cmd, skillRoots: *skillRoots, endpoint: *endpoint, out: *out, force: *force}, nil
+	cfg := config{cmd: cmd, skillRoots: *skillRoots, endpoint: *endpoint, out: *out, force: *force,
+		embedModel: *embedModel, tpl: *tpl}
+	// refresh PRESERVES the index's recorded identity — accepting these flags
+	// there would imply a migration that silently never happens (or worse,
+	// one that half-happens). Changing model or template is a rebuild. The
+	// check is on flag PRESENCE (fs.Visit), not value: `refresh -embed-model
+	// embeddinggemma` at the default value is still an operator asking for a
+	// migration that won't run, and a value check silently inverts if the
+	// default ever changes (review 2026-08-16).
+	if cmd == "refresh" {
+		var visitErr error
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "tpl" || f.Name == "embed-model" {
+				visitErr = fmt.Errorf("-%s applies to build only: refresh preserves the index's recorded model/template; use `mr-index build` to change it", f.Name)
+			}
+		})
+		if visitErr != nil {
+			return config{}, visitErr
+		}
+	}
+	return cfg, nil
+}
+
+// buildSpec resolves the -embed-model/-tpl flags to the embedding spec a
+// build will record. An unknown (model, tpl) pair is a hard error: recording
+// an identity nobody can query would brick the hook (it refuses unknown
+// templates, fail-open) on every prompt until a rebuild.
+func buildSpec(cfg config) (embedtpl.Spec, error) {
+	if cfg.tpl == "" {
+		return embedtpl.Raw(cfg.embedModel), nil
+	}
+	if s, ok := embedtpl.Lookup(cfg.embedModel, cfg.tpl); ok {
+		return s, nil
+	}
+	return embedtpl.Spec{}, fmt.Errorf("no template %q for model %q in this binary's registry (see internal/embedtpl)", cfg.tpl, cfg.embedModel)
 }
 
 // resolveRoots returns the harvest root set for this run.
@@ -302,12 +341,17 @@ func main() {
 
 	switch cfg.cmd {
 	case "build":
+		spec, err := buildSpec(cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		skills, err := index.HarvestSkills(rs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "harvest: %v\n", err)
 			os.Exit(1)
 		}
-		idx, err := index.Build(skills, cfg.endpoint, 60*time.Second)
+		idx, err := index.Build(skills, cfg.endpoint, 60*time.Second, spec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "build: %v\n", err)
 			os.Exit(1)
@@ -319,7 +363,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "save: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("built %d skills (dim %d) from %d roots → %s\n", len(idx.Entries), idx.Dim, len(rs), outPath)
+		fmt.Printf("built %d skills (dim %d, identity %s) from %d roots → %s\n", len(idx.Entries), idx.Dim, idx.Model, len(rs), outPath)
 	case "refresh":
 		runRefresh(cfg, rs, outPath, staleNotes)
 	}
@@ -351,12 +395,15 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 		if !os.IsNotExist(err) {
 			fail("load: %v", err)
 		}
-		// no index yet → build fresh
+		// no index yet → build fresh. Always untemplated embeddinggemma: the
+		// -tpl/-embed-model flags are build-only (parseArgs rejects them on
+		// refresh), so a refresh-created index is the legacy identity; a
+		// templated index only ever comes from an explicit `build -tpl`.
 		skills, herr := index.HarvestSkills(rs)
 		if herr != nil {
 			fail("harvest: %v", herr)
 		}
-		idx, err = index.Build(skills, cfg.endpoint, 60*time.Second)
+		idx, err = index.Build(skills, cfg.endpoint, 60*time.Second, embedtpl.Raw(cfg.embedModel))
 		if err != nil {
 			fail("build: %v", err)
 		}
@@ -364,6 +411,7 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 			fail("save: %v", err)
 		}
 		st.OK = true
+		st.Identity = idx.Model
 		st.EntriesAfter = len(idx.Entries)
 		st.Added = len(idx.Entries)
 		st.Reembedded = len(idx.Entries)
@@ -375,12 +423,26 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 		return
 	}
 	st.EntriesBefore = len(idx.Entries)
+	// Every row from here carries the identity this run operated on (or
+	// refused on) — refresh.log must never be identity-blind.
+	st.Identity = idx.Model
+
+	// Refresh embeds under the index's OWN recorded identity. An identity
+	// this binary cannot resolve (a template version it does not know, or a
+	// templated identity whose guard says the vectors were written raw by a
+	// pre-template binary) is fatal BEFORE any harvest or embed: proceeding
+	// would mix vector spaces inside one index — update the binary or
+	// rebuild instead.
+	spec, err := idx.SpecForIndex()
+	if err != nil {
+		fail("refresh: %v", err)
+	}
 
 	cur, err := index.HarvestSkills(rs)
 	if err != nil {
 		fail("harvest: %v", err)
 	}
-	plan := idx.PlanRefresh(cur)
+	plan := idx.PlanRefresh(cur, spec)
 	st.Added, st.Removed, st.Reembedded = plan.Added, len(plan.RemovedIDs), plan.Reembeds()
 
 	// Removal guard: a wrong roots set / empty harvest must not silently gut

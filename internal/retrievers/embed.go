@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 type Embed struct {
@@ -22,6 +23,7 @@ type Embed struct {
 	vecs [][]float64
 	eps  []Endpoint
 	hc   *http.Client
+	spec embedtpl.Spec // model to request + query/doc templates (W9-P item 1)
 }
 
 // ConnectTimeout bounds the TCP dial separately from the total request
@@ -45,9 +47,10 @@ func newHTTPClient(total time.Duration) *http.Client {
 // with a caller-chosen timeout. Single shared entrypoint for all embedding.
 // endpoint is an endpoint SPEC (see ResolveEndpoints): empty means "resolve for
 // this machine", a single URL pins one, a comma-separated list gives an explicit
-// failover order.
-func EmbedTexts(endpoint string, timeout time.Duration, inputs []string) ([][]float64, error) {
-	return embed(newHTTPClient(timeout), resolveEndpoints(endpoint), inputs)
+// failover order. model is the model id to request; inputs must already carry
+// any per-model template (the caller owns templating — see embedtpl).
+func EmbedTexts(endpoint string, timeout time.Duration, model string, inputs []string) ([][]float64, error) {
+	return embed(newHTTPClient(timeout), resolveEndpoints(endpoint), model, inputs)
 }
 
 // unusableErr marks a candidate endpoint as worth abandoning for the next one:
@@ -72,9 +75,15 @@ func (u unusableErr) Unwrap() error { return u.err }
 //
 // If every candidate fails, the last error is returned and the caller degrades
 // (mr-hook → BM25 fallback) — it never blocks the user.
-func embed(hc *http.Client, eps []Endpoint, inputs []string) ([][]float64, error) {
+func embed(hc *http.Client, eps []Endpoint, model string, inputs []string) ([][]float64, error) {
 	if len(eps) == 0 {
 		return nil, fmt.Errorf("embed: no endpoint configured")
+	}
+	// A blank model would let llama-swap pick whatever it pleases — vectors
+	// from an unspecified model can never be trusted against an index. Loud
+	// error, no silent default: every caller resolves a model via embedtpl.
+	if model == "" {
+		return nil, fmt.Errorf("embed: no model specified")
 	}
 	ctx := context.Background()
 	if hc.Timeout > 0 {
@@ -93,7 +102,7 @@ func embed(hc *http.Client, eps []Endpoint, inputs []string) ([][]float64, error
 			lastErr = fmt.Errorf("%s: no embedder advertised at /v1/models", ep.URL)
 			continue
 		}
-		vs, err := embedOne(ctx, hc, ep.URL, inputs)
+		vs, err := embedOne(ctx, hc, ep.URL, model, inputs)
 		if err == nil {
 			return vs, nil
 		}
@@ -146,8 +155,8 @@ func probeIsEmbedder(ctx context.Context, hc *http.Client, ep string) bool {
 	return false
 }
 
-func embedOne(ctx context.Context, hc *http.Client, ep string, inputs []string) ([][]float64, error) {
-	body, _ := json.Marshal(map[string]any{"model": "embeddinggemma", "input": inputs})
+func embedOne(ctx context.Context, hc *http.Client, ep string, model string, inputs []string) ([][]float64, error) {
+	body, _ := json.Marshal(map[string]any{"model": model, "input": inputs})
 	req, err := http.NewRequestWithContext(ctx, "POST", ep+"/v1/embeddings", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -222,38 +231,55 @@ type Scored struct {
 	Score float64
 }
 
-func NewEmbed(skills []catalog.Skill, endpoint string) (*Embed, error) {
+// NewEmbed embeds the skills itself (doc-templated per spec) and serves
+// queries under the same spec — the two sides of one vector space.
+func NewEmbed(skills []catalog.Skill, endpoint string, spec embedtpl.Spec) (*Embed, error) {
 	hc := newHTTPClient(30 * time.Second)
 	eps := resolveEndpoints(endpoint)
 	texts := make([]string, len(skills))
 	ids := make([]string, len(skills))
 	for i, s := range skills {
-		texts[i] = s.EmbedText()
+		texts[i] = spec.ApplyDoc(s.EmbedText())
 		ids[i] = s.ID
 	}
 	// Reuse the stored client for the build embed rather than letting EmbedTexts
 	// allocate a separate throwaway one.
-	vs, err := embed(hc, eps, texts)
+	vs, err := embed(hc, eps, spec.Model, texts)
 	if err != nil {
 		return nil, err
 	}
-	return &Embed{ids: ids, vecs: vs, eps: eps, hc: hc}, nil
+	return &Embed{ids: ids, vecs: vs, eps: eps, hc: hc, spec: spec}, nil
 }
 
 // NewEmbedFromVectors builds an Embed from already-computed skill vectors (from
 // the persisted index) — it does NOT embed the skills. Only the query is
 // embedded at retrieve time. timeout bounds the per-query embed HTTP call.
-func NewEmbedFromVectors(ids []string, vecs [][]float64, endpoint string, timeout time.Duration) *Embed {
-	return &Embed{ids: ids, vecs: vecs, eps: resolveEndpoints(endpoint), hc: newHTTPClient(timeout)}
+// spec MUST be the spec the index identity resolves to (embedtpl.SpecForIndex):
+// the query is embedded with spec's model and query template so it lives in
+// the same vector space as the stored vectors.
+func NewEmbedFromVectors(ids []string, vecs [][]float64, endpoint string, timeout time.Duration, spec embedtpl.Spec) *Embed {
+	return &Embed{ids: ids, vecs: vecs, eps: resolveEndpoints(endpoint), hc: newHTTPClient(timeout), spec: spec}
 }
 
-func (e *Embed) Name() string { return "embed-egemma" }
+// Name keeps the historical "embed-egemma" label for UNTEMPLATED
+// embeddinggemma (eval outputs and analyses join on it) and derives every
+// other label from the full identity — model AND template version. The
+// version must be in the label: the bake-off's headline comparison is
+// embeddinggemma raw vs embeddinggemma/tpl1, and a label that collapses the
+// two puts indistinguishable rows in the results table (the mislabeled-arm
+// class this repo has already paid for — review 2026-08-16, MAJOR).
+func (e *Embed) Name() string {
+	if (e.spec.Model == "" || e.spec.Model == "embeddinggemma") && e.spec.Version == "" {
+		return "embed-egemma"
+	}
+	return "embed-" + e.spec.Identity()
+}
 
 // rankByCosine embeds the prompt once and returns every skill ranked by cosine
 // similarity (desc). The first element's Score is the max cosine — the
 // confidence signal the surfacer gates on. Shared by Retrieve and the hybrid.
 func (e *Embed) rankByCosine(prompt string) ([]Scored, error) {
-	qv, err := embed(e.hc, e.eps, []string{prompt})
+	qv, err := embed(e.hc, e.eps, e.spec.Model, []string{e.spec.ApplyQuery(prompt)})
 	if err != nil {
 		return nil, err
 	}

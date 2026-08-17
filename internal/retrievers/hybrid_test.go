@@ -1,8 +1,10 @@
 package retrievers
 
 import (
-	"github.com/dmmdea/meta-router/internal/catalog"
 	"testing"
+
+	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 func TestHybridRanks(t *testing.T) {
@@ -11,7 +13,7 @@ func TestHybridRanks(t *testing.T) {
 		{ID: "skills:gstack-qa", Name: "gstack-qa", Description: "QA test a web application and fix bugs"},
 		{ID: "skills:gsd-new-project", Name: "gsd-new-project", Description: "initialize a new project with a roadmap"},
 	}
-	r, err := NewHybrid(skills, "http://127.0.0.1:11436")
+	r, err := NewHybrid(skills, "http://127.0.0.1:11436", embedtpl.Raw("embeddinggemma"))
 	if err != nil {
 		t.Fatal(err)
 	}

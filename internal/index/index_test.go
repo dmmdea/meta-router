@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 )
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -50,7 +51,7 @@ func TestBuild_Live(t *testing.T) {
 	idx, err := Build([]catalog.Skill{
 		{ID: "skills:a", Name: "qa", Description: "QA a web app"},
 		{ID: "skills:b", Name: "init", Description: "start a new project"},
-	}, ep, 30*time.Second)
+	}, ep, 30*time.Second, embedtpl.Raw("embeddinggemma"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestBuild_Live(t *testing.T) {
 }
 
 func TestBuild_EmptySkills(t *testing.T) {
-	idx, err := Build(nil, "http://127.0.0.1:11436", time.Second)
+	idx, err := Build(nil, "http://127.0.0.1:11436", time.Second, embedtpl.Raw("embeddinggemma"))
 	if err != nil {
 		t.Fatalf("empty build should not error: %v", err)
 	}

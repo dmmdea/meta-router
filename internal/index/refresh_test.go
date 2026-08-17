@@ -23,7 +23,7 @@ func TestRefresh_OnlyEmbedsChanged(t *testing.T) {
 		return []catalog.Skill{a, bNew, c}, nil
 	}
 	var embedded []string
-	embedFn = func(ep string, to time.Duration, in []string) ([][]float64, error) {
+	embedFn = func(ep string, to time.Duration, model string, in []string) ([][]float64, error) {
 		embedded = append(embedded, in...)
 		out := make([][]float64, len(in))
 		for i := range in {

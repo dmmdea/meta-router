@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 	"github.com/dmmdea/meta-router/internal/eval"
 	"github.com/dmmdea/meta-router/internal/goldset"
 	"github.com/dmmdea/meta-router/internal/retrievers"
@@ -122,14 +123,18 @@ func main() {
 	rlist = append(rlist, bm25)
 
 	if embedUp {
-		emb, err := retrievers.NewEmbed(skills, *endpoint)
+		// Untemplated embeddinggemma — the production configuration this eval
+		// measures. Template/model arms are the W9-P bake-off's to add
+		// (item 3), each as its own explicitly-labeled retriever.
+		spec := embedtpl.Raw("embeddinggemma")
+		emb, err := retrievers.NewEmbed(skills, *endpoint, spec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: embed init failed: %v — skipping\n", err)
 		} else {
 			rlist = append(rlist, emb)
 		}
 
-		hyb, err := retrievers.NewHybrid(skills, *endpoint)
+		hyb, err := retrievers.NewHybrid(skills, *endpoint, spec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: hybrid init failed: %v — skipping\n", err)
 		} else {
@@ -146,7 +151,7 @@ func main() {
 		if emb != nil {
 			for _, ep := range eps {
 				if isEndpointUp(ep) {
-					rlist = append(rlist, retrievers.NewEmbedRerank(emb, skills, ep, 30*time.Second))
+					rlist = append(rlist, retrievers.NewEmbedRerank(emb, skills, ep, 30*time.Second, embedtpl.RerankFor(retrievers.DefaultRerankModel)))
 					break
 				}
 			}
@@ -179,10 +184,21 @@ func main() {
 func printTable(title string, results []eval.Metrics) {
 	fmt.Println()
 	fmt.Println(title + ":")
-	fmt.Printf("| retriever     | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n")
-	fmt.Printf("|---------------|----------|----------|----------|-------|-----------|\n")
+	// The retriever column sizes to its data: identity-carrying labels
+	// ("embed-qwen3-embedding-4b-q4/tpl1+rerank-qwen3-reranker-4b/tpl1") are
+	// free-form — model ids come from the operator — and %-Ns pads but never
+	// truncates, so ANY literal width eventually shears the table (two fixed
+	// widths in a row were each narrower than a producible label).
+	w := len("retriever")
 	for _, m := range results {
-		fmt.Printf("| %-13s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n",
+		if len(m.Retriever) > w {
+			w = len(m.Retriever)
+		}
+	}
+	fmt.Printf("| %-*s | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n", w, "retriever")
+	fmt.Printf("|%s|----------|----------|----------|-------|-----------|\n", strings.Repeat("-", w+2))
+	for _, m := range results {
+		fmt.Printf("| %-*s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n", w,
 			m.Retriever,
 			m.RecallAt[1],
 			m.RecallAt[3],

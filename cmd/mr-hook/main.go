@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/catalog"
+	"github.com/dmmdea/meta-router/internal/embedtpl"
 	"github.com/dmmdea/meta-router/internal/index"
 	"github.com/dmmdea/meta-router/internal/retrievers"
 	"github.com/dmmdea/meta-router/internal/usagelog"
@@ -215,18 +216,24 @@ const logDepth = 8
 // precision gate (mode "bm25-fallback") or stay silent (mode
 // "embedder-down"); if the prompt is too short, surface nothing (mode
 // "too-short"). Returns the ids to surface, the top cosine (0 when not
-// applicable), the mode for logging, and the scored candidate list (W9
+// applicable), the mode for logging, the scored candidate list (W9
 // R9.2b) — populated on BOTH surfaced and gated-empty cosine paths (the
 // gated region is 27% of live traffic and exactly where the gate decision
 // needs scores), nil on modes where no cosine ran, so a BM25 score can never
-// recontaminate the cosine denominator the R9.2 analysis just cleaned.
+// recontaminate the cosine denominator the R9.2 analysis just cleaned — and
+// the primary retriever's error string ("" when it didn't fail). That last
+// return exists because dropping the error made every failure class read as
+// a generic outage: a dim mismatch, an index-recorded model the endpoint
+// doesn't serve, and a genuinely down embedder all logged an EMPTY Err under
+// "embedder-down", and the one message that says "rebuild the index or pin
+// the right endpoint" never reached any log (review 2026-08-16, HIGH).
 //
 // Retrieval depth is max(k, logDepth) but ONLY the first k surface: the
 // ranking is one deterministic sort, so the top-k of a deeper retrieval is
 // identical to a k-retrieval — pinned by TestSurfacedIsPrefixOfCandidates.
-func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string, []usagelog.Cand) {
+func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string, []usagelog.Cand, string) {
 	if len(strings.TrimSpace(prompt)) < minLen {
-		return nil, 0, "too-short", nil
+		return nil, 0, "too-short", nil, ""
 	}
 	kRetrieve := k
 	if kRetrieve < logDepth {
@@ -235,9 +242,9 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 	res, topCos, err := primary.RetrieveScored(prompt, kRetrieve)
 	if err != nil {
 		if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
-			return ids, 0, "bm25-fallback", nil
+			return ids, 0, "bm25-fallback", nil, err.Error()
 		}
-		return nil, 0, "embedder-down", nil
+		return nil, 0, "embedder-down", nil, err.Error()
 	}
 	// cands carries COSINES OR NOTHING. Hybrid's RetrieveScored returns RRF
 	// fused scores in .Score (~0.03 scale, 1/(60+rank) sums) — real cosines
@@ -259,7 +266,7 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 		}
 	}
 	if topCos < minCos {
-		return nil, topCos, "gated-empty", cands
+		return nil, topCos, "gated-empty", cands, ""
 	}
 	if len(res) > k {
 		res = res[:k]
@@ -268,7 +275,7 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 	for i, s := range res {
 		ids[i] = s.ID
 	}
-	return ids, topCos, primaryMode, cands
+	return ids, topCos, primaryMode, cands, ""
 }
 
 func formatContext(byID map[string]catalog.Skill, ids []string) string {
@@ -415,6 +422,21 @@ func main() {
 		byID[s.ID] = s
 	}
 
+	// W9-P item 1: the index identity names the model AND template version its
+	// vectors were embedded under; the query must be embedded identically. An
+	// identity this binary cannot resolve (a template it does not know, or a
+	// templated identity whose TplGuard tripwire says the vectors were last
+	// written raw by a pre-template binary) is a REFUSAL: embedding the query
+	// raw against templated vectors — or under a guessed template — is a
+	// silent vector-space mix that ranks garbage while looking healthy. Fail
+	// open: no retrieval at all (not even the BM25 fallback — per the W9-P
+	// spec the mismatch surfaces nothing but the quota hint), exit 0, and the
+	// row says exactly why.
+	spec, tplErr := idx.SpecForIndex()
+	if tplErr != nil {
+		rec.Err = "index identity: " + tplErr.Error()
+	}
+
 	// Per-prompt embedder timeout is a fraction of the hard deadline.
 	embedTO := time.Duration(*timeoutMs) * time.Millisecond
 	if *timeoutMs > 50 {
@@ -423,93 +445,98 @@ func main() {
 	primaryMode := *ranker
 	var sr scoredRetriever
 	var degradable *rerankOrEmbed // non-nil only in rerank mode
-	switch *ranker {
-	case "rerank":
-		// W9: embed+rerank is the only retriever that BEATS embed-only on real
-		// mined prompts (recall@3 0.276 vs 0.233; organic 0.340 vs 0.321). It
-		// had been retired twice on the synthetic gold set, which inverts the
-		// ordering because its prompts are description-derived.
-		//
-		// The reranker only REORDERS: RetrieveScored passes the embed max
-		// cosine through as topCos, so the -min-cosine gate admits exactly the
-		// same prompts it does under embed-only, and each candidate keeps its
-		// own cosine so cands stays cosines-only.
-		vecs := idx.Vectors()
-		if len(skills) != len(vecs) {
-			sr = failedRetriever{fmt.Errorf("index: %d skills but %d vectors", len(skills), len(vecs))}
-			break
-		}
-		ids := make([]string, len(skills))
-		for i, s := range skills {
-			ids[i] = s.ID
-		}
-		// The reranker needs enough of the deadline to actually answer. Running
-		// it under a deadline it cannot meet is worse than not running it: the
-		// hard deadline fires, the hook fails open, and NOTHING surfaces — on
-		// every prompt, looking exactly like a healthy hook. Refuse instead,
-		// say so in the row, and serve embed.
-		if *timeoutMs < rerankMinTimeoutMs {
-			rec.Err = fmt.Sprintf("-ranker=rerank needs -timeout-ms >= %d (measured p95 ~2.3s end-to-end); got %d — running embed",
-				rerankMinTimeoutMs, *timeoutMs)
-			primaryMode = "embed"
-			sr = retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO)
-			break
-		}
-		// Embed resolves an empty -endpoint internally (env / machine file /
-		// failover chain) AND refuses to send prompt text to an unverified
-		// built-in port until /v1/models confirms a model server is there.
-		// EmbedRerank does neither — it appends "/v1/rerank" to whatever it is
-		// handed. Handing it eps[0] blind would (a) post the raw prompt to a
-		// port nobody probed, defeating that guard, and (b) silently degrade
-		// forever on any host where the live endpoint is later in the chain.
-		// So probe the chain and use the first endpoint that answers.
-		rerankEP := liveEndpoint(retrievers.ResolveEndpoints(*endpoint))
-		emb := retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO)
-		if rerankEP == "" {
-			rec.Err = "-ranker=rerank: no endpoint answered /v1/models — running embed"
-			primaryMode = "embed"
-			sr = emb
-			break
-		}
-		// The rerank call gets a SUB-budget so the embed leg and the surfacing
-		// still fit inside the hard deadline even when the cross-encoder is
-		// slow; overrunning it degrades to embed order, which is free.
-		ro := &rerankOrEmbed{
-			embed:     emb,
-			reorderer: retrievers.NewEmbedRerank(emb, skills, rerankEP, rerankBudget(embedTO)),
-			depth:     rerankSurfaceDepth,
-		}
-		degradable = ro
-		sr = ro
-	case "hybrid":
-		hyb, herr := retrievers.NewHybridFromIndex(skills, idx.Vectors(), *endpoint, embedTO)
-		if herr != nil {
-			sr = failedRetriever{herr}
-		} else {
-			sr = hyb
-		}
-	default: // "embed" — primary ranking is embed-only cosine ordering
-		// A typo must not silently coerce to embed. "mode":"embed" already has
-		// two legitimate causes (configured embed, degraded rerank); a third
-		// silent one — a misspelled flag — is exactly the "production was
-		// running a configuration nobody believed" failure this system has
-		// already paid for once. Still fail-open, but say so in the row.
-		if *ranker != "" && *ranker != "embed" {
-			rec.Err = fmt.Sprintf("unknown -ranker %q — running embed", *ranker)
-		}
-		primaryMode = "embed"
-		vecs := idx.Vectors()
-		if len(skills) != len(vecs) {
-			sr = failedRetriever{fmt.Errorf("index: %d skills but %d vectors", len(skills), len(vecs))}
-		} else {
+	var bm25 lexicalScorer
+	// On a template mismatch no retriever is built at all — the goroutine
+	// below skips decide() and computes only the quota hint.
+	if tplErr == nil {
+		switch *ranker {
+		case "rerank":
+			// W9: embed+rerank is the only retriever that BEATS embed-only on real
+			// mined prompts (recall@3 0.276 vs 0.233; organic 0.340 vs 0.321). It
+			// had been retired twice on the synthetic gold set, which inverts the
+			// ordering because its prompts are description-derived.
+			//
+			// The reranker only REORDERS: RetrieveScored passes the embed max
+			// cosine through as topCos, so the -min-cosine gate admits exactly the
+			// same prompts it does under embed-only, and each candidate keeps its
+			// own cosine so cands stays cosines-only.
+			vecs := idx.Vectors()
+			if len(skills) != len(vecs) {
+				sr = failedRetriever{fmt.Errorf("index: %d skills but %d vectors", len(skills), len(vecs))}
+				break
+			}
 			ids := make([]string, len(skills))
 			for i, s := range skills {
 				ids[i] = s.ID
 			}
-			sr = retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO)
+			// The reranker needs enough of the deadline to actually answer. Running
+			// it under a deadline it cannot meet is worse than not running it: the
+			// hard deadline fires, the hook fails open, and NOTHING surfaces — on
+			// every prompt, looking exactly like a healthy hook. Refuse instead,
+			// say so in the row, and serve embed.
+			if *timeoutMs < rerankMinTimeoutMs {
+				rec.Err = fmt.Sprintf("-ranker=rerank needs -timeout-ms >= %d (measured p95 ~2.3s end-to-end); got %d — running embed",
+					rerankMinTimeoutMs, *timeoutMs)
+				primaryMode = "embed"
+				sr = retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO, spec)
+				break
+			}
+			// Embed resolves an empty -endpoint internally (env / machine file /
+			// failover chain) AND refuses to send prompt text to an unverified
+			// built-in port until /v1/models confirms a model server is there.
+			// EmbedRerank does neither — it appends "/v1/rerank" to whatever it is
+			// handed. Handing it eps[0] blind would (a) post the raw prompt to a
+			// port nobody probed, defeating that guard, and (b) silently degrade
+			// forever on any host where the live endpoint is later in the chain.
+			// So probe the chain and use the first endpoint that answers.
+			rerankEP := liveEndpoint(retrievers.ResolveEndpoints(*endpoint))
+			emb := retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO, spec)
+			if rerankEP == "" {
+				rec.Err = "-ranker=rerank: no endpoint answered /v1/models — running embed"
+				primaryMode = "embed"
+				sr = emb
+				break
+			}
+			// The rerank call gets a SUB-budget so the embed leg and the surfacing
+			// still fit inside the hard deadline even when the cross-encoder is
+			// slow; overrunning it degrades to embed order, which is free.
+			ro := &rerankOrEmbed{
+				embed:     emb,
+				reorderer: retrievers.NewEmbedRerank(emb, skills, rerankEP, rerankBudget(embedTO), embedtpl.RerankFor(retrievers.DefaultRerankModel)),
+				depth:     rerankSurfaceDepth,
+			}
+			degradable = ro
+			sr = ro
+		case "hybrid":
+			hyb, herr := retrievers.NewHybridFromIndex(skills, idx.Vectors(), *endpoint, embedTO, spec)
+			if herr != nil {
+				sr = failedRetriever{herr}
+			} else {
+				sr = hyb
+			}
+		default: // "embed" — primary ranking is embed-only cosine ordering
+			// A typo must not silently coerce to embed. "mode":"embed" already has
+			// two legitimate causes (configured embed, degraded rerank); a third
+			// silent one — a misspelled flag — is exactly the "production was
+			// running a configuration nobody believed" failure this system has
+			// already paid for once. Still fail-open, but say so in the row.
+			if *ranker != "" && *ranker != "embed" {
+				rec.Err = fmt.Sprintf("unknown -ranker %q — running embed", *ranker)
+			}
+			primaryMode = "embed"
+			vecs := idx.Vectors()
+			if len(skills) != len(vecs) {
+				sr = failedRetriever{fmt.Errorf("index: %d skills but %d vectors", len(skills), len(vecs))}
+			} else {
+				ids := make([]string, len(skills))
+				for i, s := range skills {
+					ids[i] = s.ID
+				}
+				sr = retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO, spec)
+			}
 		}
+		bm25 = retrievers.NewBM25(skills)
 	}
-	bm25 := retrievers.NewBM25(skills)
 
 	// Run the decision AND the quota hint under ONE hard deadline; if either
 	// overruns, surface nothing (A2R-#11: the quota-hint file reads used to run
@@ -528,22 +555,38 @@ func main() {
 		// healthy ones. A subsystem silently not running, with a log that looks
 		// correct, is the exact failure this system already paid weeks for.
 		degradeErr string
+		// primaryErr carries the primary retriever's failure the same way:
+		// without it, "embedder-down" rows logged an empty Err and a
+		// per-index model misconfiguration was indistinguishable from a dead
+		// endpoint.
+		primaryErr string
 	}
 	ch := make(chan result, 1)
 	go func() {
-		ids, topCos, mode, cands := decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
-		// If the cross-encoder failed and the embed ordering was used instead,
-		// the row must say "embed" — never claim a rerank that did not run.
-		// Only rewrite the ranker modes; decide's own outcomes (gated-empty,
-		// too-short, bm25-fallback, embedder-down) already describe themselves.
-		var degradeErr string
-		if degradable != nil {
-			if mode == primaryMode {
-				mode = degradable.mode(primaryMode)
+		var ids []string
+		var topCos float64
+		var cands []usagelog.Cand
+		var degradeErr, primaryErr string
+		// The mismatch refusal surfaces NOTHING — not even the BM25 fallback
+		// (a lexical consolation would mask an index the operator must
+		// rebuild) — but the quota hint below still runs: it reads ledgers,
+		// not vectors, and is the one thing the W9-P spec says survives.
+		mode := "tpl-mismatch"
+		if tplErr == nil {
+			ids, topCos, mode, cands, primaryErr = decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
+			// If the cross-encoder failed and the embed ordering was used
+			// instead, the row must say "embed" — never claim a rerank that
+			// did not run. Only rewrite the ranker modes; decide's own
+			// outcomes (gated-empty, too-short, bm25-fallback,
+			// embedder-down) already describe themselves.
+			if degradable != nil {
+				if mode == primaryMode {
+					mode = degradable.mode(primaryMode)
+				}
+				// Carried out on EVERY outcome, not just the surfaced one —
+				// a gated-empty row must still show the reranker was down.
+				degradeErr = degradable.degradeErr
 			}
-			// Carried out on EVERY outcome, not just the surfaced one — a
-			// gated-empty row must still show that the reranker was down.
-			degradeErr = degradable.degradeErr
 		}
 		// Quota+route hint computed INSIDE the deadline-bounded goroutine:
 		// ledger-direct, fail-open ("" on any error), zero policy content.
@@ -551,17 +594,30 @@ func main() {
 		if *quotaHintOn {
 			hint = quotaHint(time.Now().UTC())
 		}
-		ch <- result{ids, topCos, mode, cands, hint, degradeErr}
+		ch <- result{ids, topCos, mode, cands, hint, degradeErr, primaryErr}
 	}()
 
 	select {
 	case r := <-ch:
 		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
-		if r.degradeErr != "" && rec.Err == "" {
-			rec.Err = "ranker degraded to embed: " + r.degradeErr
+		// One Err slot, causes JOINED — never dropped on conflict. A
+		// first-cause-wins chain here let three non-fatal -ranker notices
+		// (sub-floor timeout, no live rerank endpoint, unknown ranker) mask
+		// the primary retriever's failure on EVERY prompt of such a host —
+		// permanently hiding the one message that says "rebuild the index or
+		// pin the right endpoint" (review 2026-08-16 round 2, the same
+		// attribution-loss class appendDeadline fixed one branch down).
+		if r.primaryErr != "" {
+			rec.Err = joinErr(rec.Err, "primary retriever: "+r.primaryErr)
+		}
+		if r.degradeErr != "" {
+			rec.Err = joinErr(rec.Err, "ranker degraded to embed: "+r.degradeErr)
 		}
 		ctx := formatContext(byID, r.ids)
-		if offloadNudge(in.Prompt) {
+		// The nudge is prompt-shaped, not index-shaped — but the tpl-mismatch
+		// contract is "nothing but the quota hint", and appendNudge("") would
+		// happily emit the bare nudge on a refusal (review 2026-08-16).
+		if tplErr == nil && offloadNudge(in.Prompt) {
 			rec.NudgeOffload = true
 			ctx = appendNudge(ctx)
 		}
@@ -573,8 +629,29 @@ func main() {
 			fmt.Fprintln(os.Stdout, out)
 		}
 	case <-time.After(time.Duration(*timeoutMs) * time.Millisecond):
-		rec.Mode = "error"
-		rec.Err = "deadline exceeded"
+		// Never CLOBBER an earlier attribution: on a tpl-mismatch whose
+		// quota-hint ledger read overran the deadline, overwriting Err erased
+		// the only durable record that the index needs a rebuild — every such
+		// row read as a perf problem (review 2026-08-16).
+		stampDeadline(&rec)
 		// surface nothing
 	}
+}
+
+// stampDeadline marks a record as deadline-killed, folding the overrun into
+// any existing attribution. Extracted so the clobber-vs-fold semantics are
+// unit-testable at the record level (the select branch itself cannot be
+// deterministically forced in an e2e).
+func stampDeadline(rec *usagelog.Record) {
+	rec.Mode = "error"
+	rec.Err = joinErr(rec.Err, "deadline exceeded")
+}
+
+// joinErr folds a new cause into an existing error attribution instead of
+// replacing or dropping either — the single Err slot carries every cause.
+func joinErr(prev, add string) string {
+	if prev == "" {
+		return add
+	}
+	return prev + "; " + add
 }
