@@ -218,6 +218,23 @@ func TestApplyRefreshRefusesForeignSpecPlan(t *testing.T) {
 	if rawIdx.TplGuard != "" {
 		t.Fatalf("refused apply must not stamp the guard: %q", rawIdx.TplGuard)
 	}
+	// The MODEL half of the identity (round-3 review: a version-only guard
+	// let a foreign-model plan through — same versions, different model,
+	// equal dims — writing mixed-model vectors under a coherent identity).
+	foreignPlan := rawIdx.PlanRefresh([]catalog.Skill{a, b}, embedtpl.Raw("qwen3-embedding-4b-q4"))
+	if err := rawIdx.ApplyRefresh(foreignPlan, "ep", time.Second); err == nil {
+		t.Fatal("foreign-model plan must refuse even with matching template versions")
+	}
+	if len(rawIdx.Entries) != 1 {
+		t.Fatalf("refused apply must not install entries: %d", len(rawIdx.Entries))
+	}
+	// Legacy pre-Model-field index normalizes to embeddinggemma — a raw
+	// embeddinggemma plan must still pass (no false positive).
+	legacy := &Index{Entries: []Entry{{Skill: a, Vec: []float64{1}, Hash: HashSkill(a)}}}
+	legacyPlan := legacy.PlanRefresh([]catalog.Skill{a}, embedtpl.Raw("embeddinggemma"))
+	if err := legacy.ApplyRefresh(legacyPlan, "ep", time.Second); err != nil {
+		t.Fatalf("legacy index + embeddinggemma raw plan must pass: %v", err)
+	}
 }
 
 // Build stamps the guard; a refresh under the same spec re-stamps it.

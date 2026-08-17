@@ -184,12 +184,16 @@ func main() {
 func printTable(title string, results []eval.Metrics) {
 	fmt.Println()
 	fmt.Println(title + ":")
-	// 34 wide: identity-carrying labels ("hybrid-rrf-embeddinggemma/tpl1",
-	// "embed-egemma+rerank-qwen3-reranker-4b/tpl1") must not shear the table.
-	fmt.Printf("| %-34s | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n", "retriever")
-	fmt.Printf("|------------------------------------|----------|----------|----------|-------|-----------|\n")
+	// 56 wide: the longest producible identity-carrying label is
+	// "embed-embeddinggemma/tpl1+rerank-qwen3-reranker-4b/tpl1" (55 chars —
+	// templated primary + qwen reranker); %-Ns pads but never truncates, so
+	// the column must fit the worst case or the table shears anyway (round-3
+	// review: the first width fix was narrower than its own comment's
+	// example).
+	fmt.Printf("| %-56s | recall@1 | recall@3 | recall@5 |  MRR  | median_ms |\n", "retriever")
+	fmt.Printf("|----------------------------------------------------------|----------|----------|----------|-------|-----------|\n")
 	for _, m := range results {
-		fmt.Printf("| %-34s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n",
+		fmt.Printf("| %-56s | %8.3f | %8.3f | %8.3f | %.3f | %9.1f |\n",
 			m.Retriever,
 			m.RecallAt[1],
 			m.RecallAt[3],

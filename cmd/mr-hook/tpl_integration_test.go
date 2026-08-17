@@ -290,8 +290,9 @@ func TestHookRowJoinsRankerNoticeAndPrimaryErrorE2E(t *testing.T) {
 	work := t.TempDir()
 	idxPath := writeIndex(t, work, "embeddinggemma", "")
 	logPath := filepath.Join(work, "usage.jsonl")
-	// Unknown ranker (pre-sets rec.Err, degrades to embed) + a dead endpoint
-	// (primary retriever fails) + a prompt with no lexical pull (no fallback).
+	// Unknown ranker (pre-sets rec.Err via the flag-typo notice; the default
+	// branch runs plain embed) + a dead endpoint (primary retriever fails) +
+	// a prompt with no lexical pull (no fallback).
 	runHook(t, bin, "completely unrelated wording with no lexical pull",
 		"-index", idxPath, "-log", logPath, "-endpoint", "http://127.0.0.1:1",
 		"-ranker", "bogus", "-quota-hint=false", "-timeout-ms", "5000")
