@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.34.0] — 2026-08-19
+
+### Added — W10: `tools` flat-root kind + `tool:` namespace (lane-pointer surfacing, opt-in)
+The surfacer can now carry POINTER entries for capabilities that are neither skills, commands, nor agents — e.g. MCP tools that a task-shaped prompt should route to. Ships dark, exactly like the other flat kinds: production composition changes only when a `roots.json` entry names a `"kind": "tools"` root, behind its measured retrieval gate.
+
+- **`catalog.KindTools`**: flat `*.md` root; identity = frontmatter `name` (basename fallback); ID = `tool:<name>`, reserving the `tool` namespace as `agent` is reserved. Empty-description files are skipped (they would embed as name-only noise). The three flat-kind gates in `HarvestRoots` now share one predicate (`Root.flat()`) so a future kind cannot be wired into one site and missed in another.
+- **mr-hook rendering**: `tool:` entries surface as the bare pointer name labeled `(local tool)`; a trailer — emitted only when such an entry actually surfaced — tells the model these are MCP tools to load via ToolSearch, following the steering rule the entry's text cites. Skills-only output stays byte-identical (pinned by test).
+- **Reserved namespaces ENFORCED, not just documented** (review finding): a skills-class root whose pack name is `agent` or `tool` would mint namespaced IDs via `InvocableID` and trick the hook into rendering an invocation trailer for a subagent/MCP tool that does not exist — `roots.Load` now refuses such packs loudly (flat roots exempt: their IDs never derive from Pack), and the unknown-kind error message now advertises `tools` among the valid kinds so a typo'd `"tool"` is discoverable.
+- Guard provenance: all four new branches mutation-tested red at their real sites (harvest case, render branch, trailer gate, reserved-pack guard).
+
 ## [0.33.0] — 2026-08-16
 
 ### Added — W9-P item 1: the per-model embedding template registry (operator-approved program, opt-in)

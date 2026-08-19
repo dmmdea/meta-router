@@ -273,3 +273,51 @@ func TestStale_OwnershipUsesPathBoundaryNotStringPrefix(t *testing.T) {
 		t.Fatalf("it is operator-owned and must be preserved: %+v", operator)
 	}
 }
+
+// The reserved-namespace guard: a skills-class root whose pack name would
+// mint agent:/tool: IDs is refused loudly, and flat roots (whose IDs never
+// derive from Pack) stay accepted.
+func TestLoadRefusesReservedPackOnSkillsRoot(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) string {
+		p := filepath.Join(dir, "roots.json")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := write(`{"version":1,"roots":[{"path":"C:/x","pack":"tool"}]}`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "reserved ID namespace") {
+		t.Fatalf("skills-class pack \"tool\" must be refused, got err=%v", err)
+	}
+	p = write(`{"version":1,"roots":[{"path":"C:/x","pack":"agent","kind":"skills"}]}`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "reserved ID namespace") {
+		t.Fatalf("explicit-skills pack \"agent\" must be refused, got err=%v", err)
+	}
+	p = write(`{"version":1,"roots":[{"path":"C:/x","pack":"tool","kind":"tools"}]}`)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("a flat tools root may use any pack (IDs don't derive from Pack): %v", err)
+	}
+}
+
+// KindTools is accepted by Load, and the unknown-kind error names it among
+// the valid kinds (an operator who typos "tool" must be able to discover
+// "tools" from the message).
+func TestLoadKindToolsAcceptedAndAdvertised(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "roots.json")
+	if err := os.WriteFile(p, []byte(`{"version":1,"roots":[{"path":"C:/x","pack":"local-offload","kind":"tools"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs, err := Load(p)
+	if err != nil || len(rs) != 1 || rs[0].Kind != catalog.KindTools {
+		t.Fatalf("kind tools not loaded: rs=%+v err=%v", rs, err)
+	}
+	if err := os.WriteFile(p, []byte(`{"version":1,"roots":[{"path":"C:/x","pack":"p","kind":"tool"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(p)
+	if err == nil || !strings.Contains(err.Error(), `"tools"`) {
+		t.Fatalf("unknown-kind error must advertise \"tools\", got: %v", err)
+	}
+}
