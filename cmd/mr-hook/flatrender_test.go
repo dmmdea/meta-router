@@ -68,3 +68,53 @@ func TestFormatContextCommandKeepsSlashForm(t *testing.T) {
 		t.Fatalf("no agent clause without agents: %q", got)
 	}
 }
+
+// W10: tool-pointer entries render as bare name labeled (local tool) with the
+// MCP trailer, and the raw tool: ID never surfaces (nothing accepts it).
+func TestFormatContextToolRendersBareNameAndToolTrailer(t *testing.T) {
+	m, ids := fixtureByID(
+		catalog.Skill{ID: "tool:offload-doc-sweep", Source: "local-offload", Description: "agent_run sweeps a folder of docs."},
+	)
+	got := formatContext(m, ids)
+	if strings.Contains(got, "tool:offload-doc-sweep") {
+		t.Fatalf("the raw tool: ID must never be surfaced: %q", got)
+	}
+	if !strings.Contains(got, "- offload-doc-sweep (local tool): ") {
+		t.Fatalf("tool must render as bare name labeled (local tool): %q", got)
+	}
+	if !strings.Contains(got, "MCP tools, not skills") || !strings.Contains(got, "ToolSearch") {
+		t.Fatalf("tool trailer clause missing: %q", got)
+	}
+}
+
+// The tool trailer appears ONLY when a tool entry surfaced — skills-only
+// output stays byte-identical (the behavior-inert-by-construction contract).
+func TestFormatContextToolTrailerAbsentWithoutToolEntry(t *testing.T) {
+	m, ids := fixtureByID(
+		catalog.Skill{ID: "gstack-qa", Source: "skills", Description: "QA a web app."},
+	)
+	got := formatContext(m, ids)
+	if strings.Contains(got, "local tool") || strings.Contains(got, "ToolSearch") {
+		t.Fatalf("tool trailer leaked into skills-only output: %q", got)
+	}
+}
+
+// Mixed render: agent + tool + skill in one surfacing — both namespace
+// trailers coexist, and a tool entry that is NOT first still sets its gate.
+func TestFormatContextMixedAgentToolSkill(t *testing.T) {
+	m, ids := fixtureByID(
+		catalog.Skill{ID: "gstack-qa", Source: "skills", Description: "QA a web app."},
+		catalog.Skill{ID: "agent:context-engineer", Source: "agents", Description: "Audit context overhead."},
+		catalog.Skill{ID: "tool:offload-doc-sweep", Source: "local-offload", Description: "agent_run sweeps docs."},
+	)
+	got := formatContext(m, ids)
+	if !strings.Contains(got, "- context-engineer (agent): ") ||
+		!strings.Contains(got, "- offload-doc-sweep (local tool): ") ||
+		!strings.Contains(got, "- gstack-qa (skills): ") {
+		t.Fatalf("mixed render lost an entry class: %q", got)
+	}
+	if !strings.Contains(got, "Agent tool (subagent_type = the listed name)") ||
+		!strings.Contains(got, "MCP tools, not skills") {
+		t.Fatalf("both namespace trailers must coexist: %q", got)
+	}
+}

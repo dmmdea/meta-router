@@ -71,8 +71,21 @@ func Load(path string) ([]catalog.Root, error) {
 		// ("command", "Agents") is the EXPECTED failure mode (review
 		// 2026-07-30, MINOR).
 		if !catalog.ValidKind(r.Kind) {
-			return nil, fmt.Errorf("roots: %s: unknown kind %q for %s (valid: %q, %q, %q, or omit)",
-				path, r.Kind, r.Path, catalog.KindSkills, catalog.KindCommands, catalog.KindAgents)
+			return nil, fmt.Errorf("roots: %s: unknown kind %q for %s (valid: %q, %q, %q, %q, or omit)",
+				path, r.Kind, r.Path, catalog.KindSkills, catalog.KindCommands, catalog.KindAgents, catalog.KindTools)
+		}
+		// The "agent" and "tool" pack names are RESERVED namespaces (catalog.go
+		// Kind contract): a SKILLS-class root with one of these pack names
+		// mints "agent:<x>" / "tool:<x>" IDs via InvocableID(pack, name), and
+		// the hook then renders those entries with the namespace's invocation
+		// trailer — instructing the model to dispatch a subagent or load an
+		// MCP tool that does not exist. The reservation was comment-only until
+		// a review demonstrated the mint against the real harvester; this
+		// enforces it with the same refuse-loudly disposition as an unknown
+		// kind. Flat roots are exempt: their IDs never derive from Pack.
+		if (r.Pack == "agent" || r.Pack == "tool") && (r.Kind == "" || r.Kind == catalog.KindSkills) {
+			return nil, fmt.Errorf("roots: %s: pack %q for %s is a reserved ID namespace (agent:/tool: entries are minted only by kind %q/%q roots)",
+				path, r.Pack, r.Path, catalog.KindAgents, catalog.KindTools)
 		}
 		if r.Pack == "" {
 			r.Pack = catalog.UserPack

@@ -42,6 +42,13 @@ const (
 	KindSkills   = "skills"
 	KindCommands = "commands" // flat *.md; invoked as /<basename>; frontmatter has no name
 	KindAgents   = "agents"   // flat *.md; dispatched by frontmatter name via the Agent tool
+	// KindTools (W10): flat *.md POINTER entries for tools that are not
+	// skills/commands/agents — e.g. MCP tools a surfaced hint should route to.
+	// ID = "tool:<name>", which RESERVES the pack name "tool" exactly as
+	// "agent" is reserved above. The entry's description carries the actual
+	// invocation route (the hint renderer adds a namespace trailer); the ID is
+	// a stable index identity, not a Skill-tool invocable.
+	KindTools = "tools"
 )
 
 // ValidKind reports whether k is a recognized root kind. The zero value is the
@@ -51,10 +58,19 @@ const (
 // operator can only detect by noticing absence (review 2026-07-30, MINOR).
 func ValidKind(k string) bool {
 	switch k {
-	case "", KindSkills, KindCommands, KindAgents:
+	case "", KindSkills, KindCommands, KindAgents, KindTools:
 		return true
 	}
 	return false
+}
+
+// flat reports whether this root harvests as a FLAT *.md directory rather
+// than a SKILL.md walk. Single source of truth for the kind class: the
+// ordering rule and the harvest dispatch in HarvestRoots both key on it, so
+// a new flat kind cannot be wired into one site and silently missed in
+// another (that partial-wiring shape has shipped real defects before).
+func (r Root) flat() bool {
+	return r.Kind == KindCommands || r.Kind == KindAgents || r.Kind == KindTools
 }
 
 type Root struct {
@@ -384,18 +400,18 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 	// order within each class is preserved.
 	ordered := make([]Root, 0, len(roots))
 	for _, r := range roots {
-		if r.Kind != KindCommands && r.Kind != KindAgents {
+		if !r.flat() {
 			ordered = append(ordered, r)
 		}
 	}
 	for _, r := range roots {
-		if r.Kind == KindCommands || r.Kind == KindAgents {
+		if r.flat() {
 			ordered = append(ordered, r)
 		}
 	}
 	var out []Skill
 	for _, root := range ordered {
-		if root.Kind == KindCommands || root.Kind == KindAgents {
+		if root.flat() {
 			out = append(out, harvestFlat(root)...)
 			continue
 		}
@@ -537,6 +553,14 @@ func harvestFlat(root Root) []Skill {
 				s.Name = base
 			}
 			s.ID = "agent:" + s.Name
+		case KindTools:
+			// Same identity rule as agents: frontmatter name (the tool the
+			// entry points at is named in its description; the file name is
+			// the pointer's own identity), basename fallback.
+			if s.Name == "" {
+				s.Name = base
+			}
+			s.ID = "tool:" + s.Name
 		}
 		s.Source = root.Pack
 		hs = append(hs, flatEntry{skill: s, nameMatch: s.Name == base})

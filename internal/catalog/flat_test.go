@@ -236,9 +236,17 @@ func TestSkillWinsDescriptionTwinInEitherRootOrder(t *testing.T) {
 	cmds := t.TempDir()
 	writeFlat(t, cmds, "myskill.md", "---\ndescription: One shared description.\n---\n")
 
+	tools := t.TempDir()
+	writeFlat(t, tools, "myskill.md", "---\ndescription: One shared description.\n---\n")
+
 	orders := [][]Root{
 		{{Path: skills, Pack: UserPack}, {Path: cmds, Pack: "commands", Kind: KindCommands}},
 		{{Path: cmds, Pack: "commands", Kind: KindCommands}, {Path: skills, Pack: UserPack}},
+		// W10: the same skill-wins contract must hold against a tools root —
+		// flat() is one predicate, but the ordering rule is the load-bearing
+		// half, so it gets its own rows.
+		{{Path: skills, Pack: UserPack}, {Path: tools, Pack: "local-offload", Kind: KindTools}},
+		{{Path: tools, Pack: "local-offload", Kind: KindTools}, {Path: skills, Pack: UserPack}},
 	}
 	for i, roots := range orders {
 		hs, err := HarvestRoots(roots)
@@ -252,5 +260,52 @@ func TestSkillWinsDescriptionTwinInEitherRootOrder(t *testing.T) {
 		if kept[0].ID != "myskill" {
 			t.Fatalf("order %d: the SKILL must survive the twin collapse, got %q", i, kept[0].ID)
 		}
+	}
+}
+
+// W10: a tools root harvests like an agents root (frontmatter name, basename
+// fallback, empty-description skip) but mints the "tool:" namespace. The
+// entry is a POINTER — its description names the real MCP tool — so identity
+// stability, not Skill-tool invocability, is the contract.
+func TestHarvestToolsRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeFlat(t, dir, "offload-doc-sweep.md", "---\nname: offload-doc-sweep\ndescription: agent_run sweeps a folder of docs and reports back.\n---\nbody points at the MCP tool\n")
+	writeFlat(t, dir, "nameless.md", "---\ndescription: falls back to the basename.\n---\n")
+	writeFlat(t, dir, "empty-desc.md", "---\nname: ghost\ndescription:\n---\n")
+
+	got, err := HarvestRoots([]Root{{Path: dir, Pack: "local-offload", Kind: KindTools}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 tools (empty-description skipped), got %d: %+v", len(got), got)
+	}
+	byName := map[string]Skill{}
+	for _, s := range got {
+		byName[s.Name] = s
+	}
+	sweep, ok := byName["offload-doc-sweep"]
+	if !ok {
+		t.Fatalf("offload-doc-sweep missing: %+v", got)
+	}
+	if sweep.ID != "tool:offload-doc-sweep" {
+		t.Fatalf("tool ID = %q, want tool:offload-doc-sweep", sweep.ID)
+	}
+	if sweep.Source != "local-offload" {
+		t.Fatalf("Source = %q, want local-offload", sweep.Source)
+	}
+	if nameless, ok := byName["nameless"]; !ok || nameless.ID != "tool:nameless" {
+		t.Fatalf("basename fallback broken: %+v", byName)
+	}
+}
+
+// ValidKind must accept the new kind — an unknown kind is REFUSED loudly by
+// loaders, so forgetting this is a silent zero-entry root.
+func TestValidKindTools(t *testing.T) {
+	if !ValidKind(KindTools) {
+		t.Fatal("ValidKind(tools) = false")
+	}
+	if ValidKind("tool") { // singular is a typo'd roots.json, must refuse
+		t.Fatal("ValidKind(tool) must be false")
 	}
 }

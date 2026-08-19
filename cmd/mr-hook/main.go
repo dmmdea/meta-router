@@ -286,6 +286,7 @@ func formatContext(byID map[string]catalog.Skill, ids []string) string {
 	b.WriteString("meta-router — relevant installed skills for this task:\n")
 	wrote := 0
 	wroteAgent := false
+	wroteTool := false
 	for _, id := range ids {
 		s, ok := byID[id]
 		if !ok {
@@ -306,6 +307,13 @@ func formatContext(byID map[string]catalog.Skill, ids []string) string {
 		if name, isAgent := strings.CutPrefix(s.ID, "agent:"); isAgent {
 			fmt.Fprintf(&b, "- %s (agent): %s\n", name, desc)
 			wroteAgent = true
+		} else if name, isTool := strings.CutPrefix(s.ID, "tool:"); isTool {
+			// W10 tool-pointer entries: the pointer's own name is surfaced;
+			// the entry's description names the actual tool and route. The
+			// (local tool) label plus the trailer below tell the model this
+			// is NOT a Skill-tool invocable.
+			fmt.Fprintf(&b, "- %s (local tool): %s\n", name, desc)
+			wroteTool = true
 		} else {
 			fmt.Fprintf(&b, "- %s (%s): %s\n", s.ID, s.Source, desc)
 		}
@@ -315,11 +323,15 @@ func formatContext(byID map[string]catalog.Skill, ids []string) string {
 		return "" // all ids missing from the index → surface nothing
 	}
 	// The trailer stays byte-identical to the pre-flat-roots output whenever no
-	// agent surfaced — which is every production prompt until W9's gate enables
-	// the flat roots — so this change is behavior-inert today by construction.
+	// agent or tool entry surfaced — which is every production prompt until a
+	// roots.json entry enables a flat root behind its measured gate — so this
+	// change is behavior-inert today by construction.
 	b.WriteString("Invoke one via the Skill tool or its slash command if it fits.")
 	if wroteAgent {
 		b.WriteString(" Entries marked (agent) are dispatched via the Agent tool (subagent_type = the listed name), never the Skill tool.")
+	}
+	if wroteTool {
+		b.WriteString(" Entries marked (local tool) are MCP tools, not skills: load the tool the entry's text names via ToolSearch and follow the steering rule it cites before calling.")
 	}
 	return b.String()
 }
