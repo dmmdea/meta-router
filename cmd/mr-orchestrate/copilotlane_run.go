@@ -26,11 +26,24 @@ func applyCopilotOutcome(l *ledger.Ledger, o copilotlane.Outcome, cfg orchcfg.Co
 		l.SetCapacityEstimate("copilot", ledger.WinMonth, cfg.CopilotMonthlyRequests*1000) // milli-requests
 	}
 	l.AnchorIfUnset("copilot", ledger.WinMonth, ledger.NextMonthlyReset(now), now)
-	if o.Usage.PremiumRequests > 0 {
-		l.AddShadow("copilot", ledger.WinMonth, o.Usage.PremiumRequests*1000, now)
-	} else if o.Class == "ok" {
-		// A successful dispatch that reported no checkpoint still spent at
-		// least one request — meter conservatively rather than free-riding.
+	// METERING UNIT: one dispatch = one request. The vendor's own
+	// `totalPremiumRequests` is recorded as evidence (Outcome.Usage, and the
+	// raw JSONL the caller prints) but does NOT drive admission, because its
+	// unit is UNVERIFIED and measured non-obvious (2026-09-01, reproducible on
+	// fresh isolated sessions): claude-sonnet-5 → 1, gpt-5.6-terra → 1,
+	// gemini-3.6-flash → 14, while gemini-flash consumed the FEWEST nano-AIU
+	// of the three. So the field is not a cost proxy in the way its name
+	// suggests, and no billing API is reachable to settle it (404 without a
+	// scope the orchestrator must not request on its own).
+	//
+	// Choosing the conservative unit is deliberate under R14 (no artificial
+	// brakes): if 14 were taken at face value, ~21 dispatches would "exhaust"
+	// a 300-request allowance and the router would mask a lane that still has
+	// capacity — a brake invented from an unverified number. The opposite
+	// error is benign: exceeding the allowance degrades to included models
+	// (documented) and CANNOT spend, since R10 forbids an overage budget and
+	// this lane sets none. Recalibrate the moment the unit is established.
+	if o.Class == "ok" || o.Usage.PremiumRequests > 0 {
 		l.AddShadow("copilot", ledger.WinMonth, 1000, now)
 	}
 	if o.Class == "rate_limit" {
