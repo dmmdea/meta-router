@@ -186,6 +186,13 @@ type spendDownReq struct {
 	Batch   bool
 	Est     time.Duration
 	Persist bool
+	// Exclude masks these lanes for THIS consult only (delegate-mode,
+	// 2026-09-01, spec §3): per-invocation, never config, so an armed session
+	// cannot leak the mask into another session. It lives on this struct
+	// because this is already the per-consult request threaded through both
+	// route and run; the name predates the field and is kept to avoid churn
+	// across 15 call sites.
+	Exclude []string
 }
 
 // spendDownBoostByLane computes the E2 boost per lane for a BATCH-TAGGED
@@ -296,6 +303,16 @@ func spendDownArmedByLane(snap []ledger.Bucket, samples []calib.Sample, cfg orch
 // the state files. sd carries the consult's E2 inputs (see spendDownReq).
 func buildRouteDecision(cfg orchcfg.Config, fzs []fuses.Fuse, snap []ledger.Bucket, class router.Class, ctxTokens int64, now time.Time, sd spendDownReq) router.Decision {
 	states := laneStates(snap, fzs, cfg, now)
+	// delegate-mode exclusion: applied AFTER laneStates so it overrides any
+	// open/throttled state, BEFORE downshift/boost so those never resurrect it.
+	// "excluded" is registered in router.masked() (denylist) — see
+	// TestMaskedRegistersExcluded.
+	for _, lane := range sd.Exclude {
+		if st, ok := states[lane]; ok {
+			st.State = "excluded"
+			states[lane] = st
+		}
+	}
 	samples := calib.Load(quotaTracePath())
 	down := burnDownshiftByLane(snap, samples, cfg, now)
 	for lane, lv := range down {
@@ -399,6 +416,8 @@ func runRoute(args []string) error {
 	noReceipt := fs.Bool("no-receipt", false, "skip the consult receipt (tests/introspection loops)")
 	batch := fs.Bool("batch", false, "E2 spend-down tag: this is an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost")
 	estMinutes := fs.Float64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
+	var exclude excludeFlag
+	fs.Var(&exclude, "exclude", "mask a lane for THIS consult only (repeatable or comma-separated: claude|codex|copilot|glm|local). delegate-mode passes --exclude claude")
 	_ = fs.Parse(args)
 
 	now := time.Now().UTC()
@@ -439,6 +458,7 @@ func runRoute(args []string) error {
 		// --no-receipt marks a test/introspection consult — it must not
 		// advance persistent spend-down state either.
 		Persist: *batch && !*noReceipt,
+		Exclude: []string(exclude),
 	})
 
 	// All-masked relegation: emit the standard deferral JSON with resume_at and
