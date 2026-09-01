@@ -159,6 +159,9 @@ func toolSchemas() []map[string]any {
 	strProp := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	numProp := func(desc string) map[string]any { return map[string]any{"type": "number", "description": desc} }
 	boolProp := func(desc string) map[string]any { return map[string]any{"type": "boolean", "description": desc} }
+	arrProp := func(desc string) map[string]any {
+		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
+	}
 	return []map[string]any{
 		{
 			"name":        "route",
@@ -172,6 +175,7 @@ func toolSchemas() []map[string]any {
 					"latency_sensitive": boolProp("prefer the low-latency lane"),
 					"batch":             boolProp("E2 spend-down tag: an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost"),
 					"est_minutes":       numProp("expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)"),
+					"exclude":           arrProp("lanes to mask for THIS consult only (claude|codex|copilot|glm|local); delegate-mode passes [\"claude\"]"),
 				},
 				"required": []string{"task"},
 			},
@@ -271,18 +275,23 @@ func errText(s string) toolResult {
 // answer with resume_at.
 func toolRoute(args json.RawMessage) toolResult {
 	var a struct {
-		Task       string  `json:"task"`
-		Class      string  `json:"class"`
-		CtxTokens  int64   `json:"ctx_tokens"`
-		Latency    bool    `json:"latency_sensitive"`
-		Batch      bool    `json:"batch"`
-		EstMinutes float64 `json:"est_minutes"` // float: the schema says number; fractional minutes must not fail the call
+		Task       string   `json:"task"`
+		Class      string   `json:"class"`
+		CtxTokens  int64    `json:"ctx_tokens"`
+		Latency    bool     `json:"latency_sensitive"`
+		Batch      bool     `json:"batch"`
+		EstMinutes float64  `json:"est_minutes"` // float: the schema says number; fractional minutes must not fail the call
+		Exclude    []string `json:"exclude"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return errText("bad route arguments: " + err.Error())
 	}
 	if a.Task == "" && a.Class == "" {
 		return errText("route: task is required")
+	}
+	exclude, err := parseExclude(a.Exclude)
+	if err != nil {
+		return errText("route: " + err.Error())
 	}
 	now := time.Now().UTC()
 	cfg := orchcfg.Load(configPath())
@@ -315,6 +324,7 @@ func toolRoute(args json.RawMessage) toolResult {
 	}
 	d := buildRouteDecision(cfg, fzs, snap, class, a.CtxTokens, now, spendDownReq{
 		Batch: a.Batch, Est: time.Duration(a.EstMinutes * float64(time.Minute)), Persist: a.Batch,
+		Exclude: exclude,
 	})
 
 	// Consult receipt (Origin "mcp"): the delegation-coverage numerator.

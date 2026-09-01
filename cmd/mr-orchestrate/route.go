@@ -416,6 +416,8 @@ func runRoute(args []string) error {
 	noReceipt := fs.Bool("no-receipt", false, "skip the consult receipt (tests/introspection loops)")
 	batch := fs.Bool("batch", false, "E2 spend-down tag: this is an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost")
 	estMinutes := fs.Float64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
+	var exclude excludeFlag
+	fs.Var(&exclude, "exclude", "mask a lane for THIS consult only (repeatable or comma-separated: claude|codex|copilot|glm|local). delegate-mode passes --exclude claude")
 	_ = fs.Parse(args)
 
 	now := time.Now().UTC()
@@ -456,6 +458,7 @@ func runRoute(args []string) error {
 		// --no-receipt marks a test/introspection consult — it must not
 		// advance persistent spend-down state either.
 		Persist: *batch && !*noReceipt,
+		Exclude: []string(exclude),
 	})
 
 	// All-masked relegation: emit the standard deferral JSON with resume_at and
