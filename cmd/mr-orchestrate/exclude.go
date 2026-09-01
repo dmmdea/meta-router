@@ -46,7 +46,7 @@ func parseExclude(raw []string) ([]string, error) {
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
-			return nil, fmt.Errorf("exclude: unknown lane %q (valid: %s)", r, strings.Join(keys, "|"))
+			return nil, fmt.Errorf("exclude: unknown lane %q (valid: %s)", l, strings.Join(keys, "|"))
 		}
 		if !seen[l] {
 			seen[l] = true
