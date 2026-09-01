@@ -4,6 +4,15 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.36.0] — 2026-09-01
+
+### Added — per-consult lane exclusion and the delegate-mode proposal
+Support for the Claude-side **delegate-mode** (a per-session mode in which Claude delegates substantive work and keeps judgment; spec in the private repo, 2026-09-01).
+
+- **`route --exclude <lane>` / `run --exclude <lane>`** (CLI repeatable or csv; MCP `exclude: [..]`): masks the lane for THIS consult only — per-invocation, never config, so an armed session cannot leak the mask into another. New lane state `excluded`, registered in the router's `masked()` denylist and pinned by test. Unknown lane names are a typed error, never a silent no-op.
+- **`run` refuses an excluded resolved lane** with `lane_excluded` (exit 3), force-proof. Bare `run` defaults to the claude lane, so this is the check that keeps a delegating session from spending Claude through the orchestrator.
+- **`mr-hook` proposes `/delegate-mode`** when the claude lane's worst live statusline window reaches `delegate_propose_pct` (default 70) and the session's `~/.claude/state/delegate-mode/<sid>.json` is not armed. Read-only: it reads the drop directly (fresh, no ledger write) and never arms anything.
+
 ## [0.35.0] — 2026-09-01
 
 ### Added — the copilot lane (GitHub Copilot CLI), and GLM retirement as config

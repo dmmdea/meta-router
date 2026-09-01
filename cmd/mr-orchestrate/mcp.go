@@ -349,13 +349,13 @@ func toolRoute(args json.RawMessage) toolResult {
 // a buffer — the ONLY thing that reaches the transport is this tool result.
 func toolRun(args json.RawMessage) toolResult {
 	var a struct {
-		Prompt     string  `json:"prompt"`
-		Lane       string  `json:"lane"`
-		Model      string  `json:"model"`
-		Effort     string  `json:"effort"`
-		Class      string  `json:"class"`
-		CWD        string  `json:"cwd"`
-		TimeoutSec int     `json:"timeout_sec"`
+		Prompt     string   `json:"prompt"`
+		Lane       string   `json:"lane"`
+		Model      string   `json:"model"`
+		Effort     string   `json:"effort"`
+		Class      string   `json:"class"`
+		CWD        string   `json:"cwd"`
+		TimeoutSec int      `json:"timeout_sec"`
 		DryRun     bool     `json:"dry_run"`
 		Batch      bool     `json:"batch"`
 		EstMinutes float64  `json:"est_minutes"` // float: the schema says number; fractional minutes must not fail the call
