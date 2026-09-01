@@ -186,6 +186,13 @@ type spendDownReq struct {
 	Batch   bool
 	Est     time.Duration
 	Persist bool
+	// Exclude masks these lanes for THIS consult only (delegate-mode,
+	// 2026-09-01, spec §3): per-invocation, never config, so an armed session
+	// cannot leak the mask into another session. It lives on this struct
+	// because this is already the per-consult request threaded through both
+	// route and run; the name predates the field and is kept to avoid churn
+	// across 15 call sites.
+	Exclude []string
 }
 
 // spendDownBoostByLane computes the E2 boost per lane for a BATCH-TAGGED
@@ -296,6 +303,16 @@ func spendDownArmedByLane(snap []ledger.Bucket, samples []calib.Sample, cfg orch
 // the state files. sd carries the consult's E2 inputs (see spendDownReq).
 func buildRouteDecision(cfg orchcfg.Config, fzs []fuses.Fuse, snap []ledger.Bucket, class router.Class, ctxTokens int64, now time.Time, sd spendDownReq) router.Decision {
 	states := laneStates(snap, fzs, cfg, now)
+	// delegate-mode exclusion: applied AFTER laneStates so it overrides any
+	// open/throttled state, BEFORE downshift/boost so those never resurrect it.
+	// "excluded" is registered in router.masked() (denylist) — see
+	// TestMaskedRegistersExcluded.
+	for _, lane := range sd.Exclude {
+		if st, ok := states[lane]; ok {
+			st.State = "excluded"
+			states[lane] = st
+		}
+	}
 	samples := calib.Load(quotaTracePath())
 	down := burnDownshiftByLane(snap, samples, cfg, now)
 	for lane, lv := range down {
