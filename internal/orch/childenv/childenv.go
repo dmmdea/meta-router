@@ -34,6 +34,17 @@ var denied = map[string]bool{
 	"ANTHROPIC_API_KEY":    true,
 	"ANTHROPIC_AUTH_TOKEN": true,
 	"ANTHROPIC_BASE_URL":   true,
+	// GitHub tokens (copilot lane, 2026-09-01). The copilot CLI's documented
+	// precedence is COPILOT_GITHUB_TOKEN > GH_TOKEN > GITHUB_TOKEN, and gh
+	// itself honours GH_TOKEN over its keyring — an ambient token would bill
+	// an arbitrary account from inside ANY lane child. The copilot runner
+	// appends its deliberately-minted COPILOT_GITHUB_TOKEN AFTER this scrub,
+	// same pattern as the lane HOME pins.
+	"COPILOT_GITHUB_TOKEN": true,
+	"GH_TOKEN":             true,
+	"GITHUB_TOKEN":         true,
+	// Config/state redirect for the copilot CLI (the lane pins its own).
+	"COPILOT_HOME": true,
 	// Arbitrary header injection is a complete end-run around the key deny.
 	"ANTHROPIC_CUSTOM_HEADERS":      true,
 	"ANTHROPIC_IDENTITY_TOKEN":      true,

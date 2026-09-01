@@ -182,7 +182,7 @@ func normPct(p float64) float64 {
 // (relegation, never rejection: a dead lane never wins).
 func masked(state string) bool {
 	switch state {
-	case "exhausted", "hard_stop", "model_retired", "unavailable":
+	case "exhausted", "hard_stop", "model_retired", "unavailable", "retired":
 		return true
 	}
 	return false

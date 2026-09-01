@@ -396,6 +396,11 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		return runCodexLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, extraArgs, opts.Live, opts.Force, opts.KeepHome, opts.Origin, opts.Desc, rf, sf)
 	case "glm":
 		return runGLMLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, extraArgs, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+	case "copilot":
+		// No effort knob (reasoning effort is the vendor router's call under
+		// 'auto') and no keepHome (the copilot home holds no credentials worth
+		// debugging — auth rides in env and dies with the process).
+		return runCopilotLane(out, opts.Prompt, resolvedModel, opts.CWD, opts.TimeoutSec, extraArgs, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
 	case "local":
 		// S3R-1: an explicit --lane local now dispatches through the two-door
 		// local-offload adapter (cascade door for grunt/verify classes + cascade
