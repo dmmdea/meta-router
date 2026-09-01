@@ -46,6 +46,13 @@ type Config struct {
 	// data; subscriptions come back).
 	GLMRetired bool `json:"glm_retired"`
 
+	// DelegateProposePct: when the claude lane's worst live statusline window
+	// reaches this percentage and the session is not armed, mr-hook PROPOSES
+	// /delegate-mode (spec 2026-09-01 §4). A proposal only — arming is always an
+	// explicit operator act. < 0 disables. Default 70 is a starting point to
+	// calibrate against real sessions, not a measured threshold.
+	DelegateProposePct float64 `json:"delegate_propose_pct"`
+
 	// S2R-6 cadence hygiene (GLM ban fires on PATTERN, not volume): ships ON;
 	// explicit false is the operator's off-switch. Interval ∈ [min, min+jitter].
 	GLMPacing        bool  `json:"glm_pacing"`
@@ -119,6 +126,7 @@ func Defaults() Config {
 		CopilotMonthlyRequests: 300, CopilotModel: "auto", GLMRetired: true,
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
 		QuotaStaleHours: 48, PollMinIntervalMin: 5, LocalMaxPerMin: 20,
+		DelegateProposePct: 70,
 	}
 }
 
@@ -181,6 +189,9 @@ func Load(path string) Config {
 	}
 	if c.LocalMaxPerMin == 0 {
 		c.LocalMaxPerMin = 20 // absent field / hand-edit zero → default; negative = explicitly off
+	}
+	if c.DelegateProposePct == 0 {
+		c.DelegateProposePct = 70 // absent field / hand-edit zero → default; negative = explicitly off
 	}
 	return c
 }

@@ -604,7 +604,11 @@ func main() {
 		// ledger-direct, fail-open ("" on any error), zero policy content.
 		var hint string
 		if *quotaHintOn {
-			hint = quotaHint(time.Now().UTC())
+			now := time.Now().UTC()
+			hint = quotaHint(now)
+			if p := delegateProposal(now, in.SessionID); p != "" {
+				hint = appendHint(hint, p)
+			}
 		}
 		ch <- result{ids, topCos, mode, cands, hint, degradeErr, primaryErr}
 	}()
