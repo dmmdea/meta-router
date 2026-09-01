@@ -298,6 +298,9 @@ type runOpts struct {
 	Latency     bool
 	Origin      string
 	Deviation   string
+	// Exclude masks lanes for this dispatch's internal recommendation AND
+	// refuses the resolved lane if it is listed (delegate-mode, spec §2/§3).
+	Exclude []string
 	// E2 spend-down (Q2): Batch tags an already-queued batch task (never set
 	// on interactive dispatches); EstMinutes is its expected duration for the
 	// completion-fit gate (0 = unknown → no boost). Float: fractional minutes
@@ -355,6 +358,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	rec := computeRunRec(opts.Class, opts.Desc, opts.CtxTokens, opts.Latency, spendDownReq{
 		Batch: opts.Batch, Est: time.Duration(opts.EstMinutes * float64(time.Minute)),
 		Persist: opts.Batch && opts.Live,
+		Exclude: opts.Exclude,
 	}, nowRec)
 
 	// Reconcile with the operator's explicit flags (R11). --lane auto adopts the
@@ -384,6 +388,32 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	var extraArgs []string
 	if opts.Extra != "" {
 		extraArgs = strings.Fields(opts.Extra)
+	}
+
+	// delegate-mode (2026-09-01, spec §2): an excluded lane is refused even when
+	// named explicitly (--lane claude --exclude claude) and even with --force —
+	// an exclusion is the caller's own statement of intent, not a quota
+	// judgement --force may override. Bare `run` DEFAULTS to claude, so this is
+	// the check that keeps an armed session from spending Claude through the
+	// orchestrator it is delegating to.
+	for _, ex := range opts.Exclude {
+		if ex != resolvedLane {
+			continue
+		}
+		reason := fmt.Sprintf("lane %q is excluded for this dispatch (--exclude %s); recommendation was %q. Drop the exclusion or pass a different --lane",
+			resolvedLane, strings.Join(opts.Exclude, ","), rf.RecLane)
+		rec := dispatch.Record{
+			TS: nowRec, Lane: resolvedLane, Model: resolvedModel, OutcomeClass: "lane_excluded",
+			Origin: opts.Origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
+			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
+			Admit: false, AdmitState: "lane_excluded", AdmitReason: reason, Desc: opts.Desc,
+		}
+		sf.stamp(&rec)
+		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (exclusion)")
+		fmt.Fprintln(os.Stderr, "BLOCKED:", reason)
+		b, _ := json.MarshalIndent(map[string]any{"lane_excluded": true, "lane": resolvedLane, "reason": reason}, "", "  ")
+		fmt.Fprintln(out, string(b))
+		return exitDeferred, nil
 	}
 
 	// Lane switch (slice 2): the claude path is the slice-1 contract; other
@@ -565,6 +595,8 @@ func runRun(args []string) error {
 	deviation := fs.String("deviation", "", "reason recorded when the chosen lane differs from the recommendation (R11)")
 	batch := fs.Bool("batch", false, "E2 spend-down tag: this is an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost")
 	estMinutes := fs.Float64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
+	var exclude excludeFlag
+	fs.Var(&exclude, "exclude", "mask a lane for this dispatch's recommendation and refuse it if resolved (repeatable/csv: claude|codex|copilot|glm|local). delegate-mode passes --exclude claude")
 	strategyName := fs.String("strategy", "", "run a named strategy template as an async DAG dispatch (R11 seam): solo|plan-work-verify|cascade|fan-out-judge|single-critique. Expands from the prompt (goal) + --class, then spawns a detached supervisor and prints {dispatch_id}. Poll via the strategy_status MCP tool.")
 	_ = fs.Parse(args)
 
@@ -602,7 +634,7 @@ func runRun(args []string) error {
 		Live: *live, Force: *force, CWD: *cwd, TimeoutSec: *timeoutSec,
 		MaxNotional: *maxNotional, KeepHome: *keepHome, Class: *class, Desc: *desc,
 		CtxTokens: *ctxTokens, Latency: *latency, Origin: *origin, Deviation: *deviation,
-		Batch: *batch, EstMinutes: *estMinutes,
+		Batch: *batch, EstMinutes: *estMinutes, Exclude: []string(exclude),
 	}, &buf)
 	if buf.Len() > 0 {
 		fmt.Print(buf.String())

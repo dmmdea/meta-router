@@ -196,6 +196,7 @@ func toolSchemas() []map[string]any {
 					"dry_run":     boolProp("print the admission decision + args without dispatching (default false)"),
 					"batch":       boolProp("E2 spend-down tag: an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost"),
 					"est_minutes": numProp("expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)"),
+					"exclude":     arrProp("lanes to mask for this dispatch and refuse if resolved (claude|codex|copilot|glm|local); delegate-mode passes [\"claude\"]"),
 				},
 				"required": []string{"prompt"},
 			},
@@ -355,15 +356,20 @@ func toolRun(args json.RawMessage) toolResult {
 		Class      string  `json:"class"`
 		CWD        string  `json:"cwd"`
 		TimeoutSec int     `json:"timeout_sec"`
-		DryRun     bool    `json:"dry_run"`
-		Batch      bool    `json:"batch"`
-		EstMinutes float64 `json:"est_minutes"` // float: the schema says number; fractional minutes must not fail the call
+		DryRun     bool     `json:"dry_run"`
+		Batch      bool     `json:"batch"`
+		EstMinutes float64  `json:"est_minutes"` // float: the schema says number; fractional minutes must not fail the call
+		Exclude    []string `json:"exclude"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return errText("bad run arguments: " + err.Error())
 	}
 	if a.Prompt == "" {
 		return errText("run: prompt is required")
+	}
+	exclude, err := parseExclude(a.Exclude)
+	if err != nil {
+		return errText("run: " + err.Error())
 	}
 	lane := a.Lane
 	if lane == "" {
@@ -373,7 +379,7 @@ func toolRun(args json.RawMessage) toolResult {
 	code, err := doRun(runOpts{
 		Prompt: a.Prompt, Lane: lane, Model: a.Model, Effort: a.Effort, Class: a.Class,
 		CWD: a.CWD, TimeoutSec: a.TimeoutSec, Live: !a.DryRun, Desc: descFromPrompt(a.Prompt),
-		Origin: "mcp", Batch: a.Batch, EstMinutes: a.EstMinutes,
+		Origin: "mcp", Batch: a.Batch, EstMinutes: a.EstMinutes, Exclude: exclude,
 	}, &buf)
 	if err != nil {
 		return errText(err.Error()) // config_error (exit 1)
