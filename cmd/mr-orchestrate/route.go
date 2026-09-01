@@ -52,7 +52,7 @@ func worstPct(snap []ledger.Bucket, lane string, now time.Time) float64 {
 //	local  = always open (free lane, fail-open).
 func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now time.Time) map[string]router.LaneState {
 	out := map[string]router.LaneState{}
-	for _, lane := range []string{"claude", "codex", "glm"} {
+	for _, lane := range []string{"claude", "codex", "copilot", "glm"} {
 		d := admission.Decide(snap, lane, now, defaultThresholds)
 		st := string(d.State)
 		if lane == "claude" && cfg.ClaudeBillingMode != orchcfg.BillingSubscription {
@@ -63,6 +63,13 @@ func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now 
 		if lane == "glm" {
 			if _, latched := glmlane.Latched(glmAlertPath()); latched {
 				st = "hard_stop"
+			}
+			// Lane retirement (2026-09-01): masked before selection, same
+			// surface as the other config-driven masks. "retired" is its own
+			// state name so the route JSON tells a cancelled plan apart from
+			// quota pressure or a health exclusion.
+			if cfg.GLMRetired {
+				st = "retired"
 			}
 		}
 		ls := router.LaneState{State: st, WorstPct: worstPct(snap, lane, now), ResumeAt: d.ResumeAt}

@@ -65,7 +65,7 @@ func PlanWorkVerify(goal, class string) IR {
 func Cascade(goal, class string) IR {
 	return IR{Goal: goal, Name: "cascade", Steps: []Step{
 		{ID: 0, Instruction: goal, Class: class, Role: "worker", LaneHint: "local", Deps: []int{}},
-		{ID: 1, Instruction: "Verify: " + goal, Class: "verify-gate", Role: "verifier", LaneHint: "glm", Deps: []int{0}},
+		{ID: 1, Instruction: "Verify: " + goal, Class: "verify-gate", Role: "verifier", LaneHint: "copilot", Deps: []int{0}},
 	}}
 }
 
@@ -76,7 +76,7 @@ func FanOutJudge(goal, class string) IR {
 	return IR{Goal: goal, Name: "fan-out-judge", Steps: []Step{
 		{ID: 0, Instruction: goal, Class: class, Role: "worker", LaneHint: "claude", Deps: []int{}},
 		{ID: 1, Instruction: goal, Class: class, Role: "worker", LaneHint: "codex", Deps: []int{}},
-		{ID: 2, Instruction: "Judge the two candidate answers for: " + goal, Class: "verify-gate", Role: "verifier", LaneHint: "glm", Deps: []int{0, 1}},
+		{ID: 2, Instruction: "Judge the two candidate answers for: " + goal, Class: "verify-gate", Role: "verifier", LaneHint: "copilot", Deps: []int{0, 1}},
 	}}
 }
 

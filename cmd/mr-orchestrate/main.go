@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-var version = "0.34.0"
+var version = "0.35.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -70,7 +70,7 @@ func usage() {
   install <claude|codex> [-dry-run] wire the hooks/tee/MCP server into a host config; refuses on anything it did not write
   uninstall <claude|codex> [-dry-run] reverse exactly what the install manifest records, restoring the pre-install bytes
   probe claude [flags]   capture sanitized live fixtures (authorized probes only)
-  run "<prompt>" [--lane claude|codex|glm|auto] --model <id> [--effort e] [--live] [--force]
+  run "<prompt>" [--lane claude|codex|copilot|glm|auto] --model <id> [--effort e] [--live] [--force]
   route [--class c | --desc "…"] [--ctx-tokens n] [--origin cli|route]  deterministic quota-masked recommendation (read-only)
   feedback <ts> good|bad tag a dispatch receipt with an operator quality verdict (S2R-9)
   mcp                    stdio JSON-RPC MCP server (tools: route, run, quota_status, strategy_dispatch, strategy_status, strategy_cancel)

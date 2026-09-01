@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 )
 
 // RS7 policy watch — MULTI-VENDOR tripwire (all four lanes have policy
@@ -25,6 +27,13 @@ import (
 //     without credentials.
 //   - OpenAI/Codex: codex CLI version (vendors ship breaking JSONL renames
 //     unversioned — codex #4776).
+//   - GitHub/Copilot (2026-09-01, GLM's successor): copilot CLI version
+//     (same unversioned-JSONL hazard class) + the premium-requests billing
+//     doc (allowance/reset/overage terms — the lane's quota model reads from
+//     it; a silent change to the 300/mo or the included-model fallback is a
+//     routing-relevant event). The z.ai fetch is skipped while the GLM lane
+//     is retired — watching a cancelled plan's policy is noise — but its
+//     stored baseline is preserved for re-enable.
 //
 // Fail-open: a fetch failure is a note, never a crash — and it must NOT wipe
 // the stored baseline, or the very change the watch exists to catch would
@@ -35,6 +44,7 @@ import (
 const (
 	policyArticleURL = "https://support.claude.com/en/articles/15036540"
 	zaiPolicyURL     = "https://docs.z.ai/devpack/usage-policy"
+	copilotBillingURL = "https://docs.github.com/en/copilot/managing-copilot/understanding-and-managing-copilot-usage/understanding-and-managing-requests-in-copilot"
 )
 
 type policyState struct {
@@ -47,6 +57,10 @@ type policyState struct {
 	LastArticleHash   string     `json:"last_article_hash,omitempty"`
 	ZaiPolicyHash     string     `json:"zai_policy_hash,omitempty"`
 	LastZaiPolicyHash string     `json:"last_zai_policy_hash,omitempty"`
+	CopilotVersion        string `json:"copilot_version,omitempty"`
+	LastCopilotVersion    string `json:"last_copilot_version,omitempty"`
+	CopilotBillingHash    string `json:"copilot_billing_hash,omitempty"`
+	LastCopilotBillingHash string `json:"last_copilot_billing_hash,omitempty"`
 	Alert             bool       `json:"alert"`
 	AlertSince        *time.Time `json:"alert_since,omitempty"`
 	Notes             []string   `json:"notes"`
@@ -58,6 +72,8 @@ type observed struct {
 	CodexVersion  string
 	ArticleHash   string
 	ZaiHash       string
+	CopilotVersion    string
+	CopilotBillingHash string
 	FetchNotes    []string
 }
 
@@ -123,6 +139,8 @@ func evalPolicy(prev policyState, obs observed, now time.Time) policyState {
 		CodexVersion: obs.CodexVersion, LastCodexVersion: prev.CodexVersion,
 		ArticleHash: obs.ArticleHash, LastArticleHash: prev.ArticleHash,
 		ZaiPolicyHash: obs.ZaiHash, LastZaiPolicyHash: prev.ZaiPolicyHash,
+		CopilotVersion: obs.CopilotVersion, LastCopilotVersion: prev.CopilotVersion,
+		CopilotBillingHash: obs.CopilotBillingHash, LastCopilotBillingHash: prev.CopilotBillingHash,
 	}
 	st.Notes = append(st.Notes, obs.FetchNotes...)
 	if obs.ArticleHash == "" {
@@ -130,6 +148,9 @@ func evalPolicy(prev policyState, obs observed, now time.Time) policyState {
 	}
 	if obs.ZaiHash == "" {
 		st.ZaiPolicyHash = prev.ZaiPolicyHash
+	}
+	if obs.CopilotBillingHash == "" {
+		st.CopilotBillingHash = prev.CopilotBillingHash
 	}
 	alertNow := func(note string) {
 		st.Alert = true
@@ -162,6 +183,10 @@ func evalPolicy(prev policyState, obs observed, now time.Time) policyState {
 		"Anthropic support article 15036540 CHANGED — check whether the subscription/API billing split resumed (RS7)")
 	check("z.ai usage policy", prev.ZaiPolicyHash, obs.ZaiHash,
 		"z.ai coding-plan usage policy CHANGED — re-read fair-usage/ban terms before further GLM-lane traffic (1313 class)")
+	check("copilot cli version", prev.CopilotVersion, obs.CopilotVersion,
+		fmt.Sprintf("copilot CLI changed %s -> %s: re-verify the JSONL event schema against testdata/fixtures/copilot (same unversioned-rename hazard class as codex #4776)", prev.CopilotVersion, obs.CopilotVersion))
+	check("copilot billing doc", prev.CopilotBillingHash, obs.CopilotBillingHash,
+		"GitHub Copilot premium-requests billing doc CHANGED — re-verify the monthly allowance (config copilot_monthly_requests), the 1st-of-month reset, and that exhaustion still degrades to included models (R10: no overage budget, ever)")
 	return st
 }
 
@@ -175,16 +200,27 @@ func runPolicyWatch(ack bool) error {
 		prev.Alert = false
 		prev.AlertSince = nil
 	}
-	obs := observed{ClaudeVersion: cliVersion("claude"), CodexVersion: cliVersion("codex")}
+	obs := observed{ClaudeVersion: cliVersion("claude"), CodexVersion: cliVersion("codex"), CopilotVersion: cliVersion("copilot")}
 	if body, err := fetchPage(policyArticleURL); err != nil {
 		obs.FetchNotes = append(obs.FetchNotes, "anthropic article fetch failed (fail-open, baseline preserved): "+err.Error())
 	} else {
 		obs.ArticleHash = hashText(stripHTMLText(body))
 	}
-	if body, err := fetchPage(zaiPolicyURL); err != nil {
-		obs.FetchNotes = append(obs.FetchNotes, "z.ai policy fetch failed (fail-open, baseline preserved): "+err.Error())
+	if cfg := orchcfg.Load(configPath()); !cfg.GLMRetired {
+		if body, err := fetchPage(zaiPolicyURL); err != nil {
+			obs.FetchNotes = append(obs.FetchNotes, "z.ai policy fetch failed (fail-open, baseline preserved): "+err.Error())
+		} else {
+			obs.ZaiHash = hashText(stripHTMLText(body))
+		}
 	} else {
-		obs.ZaiHash = hashText(stripHTMLText(body))
+		// Retired lane: skip the fetch, carry the stored baseline forward so
+		// evalPolicy's cur=="" branch preserves it for a future re-enable.
+		obs.FetchNotes = append(obs.FetchNotes, "z.ai policy fetch skipped (glm lane retired)")
+	}
+	if body, err := fetchPage(copilotBillingURL); err != nil {
+		obs.FetchNotes = append(obs.FetchNotes, "copilot billing doc fetch failed (fail-open, baseline preserved): "+err.Error())
+	} else {
+		obs.CopilotBillingHash = hashText(stripHTMLText(body))
 	}
 	st := evalPolicy(prev, obs, now)
 	// RS8 wire-in: a claude CLI version change immediately exercises the

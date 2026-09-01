@@ -4,6 +4,21 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.35.0] — 2026-09-01
+
+### Added — the copilot lane (GitHub Copilot CLI), and GLM retirement as config
+The operator cancelled the GLM subscription and bought GitHub Copilot Pro. Lane tiers are DATA about the operator's current plans (§6b, "upgrade is a number change"), so this ships a new lane and retires the old one *without deleting a line of GLM code* — `"glm_retired": false` re-enables it wholesale if the plan returns.
+
+- **`internal/orch/copilotlane`**: drives the `copilot` CLI process-per-turn, mirroring codexlane's contract (classified `Outcome` on every path, error return reserved for config failures, stdin-closed spawn, scrubbed env + deliberate pins, Windows tree-kill, version gate). v1 is a TEXT-DISPATCH lane: `--deny-tool --no-ask-user --disable-builtin-mcps` are pinned, and the passthrough rejects every permission-widening (`--allow-all*`, `--yolo`), session-bleeding (`--resume`, `--continue`) and egress-creating (`--share*`, `--cloud`) flag. Two isolation pins are load-bearing and were proven live, not assumed: without `COPILOT_HOME` the CLI loads the operator's desktop `~/.copilot` config and **spawns its MCP servers inside an orchestrated dispatch**; without a minted token it would inherit whatever account the ambient env carries.
+- **Provider-true metering.** The CLI self-reports consumption per dispatch (`session.usage_checkpoint`: premium requests + nano-AIU), so the ledger records what the vendor actually billed instead of a doc-lore multiplier. Parsing is pinned against a **scrubbed live capture** (`testdata/fixtures/copilot/`), not hand-typed shapes.
+- **`ledger.WinMonth`**: a CALENDAR window (resets the 1st at 00:00 UTC, no carry-forward — the documented premium-request shape) alongside the rolling 5h/7d ones. `NextMonthlyReset` is the anchor; boundary, year-rollover and non-UTC-caller cases are pinned.
+- **Router**: `copilot` joins lane-states and the quota hint (which now renders the monthly window); `glm` reports the new masked state `"retired"`. **`masked()` is a denylist**, so `"retired"` is listed there explicitly with its own test — an unlisted state name silently reads as selectable.
+- **`childenv.Scrub` now strips `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` and `COPILOT_HOME`** from *every* lane child. `gh` honours `GH_TOKEN` over its keyring, so a stray shell export could previously have billed an arbitrary GitHub account from inside any lane; this also makes the copilot lane's `gh auth token --user <pinned>` mint keyring-true.
+- **RS7 policy watch** gains the copilot CLI version (same unversioned-JSONL rename hazard as codex #4776) and the GitHub premium-requests billing doc (allowance/reset/overage terms feed the lane's quota model). The z.ai fetch is skipped while GLM is retired — its stored baseline is preserved for re-enable.
+
+### Fixed
+- **`TestLaneStatesSourceAware` hermeticity.** It read the REAL machine's W6 exclusions file, so it failed on any box that had ever tripped a breaker while CI (clean state) stayed green — misdiagnosed as a clock-dependency in a prior spec. Both `laneStates` tests now pin `MR_ORCH_STATE`.
+
 ## [0.34.0] — 2026-08-19
 
 ### Added — W10: `tools` flat-root kind + `tool:` namespace (lane-pointer surfacing, opt-in)

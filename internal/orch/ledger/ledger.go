@@ -41,7 +41,23 @@ type WindowKind string
 const (
 	Win5h WindowKind = "5h"
 	Win7d WindowKind = "7d"
+	// WinMonth is a CALENDAR window (resets the 1st of each month, 00:00 UTC
+	// — GitHub Copilot's premium-request allowance shape), unlike the rolling
+	// 5h/7d windows. The ledger machinery is anchor-agnostic: roll clears at
+	// ResetsAt exactly as for rolling windows; the calendar semantics live in
+	// the caller's re-anchor (NextMonthlyReset), matching how rolling callers
+	// supply now+5h/now+7d.
+	WinMonth WindowKind = "month"
 )
+
+// NextMonthlyReset returns the upcoming 1st-of-month 00:00:00 UTC strictly
+// after now — the WinMonth anchor. Documented vendor behavior (GitHub
+// premium requests, fetched 2026-09-01): counters reset the 1st at 00:00 UTC,
+// no carry-forward.
+func NextMonthlyReset(now time.Time) time.Time {
+	u := now.UTC()
+	return time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
+}
 
 type Bucket struct {
 	Lane string `json:"lane"`

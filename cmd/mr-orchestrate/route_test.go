@@ -26,6 +26,11 @@ var glmKey = spenddown.Key(ledger.Bucket{Lane: "glm", Window: ledger.Win5h})
 // exhaust threshold THROTTLES (never exhausted); local is always open (free
 // lane, fail-open).
 func TestLaneStatesSourceAware(t *testing.T) {
+	// Hermeticity (fixed 2026-09-01): laneStates reads the W6 exclusions file,
+	// and without a pinned state dir this test read the REAL machine's latched
+	// exclusions — it failed for weeks on any box that had ever tripped a
+	// breaker, while CI (clean state) stayed green.
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
 	snap := []ledger.Bucket{
 		// codex 5h over exhaust threshold BUT estimate-sourced → throttled only
 		{Lane: "codex", Window: "5h", UsedPct: 99, Source: "shadow", CapSource: ledger.CapSourceEstimate},
@@ -47,6 +52,7 @@ func TestLaneStatesSourceAware(t *testing.T) {
 // claude billing hard-stop (R10): credits mode hard-stops the claude lane at
 // laneStates level so the router masks it before selection.
 func TestLaneStatesClaudeBillingHardStop(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir()) // same hermeticity as SourceAware
 	cfg := orchcfg.Config{ClaudeBillingMode: orchcfg.BillingCredits}
 	ls := laneStates(nil, fuses.Seed(), cfg, rnow)
 	if ls["claude"].State != "hard_stop" {
@@ -59,10 +65,12 @@ func TestLaneStatesClaudeBillingHardStop(t *testing.T) {
 // carries the rule.
 func TestBuildRouteDecisionMasksToGLM(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir()) // hermeticity: buildRouteDecision loads the real quota trace + rank table
+	cfg := orchcfg.Defaults()
+	cfg.GLMRetired = false // pins the RE-ENABLED lane's fall-through (retirement itself is pinned in TestRouteDefaultMasksRetiredGLM)
 	snap := []ledger.Bucket{
 		{Lane: "claude", Window: "7d", UsedPct: 99, Source: "provider", ResetsAt: rnow.Add(3 * time.Hour)},
 	}
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{})
+	d := buildRouteDecision(cfg, fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{})
 	if d.Lane != "glm" || d.Model != "glm-5.2" {
 		t.Fatalf("claude exhausted → glm-5.2 for hard-repo: %+v", d)
 	}
@@ -289,6 +297,8 @@ func TestBurnDownshiftThresholdOverrides(t *testing.T) {
 // and neither of those ever touches the persisted latch.
 func TestBuildRouteDecisionSpendDownBoost(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	sdCfg := orchcfg.Defaults()
+	sdCfg.GLMRetired = false // spend-down arming pins the RE-ENABLED lane
 	snap := []ledger.Bucket{
 		{Lane: "claude", Window: "5h", UsedPct: 40, Source: "provider", ResetsAt: rnow.Add(3 * time.Hour)},
 		{Lane: "glm", Window: "5h", UsedPct: 10, Source: "provider", ResetsAt: rnow.Add(time.Hour)},
@@ -301,11 +311,11 @@ func TestBuildRouteDecisionSpendDownBoost(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(spendDownPath())
-	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{Batch: true, Est: 30 * time.Minute, Persist: true})
+	d := buildRouteDecision(sdCfg, fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{Batch: true, Est: 30 * time.Minute, Persist: true})
 	if d.Lane != "glm" || d.SpendDownBoost != 2 || !strings.Contains(d.Reason, "spend-down") {
 		t.Fatalf("batch consult must boost armed glm to the winning tie: %+v", d)
 	}
-	if d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{}); d.Lane != "claude" || d.SpendDownBoost != 0 {
+	if d := buildRouteDecision(sdCfg, fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{}); d.Lane != "claude" || d.SpendDownBoost != 0 {
 		t.Fatalf("interactive consult must never boost: %+v", d)
 	}
 	if d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{Batch: true, Persist: true}); d.Lane != "claude" || d.SpendDownBoost != 0 {

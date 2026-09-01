@@ -39,7 +39,7 @@ func glmDryRun(t *testing.T, cwd string, extra []string, allow []string) (map[st
 	t.Helper()
 	state := t.TempDir()
 	t.Setenv("MR_ORCH_STATE", state)
-	cfg := map[string]any{"glm_allow_repos": allow}
+	cfg := map[string]any{"glm_allow_repos": allow, "glm_retired": false} // retirement is config; these tests pin the egress boundary of the RE-ENABLED lane
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestGLMDeferralReceiptCarriesTheEgressGate(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("MR_ORCH_STATE", state)
 	repo := t.TempDir()
-	cfg, err := json.Marshal(map[string]any{"glm_allow_repos": []string{repo}})
+	cfg, err := json.Marshal(map[string]any{"glm_allow_repos": []string{repo}, "glm_retired": false})
 	if err != nil {
 		t.Fatal(err)
 	}

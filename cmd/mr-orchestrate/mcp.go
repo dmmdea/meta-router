@@ -183,7 +183,7 @@ func toolSchemas() []map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"prompt":      strProp("the prompt to dispatch (required)"),
-					"lane":        strProp("dispatch lane: auto|claude|codex|glm (default auto)"),
+					"lane":        strProp("dispatch lane: auto|claude|codex|copilot|glm (default auto; glm is retired unless re-enabled in config)"),
 					"model":       strProp("pin a model (overrides the recommendation's model)"),
 					"effort":      strProp("effort passthrough"),
 					"class":       strProp("task class for the internal recommendation"),

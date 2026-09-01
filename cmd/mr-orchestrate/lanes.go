@@ -508,6 +508,27 @@ func runGLMLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec int
 	}
 	now := time.Now().UTC()
 	cfg := orchcfg.Load(configPath())
+	// Lane retirement (2026-09-01: GLM subscription cancelled; copilot is the
+	// successor). A typed, force-proof refusal — like the R10 billing
+	// hard-stop, a cancelled plan is not a quota judgement --force may
+	// override: dispatching would burn a dead credential path and hand the
+	// task to nothing. Explicit `"glm_retired": false` in the config
+	// re-enables the lane wholesale.
+	if cfg.GLMRetired {
+		reason := "glm lane RETIRED (subscription cancelled 2026-09-01; use --lane copilot). Re-enable with \"glm_retired\": false in the orchestrator config if the plan returns"
+		rec := dispatch.Record{
+			TS: now, Lane: "glm", Model: model, OutcomeClass: "lane_retired",
+			Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
+			RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost,
+			Admit: false, AdmitState: "lane_retired", AdmitReason: reason, Desc: desc,
+		}
+		sf.stamp(&rec)
+		warnIf(dispatch.Append(dispatchPath(), rec), "dispatch append (retirement)")
+		fmt.Fprintln(os.Stderr, "BLOCKED:", reason)
+		b, _ := json.MarshalIndent(map[string]any{"lane_retired": true, "lane": "glm", "reason": reason}, "", "  ")
+		fmt.Fprintln(out, string(b))
+		return exitDeferred, nil
+	}
 	fzs, _ := fuses.Load(fusesPath())
 	egressReason := ""
 	l, warn := ledger.OpenChecked(ledgerPath())

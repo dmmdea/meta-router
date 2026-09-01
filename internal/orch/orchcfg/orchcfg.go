@@ -29,6 +29,23 @@ type Config struct {
 	CodexDegradationFactor float64 `json:"codex_degradation_factor"` // default 15 (10–20× observed, #28879)
 	GLM5hPrompts           int64   `json:"glm_5h_prompts"`           // default 80; weekly = 5× (never 10×)
 
+	// Copilot lane (2026-09-01: GLM subscription cancelled, Copilot Pro
+	// purchased — lane tiers are DATA about the operator's plans).
+	// CopilotTokenUser names the gh-keyring account that owns the Copilot
+	// subscription; the lane mints an OAuth token from it per dispatch
+	// (`gh auth token --user <x>`). EMPTY IS A REFUSAL, not a fallback:
+	// falling through to the ambient/active gh account would bill whichever
+	// account the environment happens to carry — the cross-account hazard.
+	CopilotTokenUser       string `json:"copilot_token_user"`
+	CopilotMonthlyRequests int64  `json:"copilot_monthly_requests"` // default 300 (Pro allowance; fetched 2026-09-01, resets 1st 00:00 UTC)
+	CopilotModel           string `json:"copilot_model"`            // default "auto" (vendor-routed; JSONL reports the model actually served)
+
+	// GLMRetired ships TRUE (subscription cancelled 2026-09-01): the glm
+	// lane refuses dispatch with a typed reason. Explicit false re-enables
+	// everything — retirement is config, not deleted code (R14: plans are
+	// data; subscriptions come back).
+	GLMRetired bool `json:"glm_retired"`
+
 	// S2R-6 cadence hygiene (GLM ban fires on PATTERN, not volume): ships ON;
 	// explicit false is the operator's off-switch. Interval ∈ [min, min+jitter].
 	GLMPacing        bool  `json:"glm_pacing"`
@@ -99,6 +116,7 @@ func Defaults() Config {
 		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: true,
 		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
+		CopilotMonthlyRequests: 300, CopilotModel: "auto", GLMRetired: true,
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
 		QuotaStaleHours: 48, PollMinIntervalMin: 5, LocalMaxPerMin: 20,
 	}
@@ -136,6 +154,12 @@ func Load(path string) Config {
 	}
 	if c.GLM5hPrompts == 0 {
 		c.GLM5hPrompts = 80
+	}
+	if c.CopilotMonthlyRequests == 0 {
+		c.CopilotMonthlyRequests = 300
+	}
+	if c.CopilotModel == "" {
+		c.CopilotModel = "auto"
 	}
 	if c.GLMPaceMinSec == 0 {
 		c.GLMPaceMinSec = 20
