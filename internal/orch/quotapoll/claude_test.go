@@ -78,3 +78,25 @@ func TestPollClaudeHTTPFailure(t *testing.T) {
 		t.Fatalf("want http_401 all-window absence, got %+v", r.Absences)
 	}
 }
+
+// The live store lists mcpOAuth (one accessToken per MCP server) BEFORE
+// claudeAiOauth; the first-match walk sent an MCP token to the usage endpoint
+// and every poll answered 401 (2026-07..09). The subscription token must win.
+func TestPollClaudePrefersClaudeAiOauthTokenOverMCPTokens(t *testing.T) {
+	srv := claudeServer(t, "claude-usage.json", http.StatusOK) // asserts Bearer test-token-redacted
+	defer srv.Close()
+	r := pollClaude(guardedClient(), srv.URL, filepath.Join("testdata", "claude-credentials-mcp-first.json"), time.Now())
+	if len(r.Snapshots) != 2 || len(r.Absences) != 0 {
+		t.Fatalf("expected both windows with the claudeAiOauth token, got snapshots=%d absences=%+v", len(r.Snapshots), r.Absences)
+	}
+}
+
+func TestClaudeAiOAuthTokenFallsBackToWalkWithoutBlock(t *testing.T) {
+	raw := []byte(`{"legacy": {"accessToken": "walked"}}`)
+	if got := claudeAiOAuthToken(raw); got != "" {
+		t.Fatalf("no claudeAiOauth block must yield empty, got %q", got)
+	}
+	if got := FindStringField(raw, "accessToken"); got != "walked" {
+		t.Fatalf("walk fallback broken: %q", got)
+	}
+}

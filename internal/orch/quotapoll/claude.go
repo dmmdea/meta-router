@@ -27,11 +27,36 @@ func claudeToken(credPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Claude Code's store also carries an `mcpOAuth` block: one accessToken per
+	// authorised MCP server (39 of them on 2026-09-02), listed BEFORE
+	// claudeAiOauth. The tolerant walk below took the first accessToken it met -
+	// an MCP server's - and the usage endpoint answered 401 on every poll from
+	// late July 2026 until this fix, leaving the claude lane with no live quota
+	// signal (found via delegate-mode: proposal + RS1 masking were inert). The
+	// subscription token lives under claudeAiOauth; take it explicitly and keep
+	// the walk only as the fallback for a store without that block.
+	if tok := claudeAiOAuthToken(b); tok != "" {
+		return tok, nil
+	}
 	tok := FindStringField(b, "accessToken")
 	if tok == "" {
 		return "", os.ErrNotExist
 	}
 	return tok, nil
+}
+
+// claudeAiOAuthToken returns claudeAiOauth.accessToken, or "" when the store has
+// no such block (older layouts fall back to the tolerant walk).
+func claudeAiOAuthToken(raw []byte) string {
+	var v struct {
+		ClaudeAiOauth struct {
+			AccessToken string `json:"accessToken"`
+		} `json:"claudeAiOauth"`
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	return v.ClaudeAiOauth.AccessToken
 }
 
 // FindStringField walks arbitrary JSON for the first string value under key.
