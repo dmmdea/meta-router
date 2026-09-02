@@ -27,6 +27,15 @@ func Seed() Table {
 			{Lane: "claude", Model: "claude-opus-4-8", Effort: "xhigh", Rank: 1, Evidence: "vals.ai independent same-harness SWE-V: Opus 88.6 > GPT-5.5 82.6; SWE-Pro vendor-triangulated 69.2>62.1>58.6 (baseline §1)"},
 			{Lane: "claude", Model: "claude-sonnet-5", Effort: "high", Rank: 2, Evidence: "SWE-Pro ordering #2 tier; same-lane fallback preserves scaffold binding (baseline §0.1)"},
 			{Lane: "glm", Model: "glm-5.2", Effort: "high", Rank: 3, Evidence: "SWE-Pro 62.1 vendor-triangulated; entelligence: Sonnet-class on identical Claude Code scaffold"},
+			// Measured fallback (2026-09-02): before this row the class had only claude + glm
+			// entries, so with GLM retired (config) a `--exclude claude` consult deferred with
+			// "all lanes masked" - delegate-mode yielded nothing on hard-repo-classified work.
+			// Ranked LAST on purpose: it changes nothing while a claude row is selectable
+			// (B'2 2026-07-23 showed class-level oracle tuning does not transfer on heldout,
+			// so the SWE-V ordering above stands); it only exists so exclusion/masking has a
+			// measured lane to fall to. The B8 split scorecard cannot score it against the
+			// seed's reference config (oracle rows carry effort=unrecorded) - recorded honestly.
+			{Lane: "codex", Model: "gpt-5.6-terra", Effort: "high", Rank: 4, Evidence: "V2 gold probe trials-3 (private eval/oracle.jsonl, 2026-07-19..27): agentic-coding task-mean verifier pass codex 0.278 > claude-sonnet-5 0.164 > glm-5.2 0.133 over 12 tasks; effort unrecorded. Measured fallback for --exclude claude / masked claude+glm, never promoted above the SWE-V rows"},
 		},
 		TerminalBounded: {
 			{Lane: "codex", Model: "gpt-5.5", Effort: "high", Rank: 1, Evidence: "tbench.ai independent #1: GPT-5.5-in-Codex-CLI 83.4 > Opus-in-Claude-Code 78.9; SURGICAL — Plus degradation 10-20x (#28879), ledger governs"},

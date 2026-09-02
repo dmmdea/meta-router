@@ -190,9 +190,11 @@ func TestRouteAllMaskedShape(t *testing.T) {
 	snap := []ledger.Bucket{
 		{Lane: "claude", Window: "7d", UsedPct: 99, Source: "provider", ResetsAt: rnow.Add(4 * time.Hour)},
 		{Lane: "glm", Window: "7d", UsedPct: 99, Source: "provider", ResetsAt: rnow.Add(2 * time.Hour)},
+		{Lane: "codex", Window: "7d", UsedPct: 99, Source: "provider", ResetsAt: rnow.Add(3 * time.Hour)},
 	}
-	// hard-repo lists claude, claude, glm; local not in the class. With claude +
-	// glm exhausted, all candidates are masked.
+	// hard-repo lists claude, claude, glm and (since 0.36.1) the measured codex
+	// fallback; local not in the class. With claude + glm + codex exhausted, all
+	// candidates are masked.
 	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), snap, router.HardRepo, 0, rnow, spendDownReq{})
 	if d.Lane != "" {
 		t.Fatalf("all masked must relegate (Lane empty): %+v", d)

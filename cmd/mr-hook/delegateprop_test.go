@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
@@ -96,5 +97,48 @@ func TestProposalIgnoresExpiredWindow(t *testing.T) {
 	}
 	if p := delegateProposal(pnow, "abc123"); p != "" {
 		t.Fatalf("expired window fired: %q", p)
+	}
+}
+
+// No drop is the NORMAL state in a VS Code-extension session (statusLine never
+// runs there): the proposal must fall back to the poll-fed ledger figure.
+func TestProposalFallsBackToFreshLedgerPollWithoutDrop(t *testing.T) {
+	setup(t)
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("claude", ledger.Win5h, 82, pnow.Add(3*time.Hour), pnow.Add(-5*time.Minute))
+		l.ObserveProvider("codex", ledger.Win5h, 99, pnow.Add(2*time.Hour), pnow.Add(-5*time.Minute)) // other lanes never count
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := delegateProposal(pnow, "abc123")
+	if !strings.Contains(p, "82%") || !strings.Contains(p, "/delegate-mode") {
+		t.Fatalf("fresh ledger poll figure must fire the proposal, got %q", p)
+	}
+}
+
+// A poll figure older than DropMaxAge is history: no drop + stale ledger = silent.
+func TestProposalIgnoresStaleLedgerPoll(t *testing.T) {
+	setup(t)
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("claude", ledger.Win5h, 95, pnow.Add(3*time.Hour), pnow.Add(-2*time.Hour))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if p := delegateProposal(pnow, "abc123"); p != "" {
+		t.Fatalf("stale ledger poll must not fire, got %q", p)
+	}
+}
+
+// A live drop wins over the ledger even when the ledger is fresher-looking.
+func TestProposalPrefersDropOverLedger(t *testing.T) {
+	setup(t)
+	seedDrop(t, 40, 30) // below the default threshold
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("claude", ledger.Win5h, 95, pnow.Add(3*time.Hour), pnow.Add(-time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if p := delegateProposal(pnow, "abc123"); p != "" {
+		t.Fatalf("a live drop below threshold must stay silent regardless of the ledger, got %q", p)
 	}
 }
