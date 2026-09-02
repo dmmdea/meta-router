@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
@@ -65,11 +66,27 @@ func delegateModeArmed(sessionID string, now time.Time) bool {
 
 // claudePressurePct reads the statusline drop DIRECTLY (ParseDrop; no ledger
 // write) and returns the worst LIVE window, or -1 for no signal. Reading the
-// drop rather than the ledger is deliberate (spec §4, R7): interactive Claude
-// usage enters the ledger only when `route` ingests the drop, so a session
-// that has not consulted recently would otherwise read a stale figure. An
-// expired window is dead history and is skipped (the quotahint.go lesson).
+// drop first is deliberate (spec §4, R7): interactive Claude usage enters the
+// ledger only when `route` ingests the drop, so a session that has not
+// consulted recently would otherwise read a stale figure. An expired window is
+// dead history and is skipped (the quotahint.go lesson).
+//
+// Fallback (2026-09-02, delegate-mode finding 2): a client that never runs
+// statusLine — the VS Code extension, CLAUDE_CODE_ENTRYPOINT=claude-vscode —
+// never writes a drop, so the proposal was inert in exactly the sessions it was
+// built for. With no live drop window, read the ledger's provider-sourced
+// claude buckets (the oauth usage poll that status/route trigger), accepting
+// only an observation at most DropMaxAge old — the same freshness bar a drop
+// must clear to count as live. Still read-only; a stale poll figure yields no
+// proposal rather than a wrong one.
 func claudePressurePct(now time.Time) float64 {
+	if worst := dropPressurePct(now); worst >= 0 {
+		return worst
+	}
+	return ledgerPressurePct(now)
+}
+
+func dropPressurePct(now time.Time) float64 {
 	raw, err := os.ReadFile(statepaths.Drop())
 	if err != nil {
 		return -1
@@ -85,6 +102,33 @@ func claudePressurePct(now time.Time) float64 {
 		}
 		if o.UsedPct > worst {
 			worst = o.UsedPct
+		}
+	}
+	return worst
+}
+
+// ledgerPressurePct is the poll-fed fallback: worst live, provider-sourced
+// claude window observed within quotasig.DropMaxAge, else -1. Shadow
+// (self-metered) buckets never count — the proposal fires only on a vendor
+// figure, as the drop path does.
+func ledgerPressurePct(now time.Time) float64 {
+	l, warn := ledger.OpenChecked(statepaths.Ledger())
+	if warn != "" {
+		return -1 // corrupt/unreadable ledger: no trustworthy signal
+	}
+	worst := -1.0
+	for _, b := range l.Snapshot() {
+		if b.Lane != "claude" || b.Source != "provider" || b.UsedPct < 0 {
+			continue
+		}
+		if b.ObservedAt.IsZero() || now.Sub(b.ObservedAt) > quotasig.DropMaxAge || now.Before(b.ObservedAt) {
+			continue // stale (or future-dated) poll: history, not a live observation
+		}
+		if !b.ResetsAt.IsZero() && !b.ResetsAt.After(now) {
+			continue // expired window
+		}
+		if b.UsedPct > worst {
+			worst = b.UsedPct
 		}
 	}
 	return worst

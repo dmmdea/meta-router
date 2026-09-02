@@ -29,10 +29,12 @@ func claudeToken(credPath string) (string, error) {
 	}
 	// Claude Code's store also carries an `mcpOAuth` block: one accessToken per
 	// authorised MCP server (39 of them on 2026-09-02), listed BEFORE
-	// claudeAiOauth. The tolerant walk below took the first accessToken it met -
-	// an MCP server's - and the usage endpoint answered 401 on every poll from
-	// late July 2026 until this fix, leaving the claude lane with no live quota
-	// signal (found via delegate-mode: proposal + RS1 masking were inert). The
+	// claudeAiOauth. The tolerant walk below returns whichever accessToken its
+	// map iteration meets first - Go randomises map order, so with 39 MCP tokens
+	// beside one subscription token the poll sent an MCP token on nearly every
+	// attempt and the usage endpoint answered 401 from late July 2026 until this
+	// fix, leaving the claude lane with no live quota signal (found via
+	// delegate-mode: proposal + RS1 masking were inert). The
 	// subscription token lives under claudeAiOauth; take it explicitly and keep
 	// the walk only as the fallback for a store without that block.
 	if tok := claudeAiOAuthToken(b); tok != "" {
