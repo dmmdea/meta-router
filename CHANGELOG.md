@@ -4,6 +4,11 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.36.2] — 2026-09-02
+
+### Added — `mr-goldreplay` replays the copilot lane
+The oracle table had rows for local, claude, codex and glm; the copilot lane (v0.35.0) had none, so no seed row could ever be earned for it. `-lanes copilot` now works, with the same pin gate as every lane (`-copilot-model <id> -copilot-effort unrecorded` — the lane has no effort dial). `auto` is a legitimate model pin: it is the config the router dispatches, and the vendor resolves it per turn, so every copilot row carries `served=<model>` in its note (recovered from the `assistant.message` envelope) — attribution kept without splitting the oracle cell. The decoder handles copilot's polymorphic JSONL the way `copilotlane.Parse` does: agent text only from `assistant.message` `data.content`. The lane is text-dispatch (all tools denied), so exec tasks are scored on the diff it PRINTS — exactly how the router would dispatch it.
+
 ## [0.36.1] — 2026-09-02
 
 ### Fixed — the claude lane's quota poll, and a measured fallback for `--exclude claude`

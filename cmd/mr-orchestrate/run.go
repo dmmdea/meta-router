@@ -439,7 +439,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		// unchanged (it fires only for laneFlag=="auto", before this switch).
 		return runLocalLane(out, opts.Prompt, rf.TaskClass, resolvedModel, opts.CWD, opts.TimeoutSec, opts.Live, opts.Origin, opts.Desc, rf, sf)
 	default:
-		return 1, fmt.Errorf("run: unknown lane %q (available: claude, codex, glm, auto)", resolvedLane)
+		return 1, fmt.Errorf("run: unknown lane %q (available: claude, codex, copilot, glm, local, auto)", resolvedLane)
 	}
 
 	now := time.Now().UTC()
