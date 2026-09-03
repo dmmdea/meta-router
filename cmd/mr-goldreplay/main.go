@@ -735,9 +735,17 @@ func replayArgs(taskID string, cfg policyeval.Config, prompt string, maxNotional
 }
 
 // replayOne runs one (task,config,trial) cell end to end.
-func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verifyBin, repos string, timeoutSec int, maxNotional float64, claudeExtra string) Row {
+//
+// NAMED RESULT, deliberately: the copilot served-model annotation below runs
+// in a defer so that every return path after the dispatch carries it. A defer
+// can only reach the value being returned through a named result — with an
+// unnamed one, `return row` copies the struct out BEFORE the defer mutates the
+// local, and the annotation is silently lost. That is not hypothetical: the
+// first live copilot smoke (EX-01, 2026-09-02) wrote a row with no served=
+// note for exactly this reason; the integration test below pins it.
+func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verifyBin, repos string, timeoutSec int, maxNotional float64, claudeExtra string) (row Row) {
 	lane, model := cfg.Lane, cfg.Model
-	row := Row{TS: time.Now().UTC().Format(time.RFC3339), Task: t.ID, Class: t.Class,
+	row = Row{TS: time.Now().UTC().Format(time.RFC3339), Task: t.ID, Class: t.Class,
 		Lane: lane, Model: model, Effort: cfg.Effort, Trial: trial}
 	start := time.Now()
 

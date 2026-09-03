@@ -20,12 +20,16 @@ package main
 // (review round 4).
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/dmmdea/meta-router/internal/goldtask"
+	"github.com/dmmdea/meta-router/internal/policyeval"
 )
 
 var (
@@ -40,6 +44,17 @@ var (
 // test can, and without it every suite run leaked a temp dir holding a
 // multi-MB binary (review round 4).
 func TestMain(m *testing.M) {
+	// Fake-orchestrator mode: replayOne tests point orchBin at THIS test binary
+	// and script its stdout + exit code through the environment, so the real
+	// dispatch → decode → annotate → return path runs end to end with no lane
+	// binary and no spend.
+	if fixture := os.Getenv("GOLDREPLAY_FAKE_ORCH_STDOUT"); fixture != "" {
+		fmt.Print(fixture)
+		if os.Getenv("GOLDREPLAY_FAKE_ORCH_EXIT") == "5" {
+			os.Exit(5)
+		}
+		os.Exit(0)
+	}
 	code := m.Run()
 	if buildDir != "" {
 		_ = os.RemoveAll(buildDir)
@@ -218,5 +233,43 @@ func TestIntegrationReMeasureOverridesDrift(t *testing.T) {
 	}
 	if !strings.Contains(se, "WARNING: -re-measure") {
 		t.Fatalf("the override must be loud: %s", se)
+	}
+}
+
+// The copilot served-model note must survive replayOne's return: the
+// annotation runs in a defer, which only reaches the returned value through a
+// NAMED result. The first live smoke (EX-01) lost the note to an unnamed one.
+func TestReplayOneCopilotRowCarriesServedModel(t *testing.T) {
+	_, goldset, _ := intFixture(t, "")
+	tasks, err := goldtask.Load(goldset)
+	if err != nil || len(tasks) == 0 {
+		t.Fatalf("goldset: %v", err)
+	}
+	cfg := policyeval.Config{Lane: "copilot", Model: "auto", Effort: policyeval.EffortUnrecorded}
+	stream := `{"type":"session.start","data":{"sessionId":"s"}}` + "\n" +
+		`{"type":"assistant.message","data":{"content":"answer x","model":"gpt-5.6-luna"}}` + "\n" +
+		`{"type":"result","data":{"message":"done"}}` + "\n"
+	t.Setenv("GOLDREPLAY_FAKE_ORCH_STDOUT", stream)
+	t.Setenv("GOLDREPLAY_FAKE_ORCH_EXIT", "0")
+	row := replayOne(tasks[0], cfg, 1, os.Args[0], "", "", 30, 10, "")
+	if row.OutcomeClass != "ok" || !row.Dispatched {
+		t.Fatalf("fake dispatch must read as ok: %+v", row)
+	}
+	if !strings.Contains(row.Note, "served=gpt-5.6-luna") {
+		t.Fatalf("served model lost on the return path: %+v", row)
+	}
+	if !row.VerifierPass {
+		t.Fatalf("pure check over the fake stream (pattern x) must pass: %+v", row)
+	}
+	// dispatched-not-ok keeps the attribution too.
+	t.Setenv("GOLDREPLAY_FAKE_ORCH_EXIT", "5")
+	row = replayOne(tasks[0], cfg, 1, os.Args[0], "", "", 30, 10, "")
+	if row.OutcomeClass != "dispatched-not-ok" || !strings.Contains(row.Note, "served=gpt-5.6-luna") {
+		t.Fatalf("not-ok path lost the served model: %+v", row)
+	}
+	// a non-copilot lane never gets the tag.
+	row = replayOne(tasks[0], policyeval.Config{Lane: "codex", Model: "gpt-5.6-terra", Effort: "high"}, 1, os.Args[0], "", "", 30, 10, "")
+	if strings.Contains(row.Note, "served=") {
+		t.Fatalf("codex row must not carry a served tag: %+v", row)
 	}
 }
