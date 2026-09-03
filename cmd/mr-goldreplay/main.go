@@ -321,11 +321,23 @@ func truncateDiff(d string) string {
 }
 
 // decodeAgentText recovers the agent's REAL text from structured lane stdout:
-// codex event JSONL carries it JSON-escaped in item.text (agent_message), and
-// claude/glm result JSON carries it in .result — extracting a diff from the
-// RAW stream yields escaped garbage ("git diff header lacks filename").
-// Returns "" when the output has no decodable agent text.
+// codex event JSONL carries it JSON-escaped in item.text (agent_message),
+// claude/glm result JSON carries it in .result, and copilot's JSONL carries it
+// in data.content on assistant.message envelopes (the payload is polymorphic
+// per event type — decode it only on that type, mirroring copilotlane.Parse) —
+// extracting a diff from the RAW stream yields escaped garbage ("git diff
+// header lacks filename"). Returns "" when the output has no decodable agent
+// text.
 func decodeAgentText(stdout string) string {
+	text, _ := decodeAgentStream(stdout)
+	return text
+}
+
+// decodeAgentStream is decodeAgentText plus the copilot SERVED model, when the
+// stream names one (assistant.message data.model). `--model auto` resolves
+// vendor-side, so the model that answered is evidence the pin alone cannot
+// carry; it lands on the row note rather than the cell key.
+func decodeAgentStream(stdout string) (text, servedModel string) {
 	var parts []string
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -338,18 +350,46 @@ func decodeAgentText(stdout string) string {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"item"`
-			Result string `json:"result"`
+			Result string          `json:"result"`
+			Data   json.RawMessage `json:"data"`
 		}
 		if json.Unmarshal([]byte(line), &ev) != nil {
 			continue
 		}
-		if ev.Item != nil && ev.Item.Type == "agent_message" && ev.Item.Text != "" {
+		switch {
+		case ev.Item != nil && ev.Item.Type == "agent_message" && ev.Item.Text != "":
 			parts = append(parts, ev.Item.Text)
-		} else if ev.Type == "result" && ev.Result != "" {
+		case ev.Type == "result" && ev.Result != "":
 			parts = append(parts, ev.Result)
+		case ev.Type == "assistant.message" && len(ev.Data) > 0:
+			var m struct {
+				Content string `json:"content"`
+				Model   string `json:"model"`
+			}
+			if json.Unmarshal(ev.Data, &m) == nil {
+				if m.Content != "" {
+					parts = append(parts, m.Content)
+				}
+				if m.Model != "" {
+					servedModel = m.Model
+				}
+			}
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), servedModel
+}
+
+// servedNote appends served=<model> to a row note for lanes whose pin is
+// resolved vendor-side (copilot `auto`). Empty served model = no annotation.
+func servedNote(note, served string) string {
+	if served == "" {
+		return note
+	}
+	tag := "served=" + served
+	if note == "" {
+		return tag
+	}
+	return note + "; " + tag
 }
 
 // routerClass maps a gold-task class to the router's task-class vocabulary
@@ -371,7 +411,7 @@ func routerClass(goldClass string) string {
 func main() {
 	goldset := flag.String("goldset", "testdata/routing-goldset.jsonl", "gold-set JSONL (point at the private repo's copy)")
 	outPath := flag.String("out", "oracle.jsonl", "oracle table output (appended; resume skips recorded rows)")
-	lanesFlag := flag.String("lanes", "local", "comma-separated lanes: local,claude,codex,glm")
+	lanesFlag := flag.String("lanes", "local", "comma-separated lanes: local,claude,codex,glm,copilot")
 	trials := flag.Int("trials", 1, "trials per (task,lane); resume adds more later (Q8 CI-width stopping)")
 	tasksFlag := flag.String("tasks", "", "comma-separated task IDs filter (empty = all)")
 	classesFlag := flag.String("classes", "", "comma-separated gold classes filter (empty = all)")
@@ -391,6 +431,11 @@ func main() {
 	claudeModel := flag.String("claude-model", "", "model pin for the claude lane (REQUIRED when -lanes includes claude)")
 	codexModel := flag.String("codex-model", "", "model pin for the codex lane (REQUIRED when -lanes includes codex)")
 	glmModel := flag.String("glm-model", "", "model pin for the glm lane (REQUIRED when -lanes includes glm)")
+	// copilot: `auto` is a legitimate pin — it is the config the router
+	// dispatches (orchcfg CopilotModel) and the vendor resolves it per turn; the
+	// SERVED model is recorded on the row's note (served=<model>) so the
+	// evidence keeps its attribution without splitting the oracle cell.
+	copilotModel := flag.String("copilot-model", "", "model pin for the copilot lane (REQUIRED when -lanes includes copilot; 'auto' is the deployable config, served model lands in the note)")
 	localModel := flag.String("local-model", "", "model tag for the local lane (REQUIRED when -lanes includes local)")
 	// Effort follows the model's rule exactly, and for the same reason: the row
 	// records the pin, so an unpassed flag writes evidence under a configuration
@@ -404,6 +449,7 @@ func main() {
 	claudeEffort := flag.String("claude-effort", "", effortHelp("claude"))
 	codexEffort := flag.String("codex-effort", "", effortHelp("codex"))
 	glmEffort := flag.String("glm-effort", "", effortHelp("glm"))
+	copilotEffort := flag.String("copilot-effort", "", effortHelp("copilot")) // no effort dial: pass unrecorded, deliberately
 	localEffort := flag.String("local-effort", "", effortHelp("local"))
 	migrateEffortPath := flag.String("migrate-effort", "",
 		"MIGRATION MODE: stamp effort=\""+policyeval.EffortUnrecorded+"\" on every row of this oracle file that has none, then exit (idempotent; writes <path>.tmp and renames)")
@@ -444,8 +490,9 @@ func main() {
 	rawPins := map[string]policyeval.Config{
 		"claude": {Lane: "claude", Model: *claudeModel, Effort: *claudeEffort},
 		"codex":  {Lane: "codex", Model: *codexModel, Effort: *codexEffort},
-		"glm":    {Lane: "glm", Model: *glmModel, Effort: *glmEffort},
-		"local":  {Lane: "local", Model: *localModel, Effort: *localEffort},
+		"glm":     {Lane: "glm", Model: *glmModel, Effort: *glmEffort},
+		"copilot": {Lane: "copilot", Model: *copilotModel, Effort: *copilotEffort},
+		"local":   {Lane: "local", Model: *localModel, Effort: *localEffort},
 	}
 	// rawPins is passed on UNNORMALIZED and that is deliberate: buildRunPlan does
 	// its own normalization for the dispatch decision, and requireConfigPins
@@ -688,9 +735,17 @@ func replayArgs(taskID string, cfg policyeval.Config, prompt string, maxNotional
 }
 
 // replayOne runs one (task,config,trial) cell end to end.
-func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verifyBin, repos string, timeoutSec int, maxNotional float64, claudeExtra string) Row {
+//
+// NAMED RESULT, deliberately: the copilot served-model annotation below runs
+// in a defer so that every return path after the dispatch carries it. A defer
+// can only reach the value being returned through a named result — with an
+// unnamed one, `return row` copies the struct out BEFORE the defer mutates the
+// local, and the annotation is silently lost. That is not hypothetical: the
+// first live copilot smoke (EX-01, 2026-09-02) wrote a row with no served=
+// note for exactly this reason; the integration test below pins it.
+func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verifyBin, repos string, timeoutSec int, maxNotional float64, claudeExtra string) (row Row) {
 	lane, model := cfg.Lane, cfg.Model
-	row := Row{TS: time.Now().UTC().Format(time.RFC3339), Task: t.ID, Class: t.Class,
+	row = Row{TS: time.Now().UTC().Format(time.RFC3339), Task: t.ID, Class: t.Class,
 		Lane: lane, Model: model, Effort: cfg.Effort, Trial: trial}
 	start := time.Now()
 
@@ -767,6 +822,14 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 		row.OutcomeClass = fmt.Sprintf("exit-%d", exit)
 		row.Note = firstLine(outB, nil)
 		return row
+	}
+
+	// copilot: the pin may be `auto`; record which model actually answered.
+	// Deferred to after the exit switch so a spawn/exit failure keeps its own
+	// note; every later return path below goes through this closure.
+	if lane == "copilot" {
+		_, served := decodeAgentStream(stdout)
+		defer func() { row.Note = servedNote(row.Note, served) }()
 	}
 
 	// Verify: pure in-process; exec via mr-goldverify on the candidate diff.

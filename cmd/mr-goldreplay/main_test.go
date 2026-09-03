@@ -911,3 +911,66 @@ func TestDriftMixedRecordedSetWarnsAboutRebuy(t *testing.T) {
 		t.Fatalf("the mixed cell must still warn about re-buying: %s", msg)
 	}
 }
+
+// copilot (2026-09-02): the lane's JSONL is an envelope per event with a
+// polymorphic payload; only assistant.message carries agent text, and its
+// data.model is the SERVED model (a `--model auto` pin resolves vendor-side).
+func TestDecodeAgentTextCopilotEnvelope(t *testing.T) {
+	copilotEvents := `{"type":"session.start","data":{"sessionId":"s1"}}
+{"type":"model.message","data":{"message":{"role":"assistant","content":[{"type":"text","text":"ignored: not the agent text event"}]}}}
+{"type":"assistant.message","data":{"content":"Fix:\n\ndiff --git a/z.go b/z.go\n--- a/z.go\n+++ b/z.go\n@@ -1 +1 @@\n-e\n+f","model":"gpt-5.6-terra"}}
+{"type":"session.usage_checkpoint","data":{"totalPremiumRequests":1,"totalNanoAiu":42}}
+{"type":"result","data":{"message":"done"}}`
+	text, served := decodeAgentStream(copilotEvents)
+	if !strings.Contains(text, "diff --git a/z.go") || strings.Contains(text, `\n`) {
+		t.Fatalf("copilot decode wrong: %q", text)
+	}
+	if strings.Contains(text, "ignored:") {
+		t.Fatalf("model.message payload must not be treated as agent text: %q", text)
+	}
+	if served != "gpt-5.6-terra" {
+		t.Fatalf("served model not recovered: %q", served)
+	}
+	if d := extractDiff(decodeAgentText(copilotEvents)); !strings.HasPrefix(d, "diff --git a/z.go") {
+		t.Fatalf("extract from decoded copilot text failed: %q", d)
+	}
+	if _, served := decodeAgentStream(`{"type":"result","result":"x"}`); served != "" {
+		t.Fatalf("non-copilot stream must report no served model, got %q", served)
+	}
+}
+
+func TestServedNote(t *testing.T) {
+	if got := servedNote("", ""); got != "" {
+		t.Fatalf("empty stays empty, got %q", got)
+	}
+	if got := servedNote("", "m1"); got != "served=m1" {
+		t.Fatalf("got %q", got)
+	}
+	if got := servedNote("no diff in output", "m1"); got != "no diff in output; served=m1" {
+		t.Fatalf("got %q", got)
+	}
+	if got := servedNote("kept", ""); got != "kept" {
+		t.Fatalf("note must survive an empty served model, got %q", got)
+	}
+}
+
+// The copilot lane is a first-class replay lane: its pins are gated like every
+// other lane's, and a bare `-lanes copilot` names both missing flags.
+func TestRequireConfigPinsCoversCopilot(t *testing.T) {
+	pins := map[string]policyeval.Config{
+		"copilot": {Lane: "copilot"},
+		"codex":   {Lane: "codex", Model: "gpt-5.6-terra", Effort: "high"},
+	}
+	missing := requireConfigPins([]string{"codex", "copilot"}, pins)
+	if len(missing) != 1 || missing[0] != "copilot" {
+		t.Fatalf("copilot must be gated, got %v", missing)
+	}
+	if f := pinFlagsFor(missing); !strings.Contains(f, "-copilot-model") || !strings.Contains(f, "-copilot-effort") {
+		t.Fatalf("actionable flags missing: %q", f)
+	}
+	args := replayArgs("T1", policyeval.Config{Lane: "copilot", Model: "auto", Effort: policyeval.EffortUnrecorded}, "p", 10)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-lane copilot -model auto") || strings.Contains(joined, "-effort") {
+		t.Fatalf("copilot argv must pin the model and send no effort: %q", joined)
+	}
+}
