@@ -27,6 +27,16 @@ type pollState struct {
 	// dropped by omitempty (review finding).
 	LastClaude *time.Time `json:"last_claude,omitempty"`
 	LastCodex  *time.Time `json:"last_codex,omitempty"`
+	// Codex plan facts from the last SUCCESSFUL default-subject wham poll
+	// (quotapoll.CodexFacts): plan type, whether a 5h window was reported,
+	// the models the plan lists, the models carrying their own limits.
+	// EVIDENCE for status/probe planning; nothing in admission reads it. An
+	// outage preserves the last facts (a failed fetch is not "no plan").
+	CodexPlan       string          `json:"codex_plan,omitempty"`
+	CodexHas5h      *bool           `json:"codex_has_5h,omitempty"`
+	CodexModels     map[string]bool `json:"codex_models,omitempty"`
+	CodexAdditional []string        `json:"codex_additional_limits,omitempty"`
+	CodexFactsAt    *time.Time      `json:"codex_facts_at,omitempty"`
 }
 
 func stampKey(lane, subject string) string {
@@ -89,6 +99,8 @@ type subjectFetch struct {
 	// plan's credit entitlement × 1000). 0 = the poll carries no capacity;
 	// the ledger keeps whatever it has (a config estimate, or an older poll).
 	CapMilli int64
+	// CodexFacts rides along on a codex fetch (nil for every other lane).
+	CodexFacts *quotapoll.CodexFacts
 }
 
 // pollFetch is the NETWORK half: config-gated, rate-limited HTTP over the
@@ -101,7 +113,7 @@ type pollFetch struct {
 
 func fetchPolls(cfg orchcfg.Config, reg profiles.Registry, ps pollState, force bool, now time.Time) pollFetch {
 	var f pollFetch
-	poll := func(lane, origin string, gate bool, do func(cred string) quotapoll.Result) {
+	poll := func(lane, origin string, gate bool, do func(cred string) (quotapoll.Result, *quotapoll.CodexFacts)) {
 		if !gate {
 			return
 		}
@@ -112,8 +124,8 @@ func fetchPolls(cfg orchcfg.Config, reg profiles.Registry, ps pollState, force b
 			if !force && !pollDue(ps.Last[stampKey(lane, p.Subject)], cfg.PollMinIntervalMin, now) {
 				continue
 			}
-			res := do(p.CredPath(lane))
-			sf := subjectFetch{Lane: lane, Subject: p.Subject, Origin: origin, OK: true, Res: res}
+			res, facts := do(p.CredPath(lane))
+			sf := subjectFetch{Lane: lane, Subject: p.Subject, Origin: origin, OK: true, Res: res, CodexFacts: facts}
 			for _, a := range res.Absences {
 				if a.Window == "all" { // not_logged_in / refresh_failed / http_* / parse_error
 					sf.OK = false
@@ -122,8 +134,13 @@ func fetchPolls(cfg orchcfg.Config, reg profiles.Registry, ps pollState, force b
 			f.subjects = append(f.subjects, sf)
 		}
 	}
-	poll("claude", "oauth_poll", cfg.OAuthUsagePoll, func(cred string) quotapoll.Result { return quotapoll.PollClaudeAt(cred, now) })
-	poll("codex", "wham_poll", cfg.CodexUsagePoll, func(cred string) quotapoll.Result { return quotapoll.PollCodexAt(cred, now) })
+	poll("claude", "oauth_poll", cfg.OAuthUsagePoll, func(cred string) (quotapoll.Result, *quotapoll.CodexFacts) {
+		return quotapoll.PollClaudeAt(cred, now), nil
+	})
+	poll("codex", "wham_poll", cfg.CodexUsagePoll, func(cred string) (quotapoll.Result, *quotapoll.CodexFacts) {
+		r, f := quotapoll.PollCodexFactsAt(cred, now)
+		return r, &f
+	})
 	f.pollCopilot(cfg, ps, force, now)
 	return f
 }
@@ -188,6 +205,7 @@ func applyPolls(l *ledger.Ledger, f pollFetch, now time.Time) {
 func finishPolls(f pollFetch, ps *pollState, now time.Time) {
 	for _, sf := range f.subjects {
 		ps.Last[stampKey(sf.Lane, sf.Subject)] = now
+		recordCodexFacts(ps, sf, now)
 	}
 	savePollState(*ps)
 	for _, sf := range f.subjects {
@@ -268,4 +286,54 @@ func runPoll(args []string) error {
 	}
 	fmt.Println(string(out))
 	return nil
+}
+
+// recordCodexFacts lands the plan facts of a SUCCESSFUL default-subject codex
+// fetch in poll-state. A failed or non-default fetch leaves the previous facts
+// untouched: a transient outage is not evidence that the plan changed, and a
+// second profile's plan is not the primary account's.
+func recordCodexFacts(ps *pollState, sf subjectFetch, now time.Time) {
+	if sf.Lane != "codex" || !sf.OK || sf.CodexFacts == nil || (sf.Subject != "" && sf.Subject != "default") {
+		return
+	}
+	f := sf.CodexFacts
+	if f.PlanType == "" {
+		return // a body without a plan_type carries no plan fact to record
+	}
+	ps.CodexPlan = f.PlanType
+	has := f.Has5h
+	ps.CodexHas5h = &has
+	ps.CodexModels = map[string]bool{}
+	for m, u := range f.Models {
+		ps.CodexModels[m] = u.Available
+	}
+	ps.CodexAdditional = nil
+	for _, a := range f.Additional {
+		ps.CodexAdditional = append(ps.CodexAdditional, a.Name)
+	}
+	t := now
+	ps.CodexFactsAt = &t
+}
+
+// CodexPlanStatus is the status view of the recorded codex plan facts.
+type CodexPlanStatus struct {
+	PlanType         string          `json:"plan_type"`
+	Has5hWindow      *bool           `json:"has_5h_window,omitempty"`
+	Models           map[string]bool `json:"models,omitempty"`
+	AdditionalLimits []string        `json:"additional_limits,omitempty"`
+	ObservedAt       *time.Time      `json:"observed_at,omitempty"`
+	Note             string          `json:"note"`
+}
+
+// codexPlanStatus renders poll-state's codex facts; nil when none were ever
+// recorded (an absent block, not an empty one).
+func codexPlanStatus(ps pollState) *CodexPlanStatus {
+	if ps.CodexPlan == "" {
+		return nil
+	}
+	return &CodexPlanStatus{
+		PlanType: ps.CodexPlan, Has5hWindow: ps.CodexHas5h, Models: ps.CodexModels,
+		AdditionalLimits: ps.CodexAdditional, ObservedAt: ps.CodexFactsAt,
+		Note: "evidence from the wham usage poll (default subject); admission does not read it — a 5h window omitted by wham was unreliable on Plus (Q10), so has_5h_window=false is an observation, not proof",
+	}
 }

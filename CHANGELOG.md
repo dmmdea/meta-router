@@ -4,6 +4,15 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.40.1] — 2026-09-06
+
+### Added — codex plan facts from the quota poll, and a probe budget for the codex lane
+Operator upgraded the ChatGPT subscription on 2026-09-06 and asked for the Codex model roster to be tested as a priority. Verified live the same evening: the wham usage endpoint now reports `plan_type: "prolite"`, exposes ONLY a 7-day window for the main allowance (no 5h secondary), lists `model_usage` (gpt-6-astra available) and `additional_rate_limits` (GPT-5.3-Codex-Spark with its own 5h + 7d windows). Codex CLI 0.153.4 on both nodes; the RS8 codex schema gate is stable (one advisory added key, `turn.completed.usage.cache_write_input_tokens`). All five models — gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.3-codex-spark — answered through `run --lane codex`.
+
+- **`quotapoll.CodexFacts`** (`PollCodexFactsAt`): plan type, whether a 5h window was reported, per-model availability, additional per-model limits mapped to 5h/7d snapshots by `limit_window_seconds`. EVIDENCE only: nothing in admission or capacity reads it, because a 5h window omitted by wham was unreliable on Plus (Q10) and its absence on prolite is an observation, not proof. The live capture is the fixture (`codex-usage-prolite.json`, ids scrubbed). `poll`/`status` surface the facts (`codex_plan` block, recorded in poll-state on a successful default-subject codex fetch, preserved through outages).
+- **`mr-goldreplay -codex-budget-pct`** (default 33): codex cells become resumable holes once the ledger's codex 7d window reaches the cap — the copilot lesson applied before the first roster sweep. The budget table is per lane (copilot → month, codex → 7d); lanes outside it are never held.
+- Not changed, deliberately: the codex 5h estimate cap stays (throttle-only, S2R-3) until a live 429 or a non-zero 5h window settles whether the plan has one; no seed rows for the new models (R14a — the sweeps earn them).
+
 ## [0.40.0] — 2026-09-06
 
 ### Added — the free-provider lanes (W4): groq, cloudflare, openrouter, nim, gemini
