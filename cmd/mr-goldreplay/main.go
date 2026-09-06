@@ -31,6 +31,7 @@ import (
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
 	"github.com/dmmdea/meta-router/internal/orch/childenv"
+	"github.com/dmmdea/meta-router/internal/orch/freelane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 	"github.com/dmmdea/meta-router/internal/policyeval"
@@ -346,19 +347,21 @@ func decodeAgentStream(stdout string) (text, servedModel string) {
 		if line == "" || !strings.HasPrefix(line, "{") {
 			continue
 		}
-		var ev struct {
-			Type string `json:"type"`
-			Item *struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"item"`
-			Result string          `json:"result"`
-			Data   json.RawMessage `json:"data"`
-		}
+		var ev agentEvent
 		if json.Unmarshal([]byte(line), &ev) != nil {
 			continue
 		}
 		switch {
+		case len(ev.Choices) > 0:
+			// OpenAI chat-completion body (the free-provider lanes print the
+			// vendor response verbatim): the answer is choices[0].message.content
+			// and the served model is the body's model.
+			if c := strings.TrimSpace(ev.Choices[0].Message.Content); c != "" {
+				parts = append(parts, c)
+			}
+			if ev.Model != "" {
+				servedModel = ev.Model
+			}
 		case ev.Item != nil && ev.Item.Type == "agent_message" && ev.Item.Text != "":
 			parts = append(parts, ev.Item.Text)
 		case ev.Type == "result" && ev.Result != "":
@@ -378,7 +381,53 @@ func decodeAgentStream(stdout string) (text, servedModel string) {
 			}
 		}
 	}
+	if len(parts) == 0 {
+		// A vendor may pretty-print its body across lines; the line scan above
+		// then sees no complete object. Decode the whole stream once.
+		var ev agentEvent
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &ev); err == nil && len(ev.Choices) > 0 {
+			if c := strings.TrimSpace(ev.Choices[0].Message.Content); c != "" {
+				parts = append(parts, c)
+			}
+			if ev.Model != "" {
+				servedModel = ev.Model
+			}
+		}
+	}
 	return strings.Join(parts, "\n"), servedModel
+}
+
+// agentEvent is the union of the per-lane stdout shapes decodeAgentStream
+// understands: codex item events, claude/glm result JSON, copilot envelopes,
+// and the OpenAI chat-completion body the free-provider lanes print.
+type agentEvent struct {
+	Type string `json:"type"`
+	Item *struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"item"`
+	Result  string          `json:"result"`
+	Data    json.RawMessage `json:"data"`
+	Model   string          `json:"model"`
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+// laneCWDArg renders the -cwd argument for a replay dispatch. The
+// free-provider lanes get NONE: their transport is an HTTP call with no
+// working directory — the lane cannot read a file, so a cwd would be a
+// repository-context assertion the egress gate must judge (and refuse for a
+// TEMP worktree) for a dispatch that would not have used it anyway. The agent
+// worktree still exists for the verifier; the lane is scored on the diff it
+// PRINTS, exactly like copilot's text dispatch.
+func laneCWDArg(lane, cwd string) []string {
+	if cwd == "" || freelane.IsLane(lane) {
+		return nil
+	}
+	return []string{"-cwd", cwd}
 }
 
 // servedNote appends served=<model> to a row note for lanes whose pin is
@@ -413,7 +462,7 @@ func routerClass(goldClass string) string {
 func main() {
 	goldset := flag.String("goldset", "testdata/routing-goldset.jsonl", "gold-set JSONL (point at the private repo's copy)")
 	outPath := flag.String("out", "oracle.jsonl", "oracle table output (appended; resume skips recorded rows)")
-	lanesFlag := flag.String("lanes", "local", "comma-separated lanes: local,claude,codex,glm,copilot")
+	lanesFlag := flag.String("lanes", "local", "comma-separated lanes: local,claude,codex,glm,copilot,groq,cloudflare,openrouter,nim,gemini")
 	trials := flag.Int("trials", 1, "trials per (task,lane); resume adds more later (Q8 CI-width stopping)")
 	tasksFlag := flag.String("tasks", "", "comma-separated task IDs filter (empty = all)")
 	classesFlag := flag.String("classes", "", "comma-separated gold classes filter (empty = all)")
@@ -439,6 +488,14 @@ func main() {
 	// evidence keeps its attribution without splitting the oracle cell.
 	copilotModel := flag.String("copilot-model", "", "model pin for the copilot lane (REQUIRED when -lanes includes copilot; 'auto' is the deployable config, served model lands in the note)")
 	localModel := flag.String("local-model", "", "model tag for the local lane (REQUIRED when -lanes includes local)")
+	// Free-provider lanes (W4): the same pin gate as every lane. The pin is the
+	// vendor model id (openai/gpt-oss-120b on groq, @cf/... on cloudflare,
+	// ...:free on openrouter); effort is forwarded as reasoning_effort only when
+	// pinned, so `unrecorded` is the deliberate "vendor default ran" declaration.
+	freeModelFlags, freeEffortFlags := map[string]*string{}, map[string]*string{}
+	for _, lane := range freelane.Lanes {
+		freeModelFlags[lane] = flag.String(lane+"-model", "", "model pin for the "+lane+" lane (REQUIRED when -lanes includes "+lane+"; the vendor model id)")
+	}
 	// Effort follows the model's rule exactly, and for the same reason: the row
 	// records the pin, so an unpassed flag writes evidence under a configuration
 	// nobody chose. A lane with no effort dial (local) is declared explicitly as
@@ -453,6 +510,9 @@ func main() {
 	glmEffort := flag.String("glm-effort", "", effortHelp("glm"))
 	copilotEffort := flag.String("copilot-effort", "", effortHelp("copilot")) // no effort dial: pass unrecorded, deliberately
 	localEffort := flag.String("local-effort", "", effortHelp("local"))
+	for _, lane := range freelane.Lanes {
+		freeEffortFlags[lane] = flag.String(lane+"-effort", "", effortHelp(lane))
+	}
 	migrateEffortPath := flag.String("migrate-effort", "",
 		"MIGRATION MODE: stamp effort=\""+policyeval.EffortUnrecorded+"\" on every row of this oracle file that has none, then exit (idempotent; writes <path>.tmp and renames)")
 	timeoutSec := flag.Int("timeout", 900, "per-dispatch timeout (seconds)")
@@ -491,11 +551,14 @@ func main() {
 	// model string unequal to every other row's — the same mislabelling this
 	// gate exists to prevent, one layer down (review 2026-07-27).
 	rawPins := map[string]policyeval.Config{
-		"claude": {Lane: "claude", Model: *claudeModel, Effort: *claudeEffort},
-		"codex":  {Lane: "codex", Model: *codexModel, Effort: *codexEffort},
+		"claude":  {Lane: "claude", Model: *claudeModel, Effort: *claudeEffort},
+		"codex":   {Lane: "codex", Model: *codexModel, Effort: *codexEffort},
 		"glm":     {Lane: "glm", Model: *glmModel, Effort: *glmEffort},
 		"copilot": {Lane: "copilot", Model: *copilotModel, Effort: *copilotEffort},
 		"local":   {Lane: "local", Model: *localModel, Effort: *localEffort},
+	}
+	for _, lane := range freelane.Lanes {
+		rawPins[lane] = policyeval.Config{Lane: lane, Model: *freeModelFlags[lane], Effort: *freeEffortFlags[lane]}
 	}
 	// rawPins is passed on UNNORMALIZED and that is deliberate: buildRunPlan does
 	// its own normalization for the dispatch decision, and requireConfigPins
@@ -810,9 +873,7 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 	if rc := routerClass(t.Class); rc != "" {
 		args = append(args, "-class", rc)
 	}
-	if cwd != "" {
-		args = append(args, "-cwd", cwd)
-	}
+	args = append(args, laneCWDArg(lane, cwd)...)
 	cmd := exec.Command(orchBin, args...)
 	// The replay spawns the ORCHESTRATOR, which then spawns lane binaries. It
 	// scrubs again downstream, but a weekly unattended run is the last place to
@@ -866,7 +927,9 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 	// copilot: the pin may be `auto`; record which model actually answered.
 	// Deferred to after the exit switch so a spawn/exit failure keeps its own
 	// note; every later return path below goes through this closure.
-	if lane == "copilot" {
+	// free lanes: the vendor's body names the model it served (openrouter's
+	// `:free` pool routes to variants) — same attribution, same mechanism.
+	if lane == "copilot" || freelane.IsLane(lane) {
 		_, served := decodeAgentStream(stdout)
 		defer func() { row.Note = servedNote(row.Note, served) }()
 	}

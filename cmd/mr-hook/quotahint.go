@@ -16,10 +16,13 @@ import (
 var hintThresholds = admission.Thresholds{ThrottlePct: 80, ExhaustPct: 95}
 
 // hintLanes is the fixed lane order the hint renders (deterministic output).
-var hintLanes = []string{"claude", "codex", "copilot", "glm"}
+var hintLanes = []string{"claude", "codex", "copilot", "glm",
+	// free-provider lanes (W4): they render only once a dispatch has metered a
+	// window, so an unprovisioned lane adds nothing (fail-open, as always).
+	"groq", "cloudflare", "openrouter", "nim", "gemini"}
 
 // windowOrder pins a stable per-lane window order in the render.
-var windowOrder = []ledger.WindowKind{ledger.Win5h, ledger.Win7d, ledger.WinMonth}
+var windowOrder = []ledger.WindowKind{ledger.Win5h, ledger.Win7d, ledger.WinMonth, ledger.WinDay, ledger.WinTrial}
 
 // quotaHint builds a one-line quota+route pointer from the ledger file DIRECTLY
 // (no subprocess, no network — the hook's deadline stands (300ms binary default; 1000ms via -timeout-ms in production); a file read is
