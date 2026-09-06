@@ -1,6 +1,10 @@
 package main
 
 import (
+	"time"
+
+	"github.com/dmmdea/meta-router/internal/orch/ledger"
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 	"fmt"
 	"os"
 	"os/exec"
@@ -972,5 +976,39 @@ func TestRequireConfigPinsCoversCopilot(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-lane copilot -model auto") || strings.Contains(joined, "-effort") {
 		t.Fatalf("copilot argv must pin the model and send no effort: %q", joined)
+	}
+}
+
+// The probe budget holds copilot cells as HOLES once the ledger's month is at
+// the cap; other lanes and a disabled budget pass; an expired window and a
+// missing ledger fail open.
+func TestProbeBudgetHoldCopilotOnly(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	if hold, _ := probeBudgetHold("copilot", 33, now); hold {
+		t.Fatal("no ledger must fail open")
+	}
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.SetCapacityEstimate("copilot", ledger.WinMonth, 300000)
+		l.AnchorIfUnset("copilot", ledger.WinMonth, ledger.NextMonthlyReset(now), now)
+		l.AddShadow("copilot", ledger.WinMonth, 120000, now) // 40%
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hold, why := probeBudgetHold("copilot", 33, now)
+	if !hold || !strings.Contains(why, "probe budget") {
+		t.Fatalf("40%% >= 33 must hold: %v %q", hold, why)
+	}
+	if hold, _ := probeBudgetHold("copilot", 50, now); hold {
+		t.Fatal("40% < 50 must not hold")
+	}
+	if hold, _ := probeBudgetHold("copilot", -1, now); hold {
+		t.Fatal("negative budget disables the hold")
+	}
+	if hold, _ := probeBudgetHold("codex", 33, now); hold {
+		t.Fatal("only the copilot lane is budgeted")
+	}
+	if hold, _ := probeBudgetHold("copilot", 33, ledger.NextMonthlyReset(now).Add(time.Hour)); hold {
+		t.Fatal("an expired month window is history, never a hold")
 	}
 }

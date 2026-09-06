@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.37.0] — 2026-09-06
+
+### Changed — the copilot lane spends its month on purpose
+Operator finding (2026-09-05): a 168-cell gold probe under `--model auto` was served by gpt-5.6-luna on 78% of dispatches and GitHub cut the 300-request month off at roughly the 110th dispatch while the ledger still showed 60% headroom. Four decisions, three built:
+
+1. **Default pin is `gpt-5.6-terra`** (`orchcfg.CopilotDefaultModel`), a model measured at one premium request per dispatch. `auto` stays a legitimate explicit choice in config or `--model auto`; it is no longer the silent default.
+2. **The meter uses the vendor's per-dispatch figure** (`session.usage_checkpoint.totalPremiumRequests`), floored at one request, instead of one-per-dispatch. Undercounting spends the month blind; overcounting a rare model merely throttles early. Receipts now carry `premium_requests` and `nano_aiu` so the month reconciles against GitHub's billing page, which remains the only ground truth for the unit.
+3. **Fallback to included models on exhaustion: NOT built, measured false.** On the exhausted account `gpt-5.4-mini` answered HTTP 402 "You have exceeded your monthly quota" and `gpt-4.1` is not an available model. The vendor refuses every CLI dispatch once premium is gone, so the ledger's calendar latch is the correct behaviour; the earlier "degrades to included models" premise is retracted.
+4. **`mr-goldreplay -copilot-budget-pct`** (default 33): copilot cells are recorded as deferred, resumable holes once the ledger's month window reaches the cap; negative disables. A probe can no longer drain the month.
+
 ## [0.36.2] — 2026-09-02
 
 ### Added — `mr-goldreplay` replays the copilot lane

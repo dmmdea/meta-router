@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,13 +11,10 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 )
 
-// The metering unit is ONE DISPATCH = ONE REQUEST, deliberately, because the
-// vendor's totalPremiumRequests field has an unverified unit (measured
-// 2026-09-01: 1 for claude-sonnet-5 and gpt-5.6-terra, 14 for
-// gemini-3.6-flash on reproducible fresh sessions, inversely to nano-AIU).
-// Taking 14 at face value would mask a lane that still has capacity — an
-// artificial brake built on an unverified number (R14).
-func TestCopilotMeteringIsOneRequestPerDispatch(t *testing.T) {
+// The metering unit is the VENDOR'S per-dispatch premium-request figure,
+// floored at one request (recalibrated 2026-09-05: the one-per-dispatch unit
+// let a gold probe spend the whole month while the ledger showed 60% left).
+func TestCopilotMeteringUsesTheVendorFigureFlooredAtOne(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	cfg := orchcfg.Defaults()
 	for _, tc := range []struct {
@@ -25,8 +23,10 @@ func TestCopilotMeteringIsOneRequestPerDispatch(t *testing.T) {
 		wantMill int64
 	}{
 		{"vendor says 1", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 1}}, 1000},
-		{"vendor says 14", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 14}}, 1000},
-		{"ok with no checkpoint still meters", copilotlane.Outcome{Class: "ok"}, 1000},
+		{"vendor says 3 (luna-class)", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 3}}, 3000},
+		{"vendor says 14", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 14}}, 14000},
+		{"ok with no checkpoint still meters one", copilotlane.Outcome{Class: "ok"}, 1000},
+		{"not-ok but vendor charged", copilotlane.Outcome{Class: "incomplete", Usage: copilotlane.Usage{PremiumRequests: 2}}, 2000},
 	} {
 		l := ledger.Open(filepath.Join(t.TempDir(), "ledger.json"))
 		applyCopilotOutcome(l, tc.o, cfg, now)
@@ -35,7 +35,7 @@ func TestCopilotMeteringIsOneRequestPerDispatch(t *testing.T) {
 			t.Fatalf("%s: no monthly bucket", tc.name)
 		}
 		if b.ShadowTokens != tc.wantMill {
-			t.Fatalf("%s: metered %d milli-requests, want %d (one dispatch = one request)", tc.name, b.ShadowTokens, tc.wantMill)
+			t.Fatalf("%s: metered %d milli-requests, want %d (vendor figure, floored at one)", tc.name, b.ShadowTokens, tc.wantMill)
 		}
 		if b.CapTokens != cfg.CopilotMonthlyRequests*1000 {
 			t.Fatalf("%s: cap = %d, want the configured allowance", tc.name, b.CapTokens)
@@ -55,5 +55,20 @@ func TestCopilotRateLimitObservesTheCalendarReset(t *testing.T) {
 	b, ok := l.Bucket("copilot", ledger.WinMonth)
 	if !ok || !b.ResetsAt.Equal(ledger.NextMonthlyReset(now)) {
 		t.Fatalf("rate_limit must anchor the calendar reset: %+v ok=%v", b, ok)
+	}
+}
+
+// The default pin is a measured 1x model; `auto` (which the vendor resolved to
+// a ~3x model on 78% of a 168-cell probe) is opt-in only.
+func TestCopilotDefaultModelIsOneXNotAuto(t *testing.T) {
+	if orchcfg.Defaults().CopilotModel != "gpt-5.6-terra" || orchcfg.CopilotDefaultModel == "auto" {
+		t.Fatalf("default copilot model must be the measured 1x pin, got %q", orchcfg.Defaults().CopilotModel)
+	}
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := orchcfg.Load(p); c.CopilotModel != orchcfg.CopilotDefaultModel {
+		t.Fatalf("empty config must normalize to the 1x default, got %q", c.CopilotModel)
 	}
 }

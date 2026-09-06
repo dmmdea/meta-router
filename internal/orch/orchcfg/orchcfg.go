@@ -38,7 +38,14 @@ type Config struct {
 	// account the environment happens to carry — the cross-account hazard.
 	CopilotTokenUser       string `json:"copilot_token_user"`
 	CopilotMonthlyRequests int64  `json:"copilot_monthly_requests"` // default 300 (Pro allowance; fetched 2026-09-01, resets 1st 00:00 UTC)
-	CopilotModel           string `json:"copilot_model"`            // default "auto" (vendor-routed; JSONL reports the model actually served)
+	// CopilotModel default is gpt-5.6-terra, a model measured at ONE premium
+	// request per dispatch (2026-09-01 checkpoints). It was "auto" until
+	// 2026-09-05, when a 168-cell gold probe under auto was served by
+	// gpt-5.6-luna on 78% of dispatches and the vendor cut the 300-request
+	// month off at roughly the 110th dispatch — luna bills about 3x. `auto` is
+	// still a legitimate, explicit choice (config or --model auto); it is no
+	// longer the silent default.
+	CopilotModel string `json:"copilot_model"`
 
 	// GLMRetired ships TRUE (subscription cancelled 2026-09-01): the glm
 	// lane refuses dispatch with a typed reason. Explicit false re-enables
@@ -118,12 +125,17 @@ type Config struct {
 	CompactionOff bool `json:"compaction_off"`
 }
 
+// CopilotDefaultModel is the lane's default pin: measured at 1 premium request
+// per dispatch. See the CopilotModel field comment for why `auto` lost the
+// default.
+const CopilotDefaultModel = "gpt-5.6-terra"
+
 func Defaults() Config {
 	return Config{
 		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: true,
 		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
-		CopilotMonthlyRequests: 300, CopilotModel: "auto", GLMRetired: true,
+		CopilotMonthlyRequests: 300, CopilotModel: CopilotDefaultModel, GLMRetired: true,
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
 		QuotaStaleHours: 48, PollMinIntervalMin: 5, LocalMaxPerMin: 20,
 		DelegateProposePct: 70,
@@ -167,7 +179,7 @@ func Load(path string) Config {
 		c.CopilotMonthlyRequests = 300
 	}
 	if c.CopilotModel == "" {
-		c.CopilotModel = "auto"
+		c.CopilotModel = CopilotDefaultModel
 	}
 	if c.GLMPaceMinSec == 0 {
 		c.GLMPaceMinSec = 20

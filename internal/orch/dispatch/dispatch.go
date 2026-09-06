@@ -27,6 +27,13 @@ type Record struct {
 	TokensIn         int64    `json:"tokens_in"`
 	TokensOut        int64    `json:"tokens_out"`
 	NumTurns         int      `json:"num_turns"`
+	// PremiumRequests / NanoAiu are the copilot lane's vendor-reported
+	// per-dispatch consumption (session.usage_checkpoint). Recorded so the
+	// month can be reconciled against GitHub's billing page — the one ground
+	// truth for the premium unit (2026-09-05: ~110 dispatches under `auto`
+	// exhausted a 300-request month). omitempty: other lanes never set them.
+	PremiumRequests int64 `json:"premium_requests,omitempty"`
+	NanoAiu         int64 `json:"nano_aiu,omitempty"`
 	NotionalUSD      float64  `json:"notional_usd"`
 	// CashUSD is actual cash settled for this dispatch — structurally 0 for
 	// subscription lanes (R10). NotionalUSD remains the VALUATION column; the
