@@ -29,6 +29,9 @@ func spendDownPath() string    { return statepaths.SpendDown() }
 func profilesPath() string     { return statepaths.Profiles() }
 func exclusionsPath() string   { return statepaths.Exclusions() }   // W6 breaker state
 func localLimiterPath() string { return statepaths.LocalLimiter() } // W6 local sliding window
+func freeLimiterPath(lane string) string {
+	return statepaths.FreeLimiter(lane) // W4 free-provider per-minute sliding window
+}
 
 // fixturesDir locates the committed fixtures for probe/verify. CWD-relative
 // by default (repo workflows); MR_ORCH_FIXTURES pins it for scheduled tasks

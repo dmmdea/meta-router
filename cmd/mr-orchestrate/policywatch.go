@@ -42,39 +42,39 @@ import (
 // self-clears the next night was never seen.
 
 const (
-	policyArticleURL = "https://support.claude.com/en/articles/15036540"
-	zaiPolicyURL     = "https://docs.z.ai/devpack/usage-policy"
+	policyArticleURL  = "https://support.claude.com/en/articles/15036540"
+	zaiPolicyURL      = "https://docs.z.ai/devpack/usage-policy"
 	copilotBillingURL = "https://docs.github.com/en/copilot/managing-copilot/understanding-and-managing-copilot-usage/understanding-and-managing-requests-in-copilot"
 )
 
 type policyState struct {
-	CheckedAt         time.Time  `json:"checked_at"`
-	CLIVersion        string     `json:"cli_version"`
-	LastCLIVersion    string     `json:"last_cli_version,omitempty"`
-	CodexVersion      string     `json:"codex_version,omitempty"`
-	LastCodexVersion  string     `json:"last_codex_version,omitempty"`
-	ArticleHash       string     `json:"article_hash,omitempty"`
-	LastArticleHash   string     `json:"last_article_hash,omitempty"`
-	ZaiPolicyHash     string     `json:"zai_policy_hash,omitempty"`
-	LastZaiPolicyHash string     `json:"last_zai_policy_hash,omitempty"`
-	CopilotVersion        string `json:"copilot_version,omitempty"`
-	LastCopilotVersion    string `json:"last_copilot_version,omitempty"`
-	CopilotBillingHash    string `json:"copilot_billing_hash,omitempty"`
-	LastCopilotBillingHash string `json:"last_copilot_billing_hash,omitempty"`
-	Alert             bool       `json:"alert"`
-	AlertSince        *time.Time `json:"alert_since,omitempty"`
-	Notes             []string   `json:"notes"`
+	CheckedAt              time.Time  `json:"checked_at"`
+	CLIVersion             string     `json:"cli_version"`
+	LastCLIVersion         string     `json:"last_cli_version,omitempty"`
+	CodexVersion           string     `json:"codex_version,omitempty"`
+	LastCodexVersion       string     `json:"last_codex_version,omitempty"`
+	ArticleHash            string     `json:"article_hash,omitempty"`
+	LastArticleHash        string     `json:"last_article_hash,omitempty"`
+	ZaiPolicyHash          string     `json:"zai_policy_hash,omitempty"`
+	LastZaiPolicyHash      string     `json:"last_zai_policy_hash,omitempty"`
+	CopilotVersion         string     `json:"copilot_version,omitempty"`
+	LastCopilotVersion     string     `json:"last_copilot_version,omitempty"`
+	CopilotBillingHash     string     `json:"copilot_billing_hash,omitempty"`
+	LastCopilotBillingHash string     `json:"last_copilot_billing_hash,omitempty"`
+	Alert                  bool       `json:"alert"`
+	AlertSince             *time.Time `json:"alert_since,omitempty"`
+	Notes                  []string   `json:"notes"`
 }
 
 // observed is one probe cycle's raw readings ("" = unavailable this cycle).
 type observed struct {
-	ClaudeVersion string
-	CodexVersion  string
-	ArticleHash   string
-	ZaiHash       string
-	CopilotVersion    string
+	ClaudeVersion      string
+	CodexVersion       string
+	ArticleHash        string
+	ZaiHash            string
+	CopilotVersion     string
 	CopilotBillingHash string
-	FetchNotes    []string
+	FetchNotes         []string
 }
 
 var (

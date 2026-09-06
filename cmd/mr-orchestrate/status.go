@@ -74,9 +74,9 @@ type Status struct {
 	// A2WatchStale is the F18-class guard for A2 itself: the weekly replay's
 	// verdict is only meaningful if the run happened. A verdict frozen at last
 	// month's ok=true reads identically to a healthy one on every surface.
-	A2WatchStale string          `json:"a2_watch_stale,omitempty"`
-	ScopedAlerts json.RawMessage `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
-	Resilience   *ResilienceStatus `json:"resilience,omitempty"`  // W6: breaker/limiter health (absent = nothing tracked, nothing wrong)
+	A2WatchStale string            `json:"a2_watch_stale,omitempty"`
+	ScopedAlerts json.RawMessage   `json:"scoped_alerts,omitempty"` // W1: critical/warning scoped-limit latch (vendor-refreshed)
+	Resilience   *ResilienceStatus `json:"resilience,omitempty"`    // W6: breaker/limiter health (absent = nothing tracked, nothing wrong)
 }
 
 // ResilienceStatus (W6) surfaces the breaker/limiter's OWN health. The

@@ -201,7 +201,9 @@ func TestCopilotReviewForceRequestsPastExhaustion(t *testing.T) {
 // meters nothing: the vendor billed nothing for a request that never landed.
 func TestCopilotReviewGHFailureIsLoudAndUnmetered(t *testing.T) {
 	reviewHarness(t, recordedBot)
-	runGH = func(token string, args ...string) (string, error) { return "GraphQL: Could not resolve", errors.New("exit status 1") }
+	runGH = func(token string, args ...string) (string, error) {
+		return "GraphQL: Could not resolve", errors.New("exit status 1")
+	}
 	var out bytes.Buffer
 	err := copilotReview(&out, "acct/repo", 9, false, time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC))
 	if err == nil || !strings.Contains(err.Error(), "Could not resolve") {

@@ -19,8 +19,15 @@ func TestParseExcludeNormalises(t *testing.T) {
 // A typo must be an ERROR, not a silent no-op that leaves the lane selectable.
 func TestParseExcludeRejectsUnknown(t *testing.T) {
 	_, err := parseExclude([]string{"claud"})
-	if err == nil || !strings.Contains(err.Error(), `unknown lane "claud"`) || !strings.Contains(err.Error(), "claude|codex|copilot|glm|local") {
+	if err == nil || !strings.Contains(err.Error(), `unknown lane "claud"`) {
 		t.Fatalf("want a typed error listing valid lanes, got %v", err)
+	}
+	// The valid set is rendered sorted; every lane (and the free group alias)
+	// must be named so the operator can fix the typo without the source.
+	for _, name := range []string{"claude", "codex", "copilot", "glm", "local", "groq", "cloudflare", "openrouter", "nim", "gemini", "free"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("valid-lane list must name %q: %v", name, err)
+		}
 	}
 }
 
