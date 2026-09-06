@@ -57,6 +57,7 @@ type Status struct {
 	PolicyAlert      json.RawMessage       `json:"policy_alert,omitempty"`
 	PolicyWatchStale string                `json:"policy_watch_stale,omitempty"`
 	CodexAlert       json.RawMessage       `json:"codex_alert,omitempty"`    // burn-anomaly latch (Task 4)
+	CodexPlan        *CodexPlanStatus      `json:"codex_plan,omitempty"`     // plan facts from the wham poll (2026-09-06)
 	GLMAlert         json.RawMessage       `json:"glm_alert,omitempty"`      // 1313 hard-stop latch (Task 6)
 	Receipts         *ReceiptsSummary      `json:"receipts,omitempty"`       // S2R-10 audit block (additive JSON)
 	QuotaHealth      *QuotaHealth          `json:"quota_health,omitempty"`   // E6 signal-liveness block
@@ -331,6 +332,9 @@ func runStatus(args []string) error {
 	if raw, err := os.ReadFile(codexAlertPath()); err == nil && json.Valid(raw) {
 		st.CodexAlert = raw
 	}
+	// Codex plan facts as last recorded by finishPolls (re-read from disk so
+	// this run's own poll, if it fired, is what renders).
+	st.CodexPlan = codexPlanStatus(loadPollState())
 	// GLM 1313 hard-stop latch: same passthrough — cleared only by
 	// `probe --ack-glm`.
 	if raw, err := os.ReadFile(glmAlertPath()); err == nil && json.Valid(raw) {

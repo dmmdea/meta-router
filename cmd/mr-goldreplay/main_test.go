@@ -985,7 +985,8 @@ func TestRequireConfigPinsCoversCopilot(t *testing.T) {
 func TestProbeBudgetHoldCopilotOnly(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir())
 	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
-	if hold, _ := probeBudgetHold("copilot", 33, now); hold {
+	budgets := func(copilot, codex float64) map[string]probeBudget { return probeBudgets(copilot, codex) }
+	if hold, _ := probeBudgetHold("copilot", budgets(33, -1), now); hold {
 		t.Fatal("no ledger must fail open")
 	}
 	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
@@ -995,20 +996,49 @@ func TestProbeBudgetHoldCopilotOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	hold, why := probeBudgetHold("copilot", 33, now)
-	if !hold || !strings.Contains(why, "probe budget") {
+	hold, why := probeBudgetHold("copilot", budgets(33, -1), now)
+	if !hold || !strings.Contains(why, "probe budget") || !strings.Contains(why, "-copilot-budget-pct") {
 		t.Fatalf("40%% >= 33 must hold: %v %q", hold, why)
 	}
-	if hold, _ := probeBudgetHold("copilot", 50, now); hold {
+	if hold, _ := probeBudgetHold("copilot", budgets(50, -1), now); hold {
 		t.Fatal("40% < 50 must not hold")
 	}
-	if hold, _ := probeBudgetHold("copilot", -1, now); hold {
+	if hold, _ := probeBudgetHold("copilot", budgets(-1, -1), now); hold {
 		t.Fatal("negative budget disables the hold")
 	}
-	if hold, _ := probeBudgetHold("codex", 33, now); hold {
-		t.Fatal("only the copilot lane is budgeted")
+	if hold, _ := probeBudgetHold("codex", budgets(33, 33), now); hold {
+		t.Fatal("codex has no 7d signal in this ledger → no hold")
 	}
-	if hold, _ := probeBudgetHold("copilot", 33, ledger.NextMonthlyReset(now).Add(time.Hour)); hold {
+	if hold, _ := probeBudgetHold("nim", budgets(33, 33), now); hold {
+		t.Fatal("unbudgeted lanes are never held")
+	}
+	if hold, _ := probeBudgetHold("copilot", budgets(33, -1), ledger.NextMonthlyReset(now).Add(time.Hour)); hold {
 		t.Fatal("an expired month window is history, never a hold")
+	}
+}
+
+// The codex lane is budgeted on its WEEKLY window (the wham poll's primary
+// allowance on the operator's plan): a roster sweep must never drain the week.
+func TestProbeBudgetHoldCodexWeekly(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("codex", ledger.Win7d, 40, now.Add(3*24*time.Hour), now)
+		l.ObserveProvider("codex", ledger.Win5h, 90, now.Add(2*time.Hour), now) // the 5h window is NOT the budget axis
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hold, why := probeBudgetHold("codex", probeBudgets(33, 33), now)
+	if !hold || !strings.Contains(why, "codex 7d at 40%") || !strings.Contains(why, "-codex-budget-pct") {
+		t.Fatalf("7d at 40%% >= 33 must hold with an actionable reason: %v %q", hold, why)
+	}
+	if hold, _ := probeBudgetHold("codex", probeBudgets(33, 50), now); hold {
+		t.Fatal("40% < 50 must not hold")
+	}
+	if hold, _ := probeBudgetHold("codex", probeBudgets(33, -1), now); hold {
+		t.Fatal("negative disables the codex cap")
+	}
+	if hold, _ := probeBudgetHold("codex", probeBudgets(33, 33), now.Add(4*24*time.Hour)); hold {
+		t.Fatal("an expired week is history, never a hold")
 	}
 }

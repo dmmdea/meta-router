@@ -522,6 +522,7 @@ func main() {
 	planOnly := flag.Bool("plan-only", false, "print the cells this run WOULD dispatch and exit 0 — the zero-spend way to check a resume before an unattended run")
 	reMeasure := flag.Bool("re-measure", false, "override the drift guard: dispatch planned cells even when their identity is already recorded under a different effort or model (deliberate re-measurement / new-model measurement)")
 	copilotBudgetPct := flag.Float64("copilot-budget-pct", 33, "probe spend cap for the copilot lane: a copilot cell is recorded as a deferred HOLE (resumable) once the ledger's month window is at or above this percentage; negative disables. Default a third of the month — a 168-cell probe under `auto` consumed the whole month on 2026-09-05")
+	codexBudgetPct := flag.Float64("codex-budget-pct", 33, "probe spend cap for the codex lane: a codex cell is recorded as a deferred HOLE (resumable) once the ledger's 7d window (the wham poll's weekly allowance) is at or above this percentage; negative disables. Same lesson as the copilot cap: a roster probe must never drain the operator's week")
 	flag.Parse()
 
 	// Migration is a pure file rewrite: it must not require a goldset, lanes or
@@ -666,7 +667,7 @@ func main() {
 
 	for _, c := range plan.Run {
 		var row Row
-		if hold, why := probeBudgetHold(c.Config.Lane, *copilotBudgetPct, time.Now().UTC()); hold {
+		if hold, why := probeBudgetHold(c.Config.Lane, probeBudgets(*copilotBudgetPct, *codexBudgetPct), time.Now().UTC()); hold {
 			row = Row{TS: time.Now().UTC().Format(time.RFC3339), Task: c.Task, Class: c.GoldTask.Class,
 				Lane: c.Config.Lane, Model: c.Config.Model, Effort: c.Config.Effort, Trial: c.Trial,
 				OutcomeClass: "deferred", Note: why}
@@ -682,31 +683,51 @@ func main() {
 		plan.Total, len(plan.Run), plan.Skipped, *outPath)
 }
 
-// probeBudgetHold decides whether a copilot cell must be held back as a
-// deferred hole because the month's premium allowance is already at or above
-// the probe budget. Reads the orchestrator ledger directly (read-only;
-// MR_ORCH_STATE-scoped like every other path here). Fail-open on a missing or
-// unreadable ledger — a probe with no quota signal at all is the pre-budget
-// state, not a reason to hold. Only the copilot lane is budgeted: it is the
-// one lane with a monthly, non-recovering allowance that a single replay can
-// drain (2026-09-05: 168 planned cells, 110 dispatched, month gone).
-func probeBudgetHold(lane string, budgetPct float64, now time.Time) (bool, string) {
-	if lane != "copilot" || budgetPct < 0 {
+// probeBudget is one lane's probe spend cap: the ledger window that carries
+// the lane's non-recovering (or slowly recovering) allowance and the
+// percentage at which cells become holes.
+type probeBudget struct {
+	Window ledger.WindowKind
+	Pct    float64
+}
+
+// probeBudgets is the budget table the replay runs under. copilot: the
+// calendar month (credits, 2026-09-05: 168 planned cells, 110 dispatched,
+// month gone). codex: the weekly window the wham poll reports (the plan's
+// primary allowance; on 2026-09-06 the operator's upgraded plan exposed ONLY
+// that window). A negative pct disables that lane's cap.
+func probeBudgets(copilotPct, codexPct float64) map[string]probeBudget {
+	return map[string]probeBudget{
+		"copilot": {Window: ledger.WinMonth, Pct: copilotPct},
+		"codex":   {Window: ledger.Win7d, Pct: codexPct},
+	}
+}
+
+// probeBudgetHold decides whether a cell must be held back as a deferred hole
+// because the lane's budgeted window is already at or above the probe budget.
+// Reads the orchestrator ledger directly (read-only; MR_ORCH_STATE-scoped like
+// every other path here). Fail-open on a missing or unreadable ledger, on a
+// window with no signal, and on an expired window — a probe with no quota
+// signal at all is the pre-budget state, not a reason to hold. Lanes absent
+// from the table are never held (free lanes cost nothing; local is local).
+func probeBudgetHold(lane string, budgets map[string]probeBudget, now time.Time) (bool, string) {
+	pb, budgeted := budgets[lane]
+	if !budgeted || pb.Pct < 0 {
 		return false, ""
 	}
 	l, warn := ledger.OpenChecked(statepaths.Ledger())
 	if warn != "" {
 		return false, ""
 	}
-	b, ok := l.Bucket("copilot", ledger.WinMonth)
+	b, ok := l.Bucket(lane, pb.Window)
 	if !ok || b.UsedPct < 0 {
 		return false, ""
 	}
 	if !b.ResetsAt.IsZero() && !b.ResetsAt.After(now) {
 		return false, "" // an expired window is history; the next dispatch re-anchors it
 	}
-	if b.UsedPct >= budgetPct {
-		return true, fmt.Sprintf("probe budget: copilot month at %.0f%% >= -copilot-budget-pct %.0f (hole, resumable after the reset or with a higher budget)", b.UsedPct, budgetPct)
+	if b.UsedPct >= pb.Pct {
+		return true, fmt.Sprintf("probe budget: %s %s at %.0f%% >= -%s-budget-pct %.0f (hole, resumable after the reset or with a higher budget)", lane, pb.Window, b.UsedPct, lane, pb.Pct)
 	}
 	return false, ""
 }
