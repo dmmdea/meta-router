@@ -368,3 +368,11 @@ The **eval substrate** ships too: a routing gold-set schema + verifier engine (`
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+## Codespaces
+
+The repo carries a [dev container](.devcontainer/devcontainer.json): the Go image, the `gh`
+CLI, Node (for `@github/copilot`) on the smallest 2-core machine. Open it with **Code → Create
+codespace on main**, then `go test ./...`. It exists so gold-probe verification (`go vet`, the
+suites, `mr-goldverify`) can run off the operator's machines inside the plan's included
+core-hours. Prebuilds are deliberately **not** enabled: they consume Actions minutes.
