@@ -8,8 +8,9 @@ import (
 
 // Lane names the pollers report on.
 const (
-	LaneClaude = "claude"
-	LaneCodex  = "codex"
+	LaneClaude  = "claude"
+	LaneCodex   = "codex"
+	LaneCopilot = "copilot"
 )
 
 // Absence is a TYPED statement that a quota fact could not be obtained —
@@ -17,8 +18,8 @@ const (
 // quota-registry lineage; reconciliation W1 Tier-A #2).
 type Absence struct {
 	Lane   string `json:"lane"`
-	Window string `json:"window"` // "5h" | "7d" | "all"
-	Reason string `json:"reason"` // not_logged_in | refresh_failed | window_omitted | http_<code> | parse_error
+	Window string `json:"window"` // "5h" | "7d" | "month" | "all"
+	Reason string `json:"reason"` // not_logged_in | refresh_failed | window_omitted | unlimited | http_<code> | parse_error
 }
 
 // Snapshot is one vendor-measured window fact.

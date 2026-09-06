@@ -16,43 +16,45 @@ import (
 
 // applyCopilotOutcome is the copilot lane's post-run ledger accounting on the
 // MONTHLY calendar window. The vendor SELF-REPORTS consumption per dispatch
-// (session.usage_checkpoint: premium requests + nano-AIU), so the shadow spend
-// is provider-true, not a multiplier estimate. Capacity is the configured
-// monthly allowance in milli-requests; a vendor rate-limit signal observes a
-// limit at the calendar reset (the window's true end — premium allowances
-// have no rolling recovery).
+// (session.usage_checkpoint), so the shadow spend is provider-true, not a
+// multiplier estimate. The ledger unit is MILLI-CREDITS. Capacity is the
+// configured monthly allowance as an ESTIMATE only until the copilot usage
+// poll (poll.go) lands the vendor's entitlement as the measured cap; a
+// vendor rate-limit signal observes a limit at the calendar reset (the
+// window's true end — credit allowances have no rolling recovery).
 func applyCopilotOutcome(l *ledger.Ledger, o copilotlane.Outcome, cfg orchcfg.Config, now time.Time) {
 	if b, ok := l.Bucket("copilot", ledger.WinMonth); !ok || b.CapTokens == 0 {
-		l.SetCapacityEstimate("copilot", ledger.WinMonth, cfg.CopilotMonthlyRequests*1000) // milli-requests
+		l.SetCapacityEstimate("copilot", ledger.WinMonth, cfg.CopilotMonthlyCredits*1000) // milli-credits
 	}
 	l.AnchorIfUnset("copilot", ledger.WinMonth, ledger.NextMonthlyReset(now), now)
-	// METERING UNIT (recalibrated 2026-09-05): the vendor's own per-dispatch
-	// `session.usage_checkpoint.totalPremiumRequests`, floored at 1 for any
-	// dispatch that ran. Until then the lane metered ONE DISPATCH = ONE REQUEST
-	// on the argument that the vendor figure was unverified (gemini-3.6-flash
-	// reported 14 while burning the fewest AI units). The 2026-09-05 gold probe
-	// settled which error is worse: under that unit the ledger believed 60% of
-	// the month remained when GitHub returned 402 "exceeded your monthly quota"
-	// on about the 110th dispatch (78% served by gpt-5.6-luna), so the router
-	// never paced and the lane latched for the rest of the month. Undercounting
-	// spends the month blind; overcounting a rare model merely throttles early.
-	// The "exceeding degrades to included models" premise was also false for
-	// CLI dispatch: gpt-5.4-mini answered 402 on the exhausted account. The
-	// figure lands on the receipt (PremiumRequests/NanoAiu) so the billing page
-	// can be reconciled against it — that page remains the only ground truth.
+	// METERING UNIT — three recalibrations, each measured:
+	//   v0.35 (2026-09-01): one dispatch = one request; the vendor figure
+	//     (`totalPremiumRequests`) was distrusted (14 for gemini-3.6-flash).
+	//   v0.37 (2026-09-05): the vendor figure, floored at one, against a cap
+	//     of 300 — the gold probe had hit 402 with the ledger at 60%.
+	//   v0.38 (2026-09-06): the vendor figure IS AI CREDITS. `gh api
+	//     copilot_internal/user` reports token_based_billing true, entitlement
+	//     1500, credits_used 1501, and the official billing report lists the
+	//     month as 1,499.37 "Copilot AI Credits" — so 14 was 14 credits, the
+	//     116 executed dispatches summed to the month, and the v0.37 cap of
+	//     300 was the wrong number in the right unit. Cap is now 1,500 credits
+	//     (poll-measured when available), floor one credit per dispatch.
+	// Exhaustion is a hard 402 on every model (gpt-5.4-mini included), so the
+	// calendar latch stands; the receipt keeps the vendor's key names so the
+	// month reconciles against the billing report.
 	if o.Class == "ok" || o.Usage.PremiumRequests > 0 {
-		l.AddShadow("copilot", ledger.WinMonth, copilotMilliRequests(o.Usage), now)
+		l.AddShadow("copilot", ledger.WinMonth, copilotMilliCredits(o.Usage), now)
 	}
 	if o.Class == "rate_limit" {
 		l.ObserveLimit("copilot", "", ledger.WinMonth, ledger.NextMonthlyReset(now), now)
 	}
 }
 
-// copilotMilliRequests is the metered amount for one dispatch: the vendor's
-// per-dispatch premium-request figure in milli-requests, never below one
-// request. Exposed for the meter test; the policy lives here, not in the
-// caller.
-func copilotMilliRequests(u copilotlane.Usage) int64 {
+// copilotMilliCredits is the metered amount for one dispatch: the vendor's
+// per-dispatch figure (AI credits on a token-based plan) in milli-credits,
+// never below one credit. Exposed for the meter test; the policy lives here,
+// not in the caller.
+func copilotMilliCredits(u copilotlane.Usage) int64 {
 	if u.PremiumRequests > 1 {
 		return u.PremiumRequests * 1000
 	}
@@ -76,7 +78,8 @@ func runCopilotLane(out io.Writer, prompt, model, cwd string, timeoutSec int, ex
 	}
 	g := laneGate(l.Snapshot(), "copilot", now, defaultThresholds, force)
 	req := copilotlane.RunReq{Prompt: prompt, Model: model, CWD: cwd,
-		TimeoutSec: timeoutSec, SkipVersionGate: force, Extra: extra}
+		TimeoutSec: timeoutSec, SkipVersionGate: force, Extra: extra,
+		MaxAiCredits: cfg.CopilotMaxAiCredits} // per-dispatch spend bound (config-owned; 0 omits)
 
 	if !g.Admit {
 		rec := dispatch.Record{
@@ -142,7 +145,7 @@ func runCopilotLane(out io.Writer, prompt, model, cwd string, timeoutSec int, ex
 		TS: now, Lane: "copilot", Model: servedModel, OutcomeClass: o.Class, RateLimitOrigin: upstreamRLO(o.Class, ""),
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
 		NumTurns: o.Turns, PremiumRequests: o.Usage.PremiumRequests, NanoAiu: o.Usage.NanoAiu,
-		Origin:   origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
+		Origin: origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
 	}
 	sf.stamp(&rec)

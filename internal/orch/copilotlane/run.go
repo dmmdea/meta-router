@@ -52,10 +52,12 @@ var (
 )
 
 // VersionGate runs `copilot --version` once per process and reports whether
-// the CLI is ≥ 1.0.82 — the floor this lane's flag surface and JSONL parse
-// contract were live-verified against (2026-09-01). A COMPAT gate, not a
-// privacy gate: older CLIs may lack --deny-tool/--output-format json, and a
-// dispatch whose isolation flags are silently unknown must not run.
+// the CLI is ≥ 1.0.83 — the floor this lane's flag surface and JSONL parse
+// contract were live-verified against (1.0.82 on 2026-09-01 for the
+// isolation flags; 1.0.83 on 2026-09-06 for --max-ai-credits, the per-dispatch
+// spend bound). A COMPAT gate, not a privacy gate: an older CLI may lack a
+// flag, and a dispatch whose isolation or spend flags are silently unknown
+// must not run.
 func VersionGate() (version string, ok bool) {
 	versionOnce.Do(func() {
 		vc := exec.Command(binaryName, "--version")
@@ -66,7 +68,7 @@ func VersionGate() (version string, ok bool) {
 			return
 		}
 		cachedVersion = strings.TrimSpace(string(out))
-		cachedOK = versionAtLeast(cachedVersion, 1, 0, 82)
+		cachedOK = versionAtLeast(cachedVersion, 1, 0, 83)
 	})
 	return cachedVersion, cachedOK
 }
@@ -74,7 +76,7 @@ func VersionGate() (version string, ok bool) {
 // VersionGateError names both remedies, mirroring codexlane's exported-error
 // discipline (the test asserts the real message, not a copy).
 func VersionGateError(version string) error {
-	return fmt.Errorf("copilot CLI %q is <1.0.82, below the flag surface this lane was verified against — upgrade (npm i -g @github/copilot@latest) or rerun with --force", version)
+	return fmt.Errorf("copilot CLI %q is <1.0.83, below the flag surface this lane was verified against (--max-ai-credits arrived in 1.0.83) — upgrade (npm i -g @github/copilot@latest) or rerun with --force", version)
 }
 
 // MintToken resolves the operator-configured GitHub account to an OAuth token

@@ -186,7 +186,7 @@ func evalPolicy(prev policyState, obs observed, now time.Time) policyState {
 	check("copilot cli version", prev.CopilotVersion, obs.CopilotVersion,
 		fmt.Sprintf("copilot CLI changed %s -> %s: re-verify the JSONL event schema against testdata/fixtures/copilot (same unversioned-rename hazard class as codex #4776)", prev.CopilotVersion, obs.CopilotVersion))
 	check("copilot billing doc", prev.CopilotBillingHash, obs.CopilotBillingHash,
-		"GitHub Copilot premium-requests billing doc CHANGED — re-verify the monthly allowance (config copilot_monthly_requests), the 1st-of-month reset, and that exhaustion still degrades to included models (R10: no overage budget, ever)")
+		"GitHub Copilot billing doc CHANGED — re-verify the plan's monthly AI-credit allowance (config copilot_monthly_credits; the poll's entitlement is the measured cap), the 1st-of-month reset, and that overage stays OFF at the account (R10: no overage budget, ever; exhaustion is a hard 402 on every model, no included-model fallback)")
 	return st
 }
 

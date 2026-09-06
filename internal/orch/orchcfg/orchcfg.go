@@ -36,15 +36,40 @@ type Config struct {
 	// (`gh auth token --user <x>`). EMPTY IS A REFUSAL, not a fallback:
 	// falling through to the ambient/active gh account would bill whichever
 	// account the environment happens to carry — the cross-account hazard.
-	CopilotTokenUser       string `json:"copilot_token_user"`
-	CopilotMonthlyRequests int64  `json:"copilot_monthly_requests"` // default 300 (Pro allowance; fetched 2026-09-01, resets 1st 00:00 UTC)
-	// CopilotModel default is gpt-5.6-terra, a model measured at ONE premium
-	// request per dispatch (2026-09-01 checkpoints). It was "auto" until
-	// 2026-09-05, when a 168-cell gold probe under auto was served by
-	// gpt-5.6-luna on 78% of dispatches and the vendor cut the 300-request
-	// month off at roughly the 110th dispatch — luna bills about 3x. `auto` is
-	// still a legitimate, explicit choice (config or --model auto); it is no
-	// longer the silent default.
+	CopilotTokenUser string `json:"copilot_token_user"`
+	// CopilotMonthlyCredits is the plan's monthly AI-CREDIT allowance (Pro:
+	// 1,500 = 1,000 base + 500 flex; one credit = $0.01). Unit verified live
+	// 2026-09-06: `gh api copilot_internal/user` reports entitlement 1500 with
+	// token_based_billing true, and the official billing report lists the
+	// month as sku "Copilot AI Credits" (1499.37 used, net $0.00) while the
+	// premium-request report is empty. A config GUESS (estimate-sourced cap)
+	// only until the copilot usage poll lands the vendor's entitlement as the
+	// measured cap. Resets the 1st, 00:00 UTC; overage is off at the account.
+	CopilotMonthlyCredits int64 `json:"copilot_monthly_credits"`
+	// CopilotMonthlyRequests is RETIRED (2026-09-06): the plan bills AI
+	// credits, not premium requests, and the v0.35–v0.37 meter that used it
+	// latched the lane "exhausted" at 300 credits of a 1,500-credit month.
+	// Still parsed so an old config loads; never read. Delete it.
+	CopilotMonthlyRequests int64 `json:"copilot_monthly_requests,omitempty"`
+	// CopilotMaxAiCredits bounds ONE dispatch's spend through the CLI's own
+	// `--max-ai-credits` (a soft cap: the next model call is refused once the
+	// session crosses it; min 30 — `copilot help limits`, CLI 1.0.83). The
+	// measured dispatch median is ~13 credits (1,501 credits / 116 executed
+	// dispatches, 2026-09), so 60 leaves headroom for an agentic turn and
+	// still stops a runaway one. <=0 omits the flag; 1..29 clamps to 30.
+	CopilotMaxAiCredits int64 `json:"copilot_max_ai_credits"`
+	// CopilotUsagePoll polls `copilot_internal/user` for the month's
+	// entitlement, consumption and reset — provider truth for the month
+	// window (default ON, the codex_usage_poll posture). The poll
+	// authenticates with a token minted from copilot_token_user per poll,
+	// never an ambient env token.
+	CopilotUsagePoll bool `json:"copilot_usage_poll"`
+	// CopilotModel default is gpt-5.6-terra, the model whose per-dispatch
+	// vendor figure measured lowest (1) on the 2026-09-01 checkpoints. It was
+	// "auto" until 2026-09-05, when a 168-cell gold probe under auto was
+	// served by gpt-5.6-luna on 78% of dispatches at roughly 3x the credits
+	// per dispatch. `auto` is still a legitimate, explicit choice (config or
+	// --model auto); it is no longer the silent default.
 	CopilotModel string `json:"copilot_model"`
 
 	// GLMRetired ships TRUE (subscription cancelled 2026-09-01): the glm
@@ -125,17 +150,22 @@ type Config struct {
 	CompactionOff bool `json:"compaction_off"`
 }
 
-// CopilotDefaultModel is the lane's default pin: measured at 1 premium request
-// per dispatch. See the CopilotModel field comment for why `auto` lost the
-// default.
+// CopilotDefaultModel is the lane's default pin: the lowest measured
+// per-dispatch credit figure. See the CopilotModel field comment for why
+// `auto` lost the default.
 const CopilotDefaultModel = "gpt-5.6-terra"
+
+// CopilotMinAiCredits is the CLI's floor for --max-ai-credits (`copilot help
+// limits`, 1.0.83): a smaller configured cap is clamped up to it, never sent.
+const CopilotMinAiCredits int64 = 30
 
 func Defaults() Config {
 	return Config{
 		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: true,
 		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
-		CopilotMonthlyRequests: 300, CopilotModel: CopilotDefaultModel, GLMRetired: true,
+		CopilotMonthlyCredits: 1500, CopilotMaxAiCredits: 60, CopilotUsagePoll: true,
+		CopilotModel: CopilotDefaultModel, GLMRetired: true,
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
 		QuotaStaleHours: 48, PollMinIntervalMin: 5, LocalMaxPerMin: 20,
 		DelegateProposePct: 70,
@@ -175,8 +205,11 @@ func Load(path string) Config {
 	if c.GLM5hPrompts == 0 {
 		c.GLM5hPrompts = 80
 	}
-	if c.CopilotMonthlyRequests == 0 {
-		c.CopilotMonthlyRequests = 300
+	if c.CopilotMonthlyCredits == 0 {
+		c.CopilotMonthlyCredits = 1500
+	}
+	if c.CopilotMaxAiCredits > 0 && c.CopilotMaxAiCredits < CopilotMinAiCredits {
+		c.CopilotMaxAiCredits = CopilotMinAiCredits
 	}
 	if c.CopilotModel == "" {
 		c.CopilotModel = CopilotDefaultModel

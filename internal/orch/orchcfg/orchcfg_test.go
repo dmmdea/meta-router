@@ -118,3 +118,31 @@ func TestLocalMaxPerMinBackfill(t *testing.T) {
 		t.Fatalf("negative = explicit OFF must survive Load, got %d", got)
 	}
 }
+
+// The copilot lane's allowance is AI credits (verified 2026-09-06); the
+// retired request count loads without effect, and the per-dispatch cap is
+// clamped to the CLI floor, never sent below it.
+func TestCopilotCreditsConfig(t *testing.T) {
+	d := Defaults()
+	if d.CopilotMonthlyCredits != 1500 || d.CopilotMaxAiCredits != 60 || !d.CopilotUsagePoll {
+		t.Fatalf("defaults: %+v", d)
+	}
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"copilot_monthly_requests": 300, "copilot_monthly_credits": 0, "copilot_max_ai_credits": 5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := Load(p)
+	if c.CopilotMonthlyCredits != 1500 {
+		t.Fatalf("an explicit zero / a legacy request count must not zero the credit allowance: %d", c.CopilotMonthlyCredits)
+	}
+	if c.CopilotMaxAiCredits != CopilotMinAiCredits {
+		t.Fatalf("a cap below the CLI floor must clamp to %d, got %d", CopilotMinAiCredits, c.CopilotMaxAiCredits)
+	}
+	if err := os.WriteFile(p, []byte(`{"copilot_max_ai_credits": 0, "copilot_usage_poll": false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c = Load(p)
+	if c.CopilotMaxAiCredits != 0 || c.CopilotUsagePoll {
+		t.Fatalf("explicit opt-outs must survive Load: %+v", c)
+	}
+}

@@ -13,6 +13,7 @@ package copilotlane
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -24,11 +25,20 @@ type RunReq struct {
 	// GH_TOKEN/GITHUB_TOKEN would bill whatever account the environment
 	// happens to carry — the exact cross-account hazard the config field
 	// exists to prevent.
-	Token           string
-	TimeoutSec      int
+	Token      string
+	TimeoutSec int
+	// MaxAiCredits bounds this dispatch's spend through the CLI's own
+	// `--max-ai-credits` (soft cap, CLI minimum 30). 0 omits the flag; a
+	// positive value below the CLI minimum is a config error here — the
+	// orchestrator config clamps, so reaching BuildArgs with one means the
+	// caller bypassed config.
+	MaxAiCredits    int64
 	SkipVersionGate bool     // --force plumbing (compat gate, R11-overridable)
 	Extra           []string // operator passthrough (R11), validated
 }
+
+// MinAiCredits mirrors the CLI floor for --max-ai-credits (1.0.83).
+const MinAiCredits int64 = 30
 
 // forbiddenExtraPrefixes: permission-widening, session-bleeding, or
 // egress-creating flags the orchestrator must never allow through the
@@ -45,6 +55,9 @@ var forbiddenExtraPrefixes = []string{
 	"--resume", "-r", "--continue",
 	"--share", "--share-gist", "--cloud",
 	"--interactive", "-i",
+	// the lane pins the per-dispatch credit cap from config; an Extra copy
+	// would silently raise the spend bound
+	"--max-ai-credits",
 }
 
 // forbiddenExtra reports whether an Extra token matches a forbidden flag,
@@ -80,12 +93,20 @@ func BuildArgs(r RunReq) ([]string, error) {
 			return nil, fmt.Errorf("forbidden extra flag %q: %s widens permissions, re-enters a prior session, or creates egress — the orchestrator pins the dispatch surface (R10/R12)", x, tok)
 		}
 	}
+	if r.MaxAiCredits < 0 || (r.MaxAiCredits > 0 && r.MaxAiCredits < MinAiCredits) {
+		return nil, fmt.Errorf("max_ai_credits %d is below the CLI minimum of %d (or negative): set copilot_max_ai_credits to 0 to omit the cap or to >= %d", r.MaxAiCredits, MinAiCredits, MinAiCredits)
+	}
 	args := []string{
 		"-p", r.Prompt,
 		"--model", r.Model,
 		"--output-format", "json",
 		"--no-color", "--log-level", "none",
 		"--deny-tool", "--no-ask-user", "--disable-builtin-mcps",
+	}
+	if r.MaxAiCredits > 0 {
+		// Spend bound per dispatch (AI credits; the CLI refuses the next model
+		// call once the session crosses it). Config-owned: see forbiddenExtraPrefixes.
+		args = append(args, "--max-ai-credits", strconv.FormatInt(r.MaxAiCredits, 10))
 	}
 	return append(args, r.Extra...), nil
 }
