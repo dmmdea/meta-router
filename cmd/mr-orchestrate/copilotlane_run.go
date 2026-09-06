@@ -26,29 +26,37 @@ func applyCopilotOutcome(l *ledger.Ledger, o copilotlane.Outcome, cfg orchcfg.Co
 		l.SetCapacityEstimate("copilot", ledger.WinMonth, cfg.CopilotMonthlyRequests*1000) // milli-requests
 	}
 	l.AnchorIfUnset("copilot", ledger.WinMonth, ledger.NextMonthlyReset(now), now)
-	// METERING UNIT: one dispatch = one request. The vendor's own
-	// `totalPremiumRequests` is recorded as evidence (Outcome.Usage, and the
-	// raw JSONL the caller prints) but does NOT drive admission, because its
-	// unit is UNVERIFIED and measured non-obvious (2026-09-01, reproducible on
-	// fresh isolated sessions): claude-sonnet-5 → 1, gpt-5.6-terra → 1,
-	// gemini-3.6-flash → 14, while gemini-flash consumed the FEWEST nano-AIU
-	// of the three. So the field is not a cost proxy in the way its name
-	// suggests, and no billing API is reachable to settle it (404 without a
-	// scope the orchestrator must not request on its own).
-	//
-	// Choosing the conservative unit is deliberate under R14 (no artificial
-	// brakes): if 14 were taken at face value, ~21 dispatches would "exhaust"
-	// a 300-request allowance and the router would mask a lane that still has
-	// capacity — a brake invented from an unverified number. The opposite
-	// error is benign: exceeding the allowance degrades to included models
-	// (documented) and CANNOT spend, since R10 forbids an overage budget and
-	// this lane sets none. Recalibrate the moment the unit is established.
+	// METERING UNIT (recalibrated 2026-09-05): the vendor's own per-dispatch
+	// `session.usage_checkpoint.totalPremiumRequests`, floored at 1 for any
+	// dispatch that ran. Until then the lane metered ONE DISPATCH = ONE REQUEST
+	// on the argument that the vendor figure was unverified (gemini-3.6-flash
+	// reported 14 while burning the fewest AI units). The 2026-09-05 gold probe
+	// settled which error is worse: under that unit the ledger believed 60% of
+	// the month remained when GitHub returned 402 "exceeded your monthly quota"
+	// on about the 110th dispatch (78% served by gpt-5.6-luna), so the router
+	// never paced and the lane latched for the rest of the month. Undercounting
+	// spends the month blind; overcounting a rare model merely throttles early.
+	// The "exceeding degrades to included models" premise was also false for
+	// CLI dispatch: gpt-5.4-mini answered 402 on the exhausted account. The
+	// figure lands on the receipt (PremiumRequests/NanoAiu) so the billing page
+	// can be reconciled against it — that page remains the only ground truth.
 	if o.Class == "ok" || o.Usage.PremiumRequests > 0 {
-		l.AddShadow("copilot", ledger.WinMonth, 1000, now)
+		l.AddShadow("copilot", ledger.WinMonth, copilotMilliRequests(o.Usage), now)
 	}
 	if o.Class == "rate_limit" {
 		l.ObserveLimit("copilot", "", ledger.WinMonth, ledger.NextMonthlyReset(now), now)
 	}
+}
+
+// copilotMilliRequests is the metered amount for one dispatch: the vendor's
+// per-dispatch premium-request figure in milli-requests, never below one
+// request. Exposed for the meter test; the policy lives here, not in the
+// caller.
+func copilotMilliRequests(u copilotlane.Usage) int64 {
+	if u.PremiumRequests > 1 {
+		return u.PremiumRequests * 1000
+	}
+	return 1000
 }
 
 // runCopilotLane mirrors the codex dispatch path for `run --lane copilot`:
@@ -133,7 +141,7 @@ func runCopilotLane(out io.Writer, prompt, model, cwd string, timeoutSec int, ex
 	rec := dispatch.Record{
 		TS: now, Lane: "copilot", Model: servedModel, OutcomeClass: o.Class, RateLimitOrigin: upstreamRLO(o.Class, ""),
 		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
-		NumTurns: o.Turns,
+		NumTurns: o.Turns, PremiumRequests: o.Usage.PremiumRequests, NanoAiu: o.Usage.NanoAiu,
 		Origin:   origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
 		RecRule: rf.RecRule, Deviated: rf.Deviated, DeviationReason: rf.DeviationReason, Batch: rf.Batch, SpendDownBoost: rf.SpendDownBoost, Desc: desc,
 	}
