@@ -4,6 +4,15 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.39.0] — 2026-09-06
+
+### Added — `copilot-review`: a Copilot code review request that obeys the lane's quota
+Operator requirement: "it should get skipped when the quota is exhausted." A Copilot code review is a Copilot interaction (AI credits, plus Actions minutes), so requesting one on an exhausted month is a request GitHub cannot serve. `mr-orchestrate copilot-review --repo owner/name --pr N` runs the pull request through the copilot lane's admission gate first:
+
+- **Exhausted/throttled → skipped**, exit 0 with `{"skipped": true, "admit_state", "reason", "resume_at"}` and a deferred receipt (`origin: copilot_review`, model `code-review`). Skipping is a success for the caller: a ship flow never fails because the optional reviewer is out of budget. `--force` is the loud R11 override.
+- **Admitted → `gh pr edit N --repo owner/name --add-reviewer @copilot`**, run with ONLY a token minted from `copilot_token_user` (ambient env scrubbed), so gh's mutable active account cannot decide who acts. **Then verified, not trusted:** live on the exhausted account (2026-09-06) that command exited 0 while GitHub recorded no reviewer and no review-requested event — gh's own JSON and the REST list render only users and teams, so the command reads the PR's `reviewRequests` through GraphQL with the `Bot` fragment. A recorded Copilot bot is `requested: true`, metered on the month window at `copilot_review_credits` (default 25; the next poll replaces the estimate) and receipted; nothing recorded is `requested: false` with the unavailability reason (credits exhausted, or code review disabled), receipt `not_recorded`, nothing metered; a gh failure is surfaced after the receipt and meters nothing.
+- **Account separation lives in the binary**: the repository owner must be the subscription account; another owner's repo is refused as a cross-account gh write before any token is minted — the PreToolUse guard never sees a write that happens inside this process.
+
 ## [0.38.0] — 2026-09-06
 
 ### Fixed — the copilot lane meters the unit GitHub bills: AI credits

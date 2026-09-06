@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-var version = "0.38.0"
+var version = "0.39.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -45,6 +45,8 @@ func main() {
 		err = runRoute(os.Args[2:])
 	case "feedback":
 		err = runFeedback(os.Args[2:])
+	case "copilot-review":
+		err = runCopilotReview(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
 	case "strategy-run":
@@ -60,7 +62,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: mr-orchestrate <version|status|poll|quota-parity|profiles|fleet|report|install|uninstall|probe|run|route|feedback|mcp|strategy-run> [flags]
+	fmt.Fprintln(os.Stderr, `usage: mr-orchestrate <version|status|poll|quota-parity|profiles|fleet|report|install|uninstall|probe|run|route|feedback|copilot-review|mcp|strategy-run> [flags]
   status --json          per-lane window headroom + resets + receipts audit summary (also runs the rate-limited usage polls)
   poll                   force the vendor usage polls now (the only manual way to refresh quota truth)
   quota-parity [-window]  drop-vs-poll divergence per (lane,window) — the W1 soak reading
@@ -73,6 +75,7 @@ func usage() {
   run "<prompt>" [--lane claude|codex|copilot|glm|auto] --model <id> [--effort e] [--live] [--force]
   route [--class c | --desc "…"] [--ctx-tokens n] [--origin cli|route]  deterministic quota-masked recommendation (read-only)
   feedback <ts> good|bad tag a dispatch receipt with an operator quality verdict (S2R-9)
+  copilot-review --repo owner/name --pr N [--force]  request a Copilot code review through the copilot lane's admission gate — SKIPS (exit 0, skipped:true) when the month is exhausted; refuses another account's repo
   mcp                    stdio JSON-RPC MCP server (tools: route, run, quota_status, strategy_dispatch, strategy_status, strategy_cancel)
   strategy-run <id> [--resume|--sweep]  drain an async strategy DAG (detached supervisor; spawned by strategy_dispatch; --sweep reaps stale dispatches)`)
 }

@@ -64,6 +64,12 @@ type Config struct {
 	// authenticates with a token minted from copilot_token_user per poll,
 	// never an ambient env token.
 	CopilotUsagePoll bool `json:"copilot_usage_poll"`
+	// CopilotReviewCredits is the AI-credit ESTIMATE metered for one Copilot
+	// code review requested through `copilot-review` (GitHub prices a lite
+	// review at $0.05–$1 and a balanced one at $0.25–$5, i.e. 5–500 credits;
+	// 25 is a mid-lite guess). It keeps the month honest between polls; the
+	// next poll replaces it with the vendor's figure. <=0 meters nothing.
+	CopilotReviewCredits int64 `json:"copilot_review_credits"`
 	// CopilotModel default is gpt-5.6-terra, the model whose per-dispatch
 	// vendor figure measured lowest (1) on the 2026-09-01 checkpoints. It was
 	// "auto" until 2026-09-05, when a 168-cell gold probe under auto was
@@ -164,7 +170,7 @@ func Defaults() Config {
 		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: true,
 		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
-		CopilotMonthlyCredits: 1500, CopilotMaxAiCredits: 60, CopilotUsagePoll: true,
+		CopilotMonthlyCredits: 1500, CopilotMaxAiCredits: 60, CopilotUsagePoll: true, CopilotReviewCredits: 25,
 		CopilotModel: CopilotDefaultModel, GLMRetired: true,
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
 		QuotaStaleHours: 48, PollMinIntervalMin: 5, LocalMaxPerMin: 20,
