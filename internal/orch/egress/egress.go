@@ -43,7 +43,7 @@ import (
 // ThirdPartyLanes is the gated set. It is EXPORTED so the B14 canary and the
 // gate share one definition: seating a new free lane here without wiring its
 // adapter to Plan then fails a test instead of opening a silent hole.
-var ThirdPartyLanes = []string{"glm", "groq", "cloudflare", "gemini", "nim"}
+var ThirdPartyLanes = []string{"glm", "groq", "cloudflare", "openrouter", "gemini", "nim"}
 
 // ThirdParty reports whether a lane sends data outside the operator's
 // subscription providers. claude and codex are the operator's own subscription

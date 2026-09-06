@@ -132,7 +132,7 @@ func TestDecideSubjectIsolation(t *testing.T) {
 	now := time.Now().UTC()
 	reset := now.Add(2 * time.Hour)
 	bs := []ledger.Bucket{
-		{Lane: "claude", Window: ledger.Win5h, UsedPct: 97, ResetsAt: reset, Source: "provider", ObservedAt: now},                     // default: exhausted
+		{Lane: "claude", Window: ledger.Win5h, UsedPct: 97, ResetsAt: reset, Source: "provider", ObservedAt: now},                  // default: exhausted
 		{Lane: "claude", Subject: "acct2", Window: ledger.Win5h, UsedPct: 5, ResetsAt: reset, Source: "provider", ObservedAt: now}, // acct2: wide open
 	}
 	th := Thresholds{ThrottlePct: 80, ExhaustPct: 95}

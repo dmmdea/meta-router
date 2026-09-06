@@ -48,7 +48,27 @@ const (
 	// the caller's re-anchor (NextMonthlyReset), matching how rolling callers
 	// supply now+5h/now+7d.
 	WinMonth WindowKind = "month"
+	// WinDay is a CALENDAR day window (resets 00:00 UTC) — the shape of the
+	// free-provider daily allowances (Groq requests/day, Cloudflare
+	// neurons/day, OpenRouter requests/day, Gemini requests/day). Same
+	// anchor-agnostic machinery as WinMonth: the caller re-anchors with
+	// NextDailyReset.
+	WinDay WindowKind = "day"
+	// WinTrial is a DEPLETABLE pool with no reset at all (NVIDIA NIM trial
+	// credits, 2026-09-06: NVIDIA's own ToS scopes the hosted catalog as a
+	// trial). A trial bucket is never anchored, so it never rolls; only a
+	// vendor 402/429 (ObserveLimit) or an operator cap edit changes its state.
+	WinTrial WindowKind = "trial"
 )
+
+// NextDailyReset returns the upcoming 00:00:00 UTC strictly after now — the
+// WinDay anchor (Cloudflare documents "all limits reset daily at 00:00 UTC";
+// the other daily tiers publish no anchor, and a calendar day is the
+// conservative reading of "per day").
+func NextDailyReset(now time.Time) time.Time {
+	u := now.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+}
 
 // NextMonthlyReset returns the upcoming 1st-of-month 00:00:00 UTC strictly
 // after now — the WinMonth anchor. Documented vendor behavior (GitHub
@@ -64,8 +84,8 @@ type Bucket struct {
 	// Subject scopes the bucket to a credential subject (account); "" is the
 	// default subject. W1 keys for this so W2's multi-account profiles don't
 	// have to retrofit the key shape (cheap to key now, painful later).
-	Subject string     `json:"subject,omitempty"`
-	Window  WindowKind `json:"window"`
+	Subject      string     `json:"subject,omitempty"`
+	Window       WindowKind `json:"window"`
 	UsedPct      float64    `json:"used_pct"` // 0..100; -1 = unknown
 	ResetsAt     time.Time  `json:"resets_at"`
 	Source       string     `json:"source"` // "provider" | "shadow"

@@ -42,7 +42,17 @@ func estimateSourced(b ledger.Bucket) bool {
 // estimatedResume is the RS5 fallback when an exhausted bucket has no known
 // reset moment.
 func estimatedResume(w ledger.WindowKind, now time.Time) time.Time {
-	if w == ledger.Win7d {
+	switch w {
+	case ledger.Win7d:
+		return now.Add(24 * time.Hour)
+	case ledger.WinDay:
+		// A calendar-day window's reset is KNOWN even when the bucket lost its
+		// anchor: the next 00:00 UTC.
+		return ledger.NextDailyReset(now)
+	case ledger.WinTrial:
+		// A depleted trial pool has no reset. Re-check daily: the operator may
+		// have topped up credits or raised the cap, and a 24h re-probe costs one
+		// request against a pool that is empty anyway.
 		return now.Add(24 * time.Hour)
 	}
 	return now.Add(5 * time.Hour)
