@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/codexlane"
+	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 )
 
 // RS8 codex leg: the exec --json stream is JSONL, so the schema gate is the
@@ -77,7 +78,7 @@ func runVerifyCodex(fixtureDir string) error {
 	if err != nil {
 		return fmt.Errorf("committed codex fixture missing (capture one with `probe --codex` first): %w", err)
 	}
-	home, cleanup, err := codexlane.EnsureHome(stateDir())
+	home, cleanup, err := codexlane.EnsureHomeWith(stateDir(), orchcfg.Load(configPath()).CodexWindowsSandbox)
 	if err != nil {
 		return err
 	}

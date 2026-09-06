@@ -153,7 +153,7 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		return 0, nil
 	}
 
-	home, cleanup, err := codexlane.EnsureHome(stateDir())
+	home, cleanup, err := codexlane.EnsureHomeWith(stateDir(), cfg.CodexWindowsSandbox)
 	if err != nil {
 		return 1, err
 	}
