@@ -431,6 +431,31 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		// 'auto') and no keepHome (the copilot home holds no credentials worth
 		// debugging — auth rides in env and dies with the process).
 		return runCopilotLane(out, opts.Prompt, resolvedModel, opts.CWD, opts.TimeoutSec, extraArgs, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+	case "groq", "cloudflare", "openrouter", "nim", "gemini":
+		// Free-provider lanes (W4): HTTP dispatch, no child process, so --extra
+		// has nothing to be forwarded to — refuse rather than silently drop.
+		if len(extraArgs) > 0 {
+			return 1, fmt.Errorf("run: --extra is not accepted on the free-provider lanes (no CLI child to receive it)")
+		}
+		switch resolvedLane {
+		case "groq":
+			return runGroqLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+		case "cloudflare":
+			return runCloudflareLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+		case "openrouter":
+			return runOpenrouterLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+		case "nim":
+			return runNimLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+		case "gemini":
+			// EXPLICIT, not `default`: the B14 canary marks a third-party lane
+			// selectable by the literal `case "<lane>":` and then inspects its
+			// run<Lane>Lane for the egress gate. A default-reached lane is
+			// invisible to it (review 2026-09-06 — and gemini is the lane whose
+			// gate matters most).
+			return runGeminiLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+		default:
+			return 1, fmt.Errorf("run: free lane %q has no dispatcher (registry and switch out of step)", resolvedLane)
+		}
 	case "local":
 		// S3R-1: an explicit --lane local now dispatches through the two-door
 		// local-offload adapter (cascade door for grunt/verify classes + cascade
@@ -439,7 +464,7 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 		// unchanged (it fires only for laneFlag=="auto", before this switch).
 		return runLocalLane(out, opts.Prompt, rf.TaskClass, resolvedModel, opts.CWD, opts.TimeoutSec, opts.Live, opts.Origin, opts.Desc, rf, sf)
 	default:
-		return 1, fmt.Errorf("run: unknown lane %q (available: claude, codex, copilot, glm, local, auto)", resolvedLane)
+		return 1, fmt.Errorf("run: unknown lane %q (available: claude, codex, copilot, glm, local, groq, cloudflare, openrouter, nim, gemini, auto)", resolvedLane)
 	}
 
 	now := time.Now().UTC()
@@ -577,7 +602,7 @@ func runRun(args []string) error {
 		prompt, args = args[0], args[1:]
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	lane := fs.String("lane", "claude", "dispatch lane: claude|codex|glm (local delegates via the local-offload MCP)")
+	lane := fs.String("lane", "claude", "dispatch lane: claude|codex|copilot|glm|local|groq|cloudflare|openrouter|nim|gemini|auto (free-provider lanes need <state>/free/<lane>.token)")
 	model := fs.String("model", "", "model to pin (REQUIRED — unpinned claude -p defaults to Sonnet 5)")
 	effort := fs.String("effort", "", "effort passthrough (R11)")
 	extra := fs.String("extra", "", "space-separated extra lane-binary flags, validated against the forbidden list (R11)")
@@ -596,7 +621,7 @@ func runRun(args []string) error {
 	batch := fs.Bool("batch", false, "E2 spend-down tag: this is an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost")
 	estMinutes := fs.Float64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
 	var exclude excludeFlag
-	fs.Var(&exclude, "exclude", "mask a lane for this dispatch's recommendation and refuse it if resolved (repeatable/csv: claude|codex|copilot|glm|local). delegate-mode passes --exclude claude")
+	fs.Var(&exclude, "exclude", "mask a lane for this dispatch's recommendation and refuse it if resolved (repeatable/csv: claude|codex|copilot|glm|local|groq|cloudflare|openrouter|nim|gemini|free). delegate-mode passes --exclude claude")
 	strategyName := fs.String("strategy", "", "run a named strategy template as an async DAG dispatch (R11 seam): solo|plan-work-verify|cascade|fan-out-judge|single-critique. Expands from the prompt (goal) + --class, then spawns a detached supervisor and prints {dispatch_id}. Poll via the strategy_status MCP tool.")
 	_ = fs.Parse(args)
 

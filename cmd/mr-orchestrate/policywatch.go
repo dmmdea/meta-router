@@ -42,39 +42,51 @@ import (
 // self-clears the next night was never seen.
 
 const (
-	policyArticleURL = "https://support.claude.com/en/articles/15036540"
-	zaiPolicyURL     = "https://docs.z.ai/devpack/usage-policy"
+	policyArticleURL  = "https://support.claude.com/en/articles/15036540"
+	zaiPolicyURL      = "https://docs.z.ai/devpack/usage-policy"
 	copilotBillingURL = "https://docs.github.com/en/copilot/managing-copilot/understanding-and-managing-copilot-usage/understanding-and-managing-requests-in-copilot"
+	// Free-provider lanes (W4): the two vendors whose published numbers the
+	// registry priors were read from on 2026-09-06. A changed page is the
+	// signal to re-verify free_providers (groq RPM/RPD) and the cloudflare
+	// neuron-rate table / 10k-per-day allocation.
+	groqLimitsURL        = "https://console.groq.com/docs/rate-limits"
+	cloudflarePricingURL = "https://developers.cloudflare.com/workers-ai/platform/pricing/"
 )
 
 type policyState struct {
-	CheckedAt         time.Time  `json:"checked_at"`
-	CLIVersion        string     `json:"cli_version"`
-	LastCLIVersion    string     `json:"last_cli_version,omitempty"`
-	CodexVersion      string     `json:"codex_version,omitempty"`
-	LastCodexVersion  string     `json:"last_codex_version,omitempty"`
-	ArticleHash       string     `json:"article_hash,omitempty"`
-	LastArticleHash   string     `json:"last_article_hash,omitempty"`
-	ZaiPolicyHash     string     `json:"zai_policy_hash,omitempty"`
-	LastZaiPolicyHash string     `json:"last_zai_policy_hash,omitempty"`
-	CopilotVersion        string `json:"copilot_version,omitempty"`
-	LastCopilotVersion    string `json:"last_copilot_version,omitempty"`
-	CopilotBillingHash    string `json:"copilot_billing_hash,omitempty"`
-	LastCopilotBillingHash string `json:"last_copilot_billing_hash,omitempty"`
-	Alert             bool       `json:"alert"`
-	AlertSince        *time.Time `json:"alert_since,omitempty"`
-	Notes             []string   `json:"notes"`
+	CheckedAt                 time.Time  `json:"checked_at"`
+	CLIVersion                string     `json:"cli_version"`
+	LastCLIVersion            string     `json:"last_cli_version,omitempty"`
+	CodexVersion              string     `json:"codex_version,omitempty"`
+	LastCodexVersion          string     `json:"last_codex_version,omitempty"`
+	ArticleHash               string     `json:"article_hash,omitempty"`
+	LastArticleHash           string     `json:"last_article_hash,omitempty"`
+	ZaiPolicyHash             string     `json:"zai_policy_hash,omitempty"`
+	LastZaiPolicyHash         string     `json:"last_zai_policy_hash,omitempty"`
+	CopilotVersion            string     `json:"copilot_version,omitempty"`
+	LastCopilotVersion        string     `json:"last_copilot_version,omitempty"`
+	CopilotBillingHash        string     `json:"copilot_billing_hash,omitempty"`
+	LastCopilotBillingHash    string     `json:"last_copilot_billing_hash,omitempty"`
+	GroqLimitsHash            string     `json:"groq_limits_hash,omitempty"`
+	LastGroqLimitsHash        string     `json:"last_groq_limits_hash,omitempty"`
+	CloudflarePricingHash     string     `json:"cloudflare_pricing_hash,omitempty"`
+	LastCloudflarePricingHash string     `json:"last_cloudflare_pricing_hash,omitempty"`
+	Alert                     bool       `json:"alert"`
+	AlertSince                *time.Time `json:"alert_since,omitempty"`
+	Notes                     []string   `json:"notes"`
 }
 
 // observed is one probe cycle's raw readings ("" = unavailable this cycle).
 type observed struct {
-	ClaudeVersion string
-	CodexVersion  string
-	ArticleHash   string
-	ZaiHash       string
-	CopilotVersion    string
-	CopilotBillingHash string
-	FetchNotes    []string
+	ClaudeVersion         string
+	CodexVersion          string
+	ArticleHash           string
+	ZaiHash               string
+	CopilotVersion        string
+	CopilotBillingHash    string
+	GroqLimitsHash        string
+	CloudflarePricingHash string
+	FetchNotes            []string
 }
 
 var (
@@ -141,6 +153,8 @@ func evalPolicy(prev policyState, obs observed, now time.Time) policyState {
 		ZaiPolicyHash: obs.ZaiHash, LastZaiPolicyHash: prev.ZaiPolicyHash,
 		CopilotVersion: obs.CopilotVersion, LastCopilotVersion: prev.CopilotVersion,
 		CopilotBillingHash: obs.CopilotBillingHash, LastCopilotBillingHash: prev.CopilotBillingHash,
+		GroqLimitsHash: obs.GroqLimitsHash, LastGroqLimitsHash: prev.GroqLimitsHash,
+		CloudflarePricingHash: obs.CloudflarePricingHash, LastCloudflarePricingHash: prev.CloudflarePricingHash,
 	}
 	st.Notes = append(st.Notes, obs.FetchNotes...)
 	if obs.ArticleHash == "" {
@@ -151,6 +165,12 @@ func evalPolicy(prev policyState, obs observed, now time.Time) policyState {
 	}
 	if obs.CopilotBillingHash == "" {
 		st.CopilotBillingHash = prev.CopilotBillingHash
+	}
+	if obs.GroqLimitsHash == "" {
+		st.GroqLimitsHash = prev.GroqLimitsHash
+	}
+	if obs.CloudflarePricingHash == "" {
+		st.CloudflarePricingHash = prev.CloudflarePricingHash
 	}
 	alertNow := func(note string) {
 		st.Alert = true
@@ -187,6 +207,10 @@ func evalPolicy(prev policyState, obs observed, now time.Time) policyState {
 		fmt.Sprintf("copilot CLI changed %s -> %s: re-verify the JSONL event schema against testdata/fixtures/copilot (same unversioned-rename hazard class as codex #4776)", prev.CopilotVersion, obs.CopilotVersion))
 	check("copilot billing doc", prev.CopilotBillingHash, obs.CopilotBillingHash,
 		"GitHub Copilot billing doc CHANGED — re-verify the plan's monthly AI-credit allowance (config copilot_monthly_credits; the poll's entitlement is the measured cap), the 1st-of-month reset, and that overage stays OFF at the account (R10: no overage budget, ever; exhaustion is a hard 402 on every model, no included-model fallback)")
+	check("groq rate-limits doc", prev.GroqLimitsHash, obs.GroqLimitsHash,
+		"Groq rate-limits doc CHANGED — re-verify the free-tier RPM/RPD/TPM priors behind the groq lane (config free_providers.groq; the registry default is 30 RPM / 1000 RPD from 2026-09-06) and the x-ratelimit-* header names the lane's meter reads")
+	check("cloudflare workers-ai pricing", prev.CloudflarePricingHash, obs.CloudflarePricingHash,
+		"Cloudflare Workers AI pricing page CHANGED — re-verify the 10,000 neurons/day free allocation, the 00:00 UTC reset, and the per-model neuron rates (config free_cloudflare_neuron_rates; registry defaults from 2026-09-06); confirm the account named by free_cloudflare_account_id is still on the Free plan (R10)")
 	return st
 }
 
@@ -221,6 +245,16 @@ func runPolicyWatch(ack bool) error {
 		obs.FetchNotes = append(obs.FetchNotes, "copilot billing doc fetch failed (fail-open, baseline preserved): "+err.Error())
 	} else {
 		obs.CopilotBillingHash = hashText(stripHTMLText(body))
+	}
+	if body, err := fetchPage(groqLimitsURL); err != nil {
+		obs.FetchNotes = append(obs.FetchNotes, "groq rate-limits doc fetch failed (fail-open, baseline preserved): "+err.Error())
+	} else {
+		obs.GroqLimitsHash = hashText(stripHTMLText(body))
+	}
+	if body, err := fetchPage(cloudflarePricingURL); err != nil {
+		obs.FetchNotes = append(obs.FetchNotes, "cloudflare pricing fetch failed (fail-open, baseline preserved): "+err.Error())
+	} else {
+		obs.CloudflarePricingHash = hashText(stripHTMLText(body))
 	}
 	st := evalPolicy(prev, obs, now)
 	// RS8 wire-in: a claude CLI version change immediately exercises the

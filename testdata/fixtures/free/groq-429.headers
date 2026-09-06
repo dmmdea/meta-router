@@ -1,0 +1,6 @@
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+retry-after: 2
+x-ratelimit-limit-requests: 1000
+x-ratelimit-remaining-requests: 0
+x-ratelimit-reset-requests: 1h2m3.5s

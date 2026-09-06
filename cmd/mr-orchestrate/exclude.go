@@ -9,7 +9,13 @@ import (
 // knownLanes is the closed set --exclude accepts (the laneStates keys plus
 // local). A typo like "claud" must be an error, not a silent no-op that leaves
 // the lane selectable.
-var knownLanes = map[string]bool{"claude": true, "codex": true, "copilot": true, "glm": true, "local": true}
+var knownLanes = map[string]bool{"claude": true, "codex": true, "copilot": true, "glm": true, "local": true,
+	// Free-provider lanes (W4) and the "free" GROUP alias that expands to all five.
+	"groq": true, "cloudflare": true, "openrouter": true, "nim": true, "gemini": true, "free": true}
+
+// freeGroup expands the "free" alias: --exclude free masks every free-provider
+// lane at once (delegate-mode's natural "no third-party" switch).
+var freeGroup = []string{"groq", "cloudflare", "openrouter", "nim", "gemini"}
 
 // excludeFlag is a repeatable, comma-tolerant flag.Value:
 //
@@ -48,9 +54,15 @@ func parseExclude(raw []string) ([]string, error) {
 			sort.Strings(keys)
 			return nil, fmt.Errorf("exclude: unknown lane %q (valid: %s)", l, strings.Join(keys, "|"))
 		}
-		if !seen[l] {
-			seen[l] = true
-			out = append(out, l)
+		names := []string{l}
+		if l == "free" {
+			names = freeGroup
+		}
+		for _, n := range names {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
 		}
 	}
 	sort.Strings(out)

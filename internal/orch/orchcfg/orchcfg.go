@@ -10,6 +10,8 @@ package orchcfg
 import (
 	"encoding/json"
 	"os"
+
+	"github.com/dmmdea/meta-router/internal/orch/freelane"
 )
 
 const (
@@ -148,12 +150,88 @@ type Config struct {
 	// operator intent, distinguishable from hand-edit zero damage).
 	LocalMaxPerMin int `json:"local_max_per_min"`
 
+	// Free-provider lanes (W4, 2026-09-06 — vetting 2026-07-23, refreshed in
+	// frontier-refresh-v5 §3). Every number is a CONFIG PRIOR about a vendor's
+	// free tier; vendors revise without notice, so the policy watch hashes
+	// their docs and the ledger trusts a vendor 429 over any figure here.
+	//
+	// FreeLanesOff is the kill-switch: all five lanes mask "off" and refuse
+	// dispatch (force-proof — a switched-off lane is policy, not quota).
+	FreeLanesOff bool `json:"free_lanes_off"`
+	// FreeProviders overlays a lane's registry prior: {"groq": {"rpm": 30,
+	// "daily_cap": 1000, "off": false}}. Zero keeps the prior; off masks the
+	// one lane. daily_cap is in the lane's UNIT (requests / neurons / credits).
+	FreeProviders map[string]FreeLimits `json:"free_providers"`
+	// FreeCloudflareAccountID is REQUIRED for the cloudflare lane (the Workers
+	// AI endpoint embeds the account). The operator keeps that account on the
+	// Free Workers plan: a Paid plan bills $0.011/1k neurons past the free
+	// 10k/day (R10 — zero spend by construction is the operator's account
+	// choice here, which the binary cannot verify).
+	FreeCloudflareAccountID string `json:"free_cloudflare_account_id"`
+	// FreeCloudflareNeuronRates overrides/extends the neurons-per-M-tokens
+	// table used to meter the 10k/day allocation (model → {in, out}); the
+	// registry ships the 2026-09-06 pricing page for the vetted models.
+	FreeCloudflareNeuronRates map[string]freelane.NeuronRate `json:"free_cloudflare_neuron_rates"`
+	// FreeGeminiAllowClasses is the NON-SENSITIVE task-class allowlist the
+	// gemini lane requires (router class names, e.g. "mechanical-text").
+	// EMPTY (the default) = the lane is GATED: it routes as masked and `run
+	// --lane gemini` refuses, force-proof. Operator 2026-07-23: "not seated
+	// until the non-sensitive-prompt allowlist gate exists" — free-tier
+	// prompts train Google models (re-confirmed 2026-09-06), and multi-brand
+	// isolation makes the gate non-negotiable.
+	FreeGeminiAllowClasses []string `json:"free_gemini_allow_classes"`
+	// FreeMaxTokens bounds one completion. Reasoning models spend output on
+	// thinking first: the live NIM probe at 32 tokens returned only reasoning.
+	FreeMaxTokens int `json:"free_max_tokens"` // default 4096
+	// FreeTimeoutSec bounds one HTTP dispatch (a 550B reasoning model on a
+	// shared free endpoint can take minutes).
+	FreeTimeoutSec int `json:"free_timeout_sec"` // default 180
+
 	// CompactionOff (W5) disables the LOSSLESS embed-time dep-context
 	// compaction in strategy DAGs. Ships ON: the transform is provably
 	// round-trippable (DG-3 lossless-first; nothing lossy exists here).
 	// Scope: compaction ONLY — the W5 re-lane context handoff is not
 	// compression and has no switch.
 	CompactionOff bool `json:"compaction_off"`
+}
+
+// FreeLimits is one free lane's operator overlay (see Config.FreeProviders).
+type FreeLimits struct {
+	RPM      int   `json:"rpm"`
+	DailyCap int64 `json:"daily_cap"`
+	Off      bool  `json:"off"`
+}
+
+// FreeLimits returns the overlay for lane as the adapter's type (zero-valued
+// when the operator set none).
+func (c Config) FreeLimits(lane string) freelane.Limits {
+	l := c.FreeProviders[lane]
+	return freelane.Limits{RPM: l.RPM, DailyCap: l.DailyCap, Off: l.Off}
+}
+
+// FreeNeuronRate resolves a cloudflare model's neuron rate: operator table
+// first, registry default second, ok=false when neither knows the model (the
+// caller meters a floor and WARNS — never a silent zero).
+func (c Config) FreeNeuronRate(model string) (freelane.NeuronRate, bool) {
+	if r, ok := c.FreeCloudflareNeuronRates[model]; ok {
+		return r, true
+	}
+	r, ok := freelane.DefaultNeuronRates()[model]
+	return r, ok
+}
+
+// FreeGeminiClassAllowed reports whether class is on the gemini allowlist.
+// An empty allowlist allows nothing.
+func (c Config) FreeGeminiClassAllowed(class string) bool {
+	if class == "" {
+		return false
+	}
+	for _, a := range c.FreeGeminiAllowClasses {
+		if a == class {
+			return true
+		}
+	}
+	return false
 }
 
 // CopilotDefaultModel is the lane's default pin: the lowest measured
@@ -175,6 +253,7 @@ func Defaults() Config {
 		LocalOffloadBin: "offload-harness", LocalAgentBin: "local-agent", StrategyMaxConcurrency: 2,
 		QuotaStaleHours: 48, PollMinIntervalMin: 5, LocalMaxPerMin: 20,
 		DelegateProposePct: 70,
+		FreeMaxTokens:      4096, FreeTimeoutSec: 180,
 	}
 }
 
@@ -243,6 +322,12 @@ func Load(path string) Config {
 	}
 	if c.DelegateProposePct == 0 {
 		c.DelegateProposePct = 70 // absent field / hand-edit zero → default; negative = explicitly off
+	}
+	if c.FreeMaxTokens <= 0 {
+		c.FreeMaxTokens = 4096
+	}
+	if c.FreeTimeoutSec <= 0 {
+		c.FreeTimeoutSec = 180
 	}
 	return c
 }

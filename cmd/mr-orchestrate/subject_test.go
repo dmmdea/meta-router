@@ -25,8 +25,8 @@ func TestPickSubjectRotatesOffExhausted(t *testing.T) {
 	l := ledger.Open(filepath.Join(t.TempDir(), "l.json"))
 	now := time.Now().UTC()
 	reset := now.Add(2 * time.Hour)
-	l.ObserveProvider("claude", ledger.Win5h, 97, reset, now)                     // default exhausted
-	l.ObserveProviderSubject("claude", "acct2", ledger.Win5h, 5, reset, now)      // acct2 open
+	l.ObserveProvider("claude", ledger.Win5h, 97, reset, now)                // default exhausted
+	l.ObserveProviderSubject("claude", "acct2", ledger.Win5h, 5, reset, now) // acct2 open
 	reg := profiles.Registry{"claude": {
 		{Subject: "default", Home: "", Provisioned: true},
 		{Subject: "acct2", Home: "C:/x/acct2", Provisioned: true},

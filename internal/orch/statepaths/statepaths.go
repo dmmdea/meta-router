@@ -40,6 +40,14 @@ func Exclusions() string  { return filepath.Join(StateDir(), "exclusions.json") 
 func LocalLimiter() string {
 	return filepath.Join(StateDir(), "local-limiter.json") // W6: local-lane sliding-window stamps
 }
+
+// FreeDir holds the free-provider credential files (<lane>.token, 0600, one
+// per provider — the glm-token pattern; W4 2026-09-06).
+func FreeDir() string { return filepath.Join(StateDir(), "free") }
+
+// FreeLimiter is a free lane's sliding-window stamps (per-minute ceiling).
+func FreeLimiter(lane string) string { return filepath.Join(StateDir(), "free-limiter-"+lane+".json") }
+
 func ResilAlert() string {
 	return filepath.Join(StateDir(), "resil-alert.json") // W6: persistence-failure latch (stderr is null-wired on the strategy path)
 }

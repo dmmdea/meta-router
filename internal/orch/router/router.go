@@ -154,7 +154,12 @@ const CtxCapLocal = 100_000 // local prohibition floor (baseline §2: >~100–21
 
 // lanePriority is the S2R-12 residual tiebreak: a TOTAL, stable order that
 // prefers claude over codex at parity (codex is the surgical resource — don't
-// spend it on run one). claude < codex < glm < local.
+// spend it on run one). claude < codex < glm < local < copilot < free
+// providers < unknown. copilot's slot is made explicit (it sat in the default
+// slot since 2026-09-01, i.e. after local — preserved). The five free
+// providers (W4, 2026-09-06) tie with each other and sit after every
+// subscription lane: at equal rank the paid-for capacity is spent first, and
+// free capacity is the overflow — R14 says use what you pay for.
 func lanePriority(lane string) int {
 	switch lane {
 	case "claude":
@@ -165,8 +170,12 @@ func lanePriority(lane string) int {
 		return 2
 	case "local":
 		return 3
-	default:
+	case "copilot":
 		return 4
+	case "groq", "cloudflare", "openrouter", "nim", "gemini":
+		return 5
+	default:
+		return 6
 	}
 }
 
@@ -182,7 +191,10 @@ func normPct(p float64) float64 {
 // (relegation, never rejection: a dead lane never wins).
 func masked(state string) bool {
 	switch state {
-	case "exhausted", "hard_stop", "model_retired", "unavailable", "retired", "excluded":
+	case "exhausted", "hard_stop", "model_retired", "unavailable", "retired", "excluded",
+		// Free-provider lanes (W4): no credential file provisioned; class
+		// allowlist not satisfied (gemini); kill-switch / per-lane off.
+		"unconfigured", "gated", "off":
 		return true
 	}
 	return false

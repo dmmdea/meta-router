@@ -1,9 +1,9 @@
 package ledger
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -293,8 +293,8 @@ func TestSubjectIsolation(t *testing.T) {
 	l := Open(filepath.Join(t.TempDir(), "ledger.json"))
 	now := time.Now().UTC()
 	reset := now.Add(3 * time.Hour)
-	l.ObserveProvider("claude", Win5h, 80, reset, now)                     // default subject
-	l.ObserveProviderSubject("claude", "acct2", Win5h, 10, reset, now)     // second account
+	l.ObserveProvider("claude", Win5h, 80, reset, now)                 // default subject
+	l.ObserveProviderSubject("claude", "acct2", Win5h, 10, reset, now) // second account
 	if b, _ := l.Bucket("claude", Win5h); b.UsedPct != 80 {
 		t.Fatalf("default subject contaminated: %+v", b)
 	}

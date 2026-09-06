@@ -85,6 +85,11 @@ func laneStates(snap []ledger.Bucket, fzs []fuses.Fuse, cfg orchcfg.Config, now 
 		}
 		out[lane] = ls
 	}
+	// Free-provider lanes (W4): off / unconfigured / gated are policy or
+	// provisioning masks; otherwise admission over the day/trial buckets.
+	for lane, ls := range freeLaneStates(snap, cfg, stateDir(), now) {
+		out[lane] = ls
+	}
 	// local: always open QUOTA-wise. The free lane fails open — its capacity is
 	// not ledger-tracked (it goes through the local-offload MCP, S2R-4); the
 	// router's ctx prohibition floor is what keeps large tasks off it. The W6
@@ -313,6 +318,13 @@ func buildRouteDecision(cfg orchcfg.Config, fzs []fuses.Fuse, snap []ledger.Buck
 			states[lane] = st
 		}
 	}
+	// gemini class gate, per consult: a non-empty allowlist seats the lane
+	// only for the classes it names (laneStates already masks the empty
+	// allowlist as "gated" without knowing the class).
+	if st, ok := states["gemini"]; ok && (st.State == "open" || st.State == "throttled") && !cfg.FreeGeminiClassAllowed(string(class)) {
+		st.State = "gated"
+		states["gemini"] = st
+	}
 	samples := calib.Load(quotaTracePath())
 	down := burnDownshiftByLane(snap, samples, cfg, now)
 	for lane, lv := range down {
@@ -417,7 +429,7 @@ func runRoute(args []string) error {
 	batch := fs.Bool("batch", false, "E2 spend-down tag: this is an already-queued BATCH task (never set for interactive work); enables the under-utilized-window rank boost")
 	estMinutes := fs.Float64("est-minutes", 0, "expected task duration in minutes (E2 completion-fit gate; 0 = unknown → no boost)")
 	var exclude excludeFlag
-	fs.Var(&exclude, "exclude", "mask a lane for THIS consult only (repeatable or comma-separated: claude|codex|copilot|glm|local). delegate-mode passes --exclude claude")
+	fs.Var(&exclude, "exclude", "mask a lane for THIS consult only (repeatable or comma-separated: claude|codex|copilot|glm|local|groq|cloudflare|openrouter|nim|gemini|free). delegate-mode passes --exclude claude")
 	_ = fs.Parse(args)
 
 	now := time.Now().UTC()
