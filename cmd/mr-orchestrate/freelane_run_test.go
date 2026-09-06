@@ -359,6 +359,14 @@ func TestApplyFreeOutcomeNIMTrialAnd402(t *testing.T) {
 	if b.UsedPct != 100 || b.ProviderSource != ledger.ProviderSourceLimit || !b.ResetsAt.Equal(later.Add(24*time.Hour)) {
 		t.Fatalf("402 must latch the pool exhausted for a day: %+v", b)
 	}
+	// After the re-check horizon the next dispatch keeps the LIFETIME count
+	// (3 credits spent + this one), instead of restarting the pool at zero.
+	recheck := later.Add(25 * time.Hour)
+	applyFreeOutcome(l, spec, "nvidia/nemotron-3-ultra-550b-a55b", freelane.Outcome{Class: "ok"}, cfg, recheck)
+	b, _ = l.Bucket("nim", ledger.WinTrial)
+	if b.ShadowTokens != 4000 || b.UsedPct != 0.4 || b.Source != "shadow" {
+		t.Fatalf("the re-check roll must preserve the pool's history: %+v", b)
+	}
 }
 
 // --- route states -----------------------------------------------------------

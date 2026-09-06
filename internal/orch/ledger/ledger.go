@@ -358,6 +358,21 @@ func (l *Ledger) get(lane, subject string, w WindowKind) *Bucket {
 // fresh observation.
 func (b *Bucket) roll(now time.Time) {
 	if !b.ResetsAt.IsZero() && now.After(b.ResetsAt) {
+		if b.Window == WinTrial {
+			// A depletable pool never renews, so its usage count is LIFETIME.
+			// The only anchor a trial bucket carries past `now` is a denial's
+			// re-check horizon (ObserveLimit after a 402): when that passes,
+			// the vendor's verdict expires — the pool may have been topped up —
+			// but the count of what was spent does not. Clear the observation,
+			// keep the shadow; the caller re-anchors and the next dispatch
+			// re-derives (review 2026-09-06: the generic roll zeroed the pool's
+			// history every 24h while NVIDIA's credits stayed gone).
+			b.UsedPct = -1
+			b.Source = "shadow"
+			b.ResetsAt = time.Time{}
+			b.ProviderSource = ""
+			return
+		}
 		b.ShadowTokens = 0
 		b.UsedPct = -1
 		b.Source = "shadow"

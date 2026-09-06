@@ -446,8 +446,15 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 			return runOpenrouterLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
 		case "nim":
 			return runNimLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
-		default:
+		case "gemini":
+			// EXPLICIT, not `default`: the B14 canary marks a third-party lane
+			// selectable by the literal `case "<lane>":` and then inspects its
+			// run<Lane>Lane for the egress gate. A default-reached lane is
+			// invisible to it (review 2026-09-06 — and gemini is the lane whose
+			// gate matters most).
 			return runGeminiLane(out, opts.Prompt, resolvedModel, resolvedEffort, opts.CWD, opts.TimeoutSec, opts.Live, opts.Force, opts.Origin, opts.Desc, rf, sf)
+		default:
+			return 1, fmt.Errorf("run: free lane %q has no dispatcher (registry and switch out of step)", resolvedLane)
 		}
 	case "local":
 		// S3R-1: an explicit --lane local now dispatches through the two-door

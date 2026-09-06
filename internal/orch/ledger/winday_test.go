@@ -52,4 +52,30 @@ func TestDayRollsTrialNever(t *testing.T) {
 	if b, _ := l.Bucket("nim", WinTrial); b.UsedPct != 1 || b.ShadowTokens != 10_000 {
 		t.Fatalf("trial pool accumulates across a year without rolling: %+v", b)
 	}
+	// A vendor denial re-anchors the pool to a 24h re-check horizon. When that
+	// horizon passes the DENIAL expires (the pool may have been topped up) but
+	// the lifetime count must survive the roll (review 2026-09-06).
+	denied := now.AddDate(1, 0, 0)
+	l.ObserveLimit("nim", "", WinTrial, denied.Add(24*time.Hour), denied)
+	if b, _ := l.Bucket("nim", WinTrial); b.UsedPct != 100 || b.ProviderSource != ProviderSourceLimit {
+		t.Fatalf("402 must latch: %+v", b)
+	}
+	recheck := denied.Add(25 * time.Hour)
+	l.AnchorIfUnset("nim", WinTrial, recheck.AddDate(10, 0, 0), recheck)
+	l.AddShadow("nim", WinTrial, 1_000, recheck)
+	if b, _ := l.Bucket("nim", WinTrial); b.ShadowTokens != 11_000 || b.Source != "shadow" || b.ProviderSource != "" {
+		t.Fatalf("the re-check roll must clear the denial and KEEP the lifetime count: %+v", b)
+	}
+	if b, _ := l.Bucket("nim", WinTrial); b.UsedPct != 1.1 {
+		t.Fatalf("derived from the preserved count: %+v", b)
+	}
+	// Day windows still roll to zero: the calendar renews them.
+	l.SetCapacityEstimate("groq2", WinDay, 1000_000)
+	l.AnchorIfUnset("groq2", WinDay, NextDailyReset(now), now)
+	l.AddShadow("groq2", WinDay, 5_000, now)
+	l.ObserveLimit("groq2", "", WinDay, NextDailyReset(now), now)
+	l.AddShadow("groq2", WinDay, 1_000, NextDailyReset(now).Add(time.Minute))
+	if b, _ := l.Bucket("groq2", WinDay); b.ShadowTokens != 1_000 {
+		t.Fatalf("a day window renews: %+v", b)
+	}
 }
