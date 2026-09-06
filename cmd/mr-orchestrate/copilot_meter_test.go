@@ -11,9 +11,10 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 )
 
-// The metering unit is the VENDOR'S per-dispatch premium-request figure,
-// floored at one request (recalibrated 2026-09-05: the one-per-dispatch unit
-// let a gold probe spend the whole month while the ledger showed 60% left).
+// The metering unit is the VENDOR'S per-dispatch figure — AI CREDITS on the
+// token-based plan (verified 2026-09-06 against copilot_internal/user and the
+// billing report) — floored at one credit, against the configured monthly
+// credit allowance until a poll lands the measured entitlement.
 func TestCopilotMeteringUsesTheVendorFigureFlooredAtOne(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	cfg := orchcfg.Defaults()
@@ -22,9 +23,9 @@ func TestCopilotMeteringUsesTheVendorFigureFlooredAtOne(t *testing.T) {
 		o        copilotlane.Outcome
 		wantMill int64
 	}{
-		{"vendor says 1", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 1}}, 1000},
-		{"vendor says 3 (luna-class)", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 3}}, 3000},
-		{"vendor says 14", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 14}}, 14000},
+		{"vendor says 1 credit", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 1}}, 1000},
+		{"vendor says 3 credits (luna-class)", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 3}}, 3000},
+		{"vendor says 14 credits (gemini-flash)", copilotlane.Outcome{Class: "ok", Usage: copilotlane.Usage{PremiumRequests: 14}}, 14000},
 		{"ok with no checkpoint still meters one", copilotlane.Outcome{Class: "ok"}, 1000},
 		{"not-ok but vendor charged", copilotlane.Outcome{Class: "incomplete", Usage: copilotlane.Usage{PremiumRequests: 2}}, 2000},
 	} {
@@ -35,10 +36,13 @@ func TestCopilotMeteringUsesTheVendorFigureFlooredAtOne(t *testing.T) {
 			t.Fatalf("%s: no monthly bucket", tc.name)
 		}
 		if b.ShadowTokens != tc.wantMill {
-			t.Fatalf("%s: metered %d milli-requests, want %d (vendor figure, floored at one)", tc.name, b.ShadowTokens, tc.wantMill)
+			t.Fatalf("%s: metered %d milli-credits, want %d (vendor figure, floored at one credit)", tc.name, b.ShadowTokens, tc.wantMill)
 		}
-		if b.CapTokens != cfg.CopilotMonthlyRequests*1000 {
-			t.Fatalf("%s: cap = %d, want the configured allowance", tc.name, b.CapTokens)
+		if b.CapTokens != 1500*1000 || b.CapTokens != cfg.CopilotMonthlyCredits*1000 {
+			t.Fatalf("%s: cap = %d, want the 1,500-credit Pro allowance as milli-credits (estimate until a poll lands)", tc.name, b.CapTokens)
+		}
+		if b.CapSource != ledger.CapSourceEstimate {
+			t.Fatalf("%s: a config allowance must be marked estimate (throttle-only) until the poll measures it, got %q", tc.name, b.CapSource)
 		}
 		if want := ledger.NextMonthlyReset(now); !b.ResetsAt.Equal(want) {
 			t.Fatalf("%s: resets %s, want the calendar boundary %s", tc.name, b.ResetsAt, want)

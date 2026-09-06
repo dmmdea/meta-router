@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/dmmdea/meta-router/internal/orch/copilotlane"
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 	"github.com/dmmdea/meta-router/internal/orch/profiles"
@@ -81,9 +82,13 @@ func pollDue(last time.Time, minMin int, now time.Time) bool {
 type subjectFetch struct {
 	Lane    string
 	Subject string
-	Origin  string // oauth_poll | wham_poll
+	Origin  string // oauth_poll | wham_poll | copilot_poll
 	OK      bool   // fetch reached the endpoint (typed window absences still count OK)
 	Res     quotapoll.Result
+	// CapMilli is a MEASURED monthly capacity the poll carried (copilot: the
+	// plan's credit entitlement × 1000). 0 = the poll carries no capacity;
+	// the ledger keeps whatever it has (a config estimate, or an older poll).
+	CapMilli int64
 }
 
 // pollFetch is the NETWORK half: config-gated, rate-limited HTTP over the
@@ -119,13 +124,56 @@ func fetchPolls(cfg orchcfg.Config, reg profiles.Registry, ps pollState, force b
 	}
 	poll("claude", "oauth_poll", cfg.OAuthUsagePoll, func(cred string) quotapoll.Result { return quotapoll.PollClaudeAt(cred, now) })
 	poll("codex", "wham_poll", cfg.CodexUsagePoll, func(cred string) quotapoll.Result { return quotapoll.PollCodexAt(cred, now) })
+	f.pollCopilot(cfg, ps, force, now)
 	return f
+}
+
+// pollCopilot is the copilot lane's provider poll. It sits outside the
+// profile registry on purpose: the lane has no CLI home to be "provisioned"
+// — its credential is the gh keyring account named by copilot_token_user,
+// minted per poll exactly as per dispatch (never an ambient env token, which
+// could report and bill a different GitHub account). Same config gate,
+// rate limit and typed-absence discipline as the other pollers.
+func (f *pollFetch) pollCopilot(cfg orchcfg.Config, ps pollState, force bool, now time.Time) {
+	if !cfg.CopilotUsagePoll || cfg.CopilotTokenUser == "" {
+		return // unconfigured lane: nothing to poll, nothing to state
+	}
+	if !force && !pollDue(ps.Last[stampKey("copilot", "default")], cfg.PollMinIntervalMin, now) {
+		return
+	}
+	sf := subjectFetch{Lane: "copilot", Subject: "default", Origin: "copilot_poll"}
+	tok, err := copilotlane.MintToken(cfg.CopilotTokenUser)
+	if err != nil {
+		sf.Res.Absences = append(sf.Res.Absences, quotapoll.Absence{Lane: quotapoll.LaneCopilot, Window: "all", Reason: "not_logged_in"})
+		f.subjects = append(f.subjects, sf)
+		return
+	}
+	res, facts := quotapoll.PollCopilot(tok, now)
+	sf.Res, sf.OK = res, true
+	for _, a := range res.Absences {
+		if a.Window == "all" {
+			sf.OK = false
+		}
+	}
+	// Only a CREDIT entitlement may set the credit cap: a legacy
+	// premium-request plan reports requests, and 300 requests are not 300
+	// credits. The unit check is what keeps the two regimes apart.
+	if facts.Unit == "credits" && facts.Entitlement > 0 {
+		sf.CapMilli = int64(facts.Entitlement * 1000)
+	}
+	f.subjects = append(f.subjects, sf)
 }
 
 // applyPolls lands fetched snapshots per subject through the provider path
 // inside an ALREADY-OPEN Update closure (sub-second; no network).
 func applyPolls(l *ledger.Ledger, f pollFetch, now time.Time) {
 	for _, sf := range f.subjects {
+		if sf.CapMilli > 0 {
+			// A vendor-reported entitlement is a MEASURED capacity: it replaces
+			// the config estimate (and clears the estimate marking, so the
+			// admission gate may exhaust on it, S2R-3) for the month window.
+			l.SetCapacity(sf.Lane, ledger.WinMonth, sf.CapMilli)
+		}
 		if _, note := quotasig.ApplySnapshotsSubject(l, sf.Subject, sf.Res.Snapshots, quotaTracePath(), sf.Origin, now); note != "" {
 			fmt.Fprintln(os.Stderr, "warn:", note)
 		}

@@ -9,11 +9,13 @@ import (
 
 // Usage is the provider-true consumption a dispatch reports about itself.
 // session.usage_checkpoint (non-ephemeral, live-captured CLI 1.0.82,
-// 2026-09-01) carries the session's cumulative premium-request count and
-// nano-AI-units — SELF-METERED BY THE VENDOR, so the ledger records real
-// consumption rather than a doc-lore multiplier estimate. GitHub's billing
-// is mid-transition (premium requests vs "AI credits"); both figures are
-// kept so whichever regime wins remains reconstructable from dispatch logs.
+// 2026-09-01) carries the session's cumulative `totalPremiumRequests` and
+// `totalNanoAiu` — SELF-METERED BY THE VENDOR. The field keeps the vendor's
+// key NAME, but on a token-based plan (every monthly plan since 2026-06-01;
+// dmmdea verified 2026-09-06) its UNIT IS AI CREDITS: gemini-3.6-flash
+// reporting 14 meant 14 credits, and 116 executed dispatches summed to the
+// 1,501 credits the billing page showed. Receipts keep the same key so the
+// month reconciles against `gh api users/<u>/settings/billing/usage`.
 type Usage struct {
 	PremiumRequests int64 `json:"premium_requests"`
 	NanoAiu         int64 `json:"nano_aiu"`

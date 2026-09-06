@@ -70,3 +70,34 @@ func TestBuildArgsBenignExtraSurvives(t *testing.T) {
 		t.Fatalf("benign extra dropped: %v", args)
 	}
 }
+
+// The per-dispatch spend bound rides as the CLI's own flag when configured,
+// is omitted at zero, and is refused below the CLI minimum (config clamps;
+// a value reaching BuildArgs below 30 means config was bypassed).
+func TestBuildArgsMaxAiCredits(t *testing.T) {
+	r := validReq()
+	r.MaxAiCredits = 60
+	args, err := BuildArgs(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(args, "--max-ai-credits"); i < 0 || i+1 >= len(args) || args[i+1] != "60" {
+		t.Fatalf("--max-ai-credits 60 missing: %v", args)
+	}
+	r.MaxAiCredits = 0
+	if args, _ = BuildArgs(r); slices.Contains(args, "--max-ai-credits") {
+		t.Fatalf("zero must omit the flag: %v", args)
+	}
+	for _, bad := range []int64{1, 29, -5} {
+		r.MaxAiCredits = bad
+		if _, err := BuildArgs(r); err == nil {
+			t.Fatalf("max_ai_credits %d must be a config error (CLI minimum %d)", bad, MinAiCredits)
+		}
+	}
+	// and an operator Extra cannot re-raise the bound the config pinned
+	r = validReq()
+	r.Extra = []string{"--max-ai-credits", "900"}
+	if _, err := BuildArgs(r); err == nil {
+		t.Fatal("--max-ai-credits via Extra must be forbidden")
+	}
+}

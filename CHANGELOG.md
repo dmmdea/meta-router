@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.38.0] — 2026-09-06
+
+### Fixed — the copilot lane meters the unit GitHub bills: AI credits
+The v0.37.0 meter read the vendor's per-dispatch figure in the wrong unit against the wrong cap. Verified live on the subscription account (2026-09-06): `gh api copilot_internal/user` reports `token_based_billing: true`, entitlement **1,500**, credits_used 1,501, `overage_permitted: false`, reset 2026-10-01T00:00Z; the official billing report (`users/<u>/settings/billing/usage`, `user` scope) lists the month as sku "Copilot AI Credits", 1,499.37 used, net $0.00, while the premium-request report is empty. So `session.usage_checkpoint.totalPremiumRequests` was credits all along (gemini-3.6-flash's 14 = 14 credits; 116 executed dispatches summed to the month), and a cap of 300 latched the lane "exhausted" at a fifth of its allowance.
+
+- **Ledger unit is milli-credits; cap is 1,500 credits** (`copilot_monthly_credits`, default 1500). `copilot_monthly_requests` is retired: still parsed so old configs load, never read.
+- **Provider-truth poll** (`quotapoll.PollCopilot`, config `copilot_usage_poll`, default on): `copilot_internal/user` with a token minted per poll from `copilot_token_user` — the endpoint the CLI itself uses, answerable with the plain gh token. The vendor's `percent_remaining` lands as the month window's `used_pct` (poll-sourced, so admission may exhaust on it), `quota_reset_date_utc` as the reset, and the entitlement as the MEASURED capacity (`SetCapacity`, clearing the estimate marking). Typed absences: not_logged_in, http_N, parse_error, window_omitted, unlimited; a legacy premium-request plan reports `unit=requests` and never sets a credit cap. Fixture is the full live response.
+- **Per-dispatch spend bound**: `--max-ai-credits <n>` from `copilot_max_ai_credits` (default 60; the measured dispatch median is ~13; CLI minimum 30 enforced by config clamp and `BuildArgs`); the flag joins the forbidden Extra list so a passthrough cannot raise it. Version gate floor moves to CLI 1.0.83, where the flag was verified.
+- Policy-watch alert text, receipt and parser comments rewritten for credits; the "exhaustion degrades to included models" premise stays retracted (every model answers 402).
+
 ## [0.37.0] — 2026-09-06
 
 ### Changed — the copilot lane spends its month on purpose
