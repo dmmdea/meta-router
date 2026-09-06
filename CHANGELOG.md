@@ -4,6 +4,16 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.40.2] — 2026-09-06
+
+### Fixed — the codex lane executed nothing on Windows under Codex CLI 0.153.4
+Found by the first Astra roster sweep after the operator's "make sure the codex cli is updated": every agentic-coding cell came back `ok` with "no diff in output" in ~30 s. A direct reproduction showed the model saying *"the execution policy rejected even the read-only `rg --files` command. No files were changed."* — stderr `exec_command failed: CreateProcess Rejected(... blocked by policy)`. Codex CLI ≥0.153 rejects every model-issued shell command on Windows unless the ACTIVE `CODEX_HOME` config carries a native sandbox mode (`[windows] sandbox = "elevated"|"unelevated"`), and the lane's hermetic per-run home seeded only the credentials-store line. Isolated, stdin-closed probes settled it: `approval_policy = "never"` did not help, a project trust entry did not help, the one `[windows]` table did (the operator's own desktop config has it, which is why the CLI "worked" by hand). 0.149.1 did not enforce this; the July codex probes executed commands with the same home.
+
+- `codexlane.EnsureHomeWith(baseDir, windowsSandbox)` seeds `[windows] sandbox = "<mode>"` on Windows (off Windows the table is not written); `EnsureHome` keeps the recommended default. Modes are validated — exactly `elevated` (OpenAI's recommended mode, one-time elevated setup, present on both nodes) or `unelevated` (restricted-token fallback); anything else is a config error naming the field, never seeded verbatim.
+- `orchcfg.codex_windows_sandbox` (default `elevated`); `run --lane codex`, `probe --verify-codex` and the codex schema gate all seed it.
+- The nine Astra rows recorded under the broken lane were purged from the private oracle (backup kept beside it); no other lane is affected (claude/copilot/free lanes spawn no codex home).
+- Verification: a live lane dispatch must show a completed `command_execution` item, not just an `ok` turn — an "ok" that never ran a command is exactly the failure this hid.
+
 ## [0.40.1] — 2026-09-06
 
 ### Added — codex plan facts from the quota poll, and a probe budget for the codex lane

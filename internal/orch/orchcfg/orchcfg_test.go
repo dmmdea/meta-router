@@ -146,3 +146,23 @@ func TestCopilotCreditsConfig(t *testing.T) {
 		t.Fatalf("explicit opt-outs must survive Load: %+v", c)
 	}
 }
+
+// codex_windows_sandbox: default elevated, empty backfills, explicit fallback kept.
+func TestCodexWindowsSandboxConfig(t *testing.T) {
+	if d := Defaults(); d.CodexWindowsSandbox != "elevated" {
+		t.Fatalf("default must be the recommended native mode: %q", d.CodexWindowsSandbox)
+	}
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"codex_windows_sandbox": ""}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := Load(p); c.CodexWindowsSandbox != "elevated" {
+		t.Fatalf("empty must backfill: %q", c.CodexWindowsSandbox)
+	}
+	if err := os.WriteFile(p, []byte(`{"codex_windows_sandbox": "unelevated"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := Load(p); c.CodexWindowsSandbox != "unelevated" {
+		t.Fatalf("explicit fallback must survive Load: %q", c.CodexWindowsSandbox)
+	}
+}

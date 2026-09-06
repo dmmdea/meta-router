@@ -29,7 +29,13 @@ type Config struct {
 	CodexUsagePoll         bool    `json:"codex_usage_poll"`         // W1: default ON as BEST-EFFORT EVIDENCE (Daniel 2026-07-23; Q10 caveats encoded in quotapoll)
 	CodexPlus5hCredits     float64 `json:"codex_plus_5h_credits"`    // default 40 (Plus 5h band 15–80, fact refresh)
 	CodexDegradationFactor float64 `json:"codex_degradation_factor"` // default 15 (10–20× observed, #28879)
-	GLM5hPrompts           int64   `json:"glm_5h_prompts"`           // default 80; weekly = 5× (never 10×)
+	// CodexWindowsSandbox is the native Windows sandbox mode seeded into every
+	// per-run CODEX_HOME ("elevated" recommended, "unelevated" fallback). Codex
+	// CLI >=0.153 rejects every shell command on Windows without one — the
+	// first Astra roster sweep (2026-09-06) measured nine harness failures as
+	// "ok, no diff" before this was seeded. Ignored off Windows.
+	CodexWindowsSandbox string `json:"codex_windows_sandbox"`
+	GLM5hPrompts        int64  `json:"glm_5h_prompts"` // default 80; weekly = 5× (never 10×)
 
 	// Copilot lane (2026-09-01: GLM subscription cancelled, Copilot Pro
 	// purchased — lane tiers are DATA about the operator's plans).
@@ -246,7 +252,7 @@ const CopilotMinAiCredits int64 = 30
 func Defaults() Config {
 	return Config{
 		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: true,
-		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, GLM5hPrompts: 80,
+		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, CodexWindowsSandbox: "elevated", GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
 		CopilotMonthlyCredits: 1500, CopilotMaxAiCredits: 60, CopilotUsagePoll: true, CopilotReviewCredits: 25,
 		CopilotModel: CopilotDefaultModel, GLMRetired: true,
@@ -283,6 +289,9 @@ func Load(path string) Config {
 	}
 	if c.CodexDegradationFactor == 0 {
 		c.CodexDegradationFactor = 15
+	}
+	if c.CodexWindowsSandbox == "" {
+		c.CodexWindowsSandbox = "elevated"
 	}
 	if c.PollMinIntervalMin == 0 {
 		c.PollMinIntervalMin = 5

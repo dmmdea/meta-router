@@ -146,7 +146,7 @@ func runCodexCapture(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	home, cleanup, err := codexlane.EnsureHome(stateDir())
+	home, cleanup, err := codexlane.EnsureHomeWith(stateDir(), orchcfg.Load(configPath()).CodexWindowsSandbox)
 	if err != nil {
 		return err
 	}
