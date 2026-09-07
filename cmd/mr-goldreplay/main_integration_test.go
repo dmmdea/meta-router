@@ -54,8 +54,20 @@ func TestMain(m *testing.M) {
 	// Pipe-holder mode: a git `ext::` remote helper that never answers and
 	// never exits on its own — a child of the real git that inherits its
 	// stderr, the WaitDelay scenario (a hook behaves the same way).
-	if os.Getenv("GOLDREPLAY_FAKE_HOLD") != "" {
-		time.Sleep(8 * time.Second) // longer than the test's bound, short enough to be gone soon after
+	if hold := os.Getenv("GOLDREPLAY_FAKE_HOLD"); hold != "" {
+		// Hold the inherited pipe until the TEST releases it (it removes the
+		// sentinel in cleanup), then announce the exit so the test can wait
+		// for this process to be gone. A fixed sleep outlived the test
+		// binary and made `go test` print a spurious unlinkat/Access-denied
+		// on every run. The deadline is a leak stop, not the mechanism.
+		deadline := time.Now().Add(60 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(hold); os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		os.WriteFile(hold+".gone", []byte("x"), 0o644)
 		os.Exit(0)
 	}
 	if fixture := os.Getenv("GOLDREPLAY_FAKE_ORCH_STDOUT"); fixture != "" {

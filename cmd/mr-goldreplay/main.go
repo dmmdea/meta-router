@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -682,14 +683,31 @@ func main() {
 
 	// Migration is a pure file rewrite: it must not require a goldset, lanes or
 	// pins, and it must never dispatch anything.
+	if *applyQuarantine && *requarantinePath == "" {
+		fatal("-apply has no effect on its own: it gates -requarantine <oracle> only. Re-run with -requarantine, or drop -apply.")
+	}
 	if *requarantinePath != "" {
-		rep, err := requarantineFile(*requarantinePath, *quarantineStamp, *applyQuarantine)
-		fmt.Print(rep.render(*quarantineStamp, *applyQuarantine))
+		rep, bak, err := requarantineFile(*requarantinePath, *quarantineStamp, *applyQuarantine)
+		mode := qDryRun
+		switch {
+		case *applyQuarantine && err != nil:
+			mode = qAborted
+		case *applyQuarantine:
+			mode = qApplied
+		}
+		fmt.Print(rep.render(*quarantineStamp, mode))
 		if err != nil {
-			fatal("requarantine: %v", err)
+			// NOT applied: the header says it, and so does the exit line —
+			// an -apply that fails after the report must never read like one
+			// that finished.
+			fatal("requarantine: NOT applied, the oracle is unchanged: %v", err)
 		}
 		if *applyQuarantine {
-			fmt.Printf("requarantine: %d row(s) stamped → %s\n", len(rep.Matched), *requarantinePath)
+			if len(rep.Matched) == 0 {
+				fmt.Printf("requarantine: nothing to stamp — 0 matching rows; %s was not opened for writing and no backup was made\n", *requarantinePath)
+			} else {
+				fmt.Printf("requarantine: %d row(s) stamped → %s (pre-state backup: %s)\n", len(rep.Matched), *requarantinePath, bak)
+			}
 		}
 		return
 	}
@@ -1483,9 +1501,22 @@ func removeWorktree(repoPath, wt string) {
 	// the repo's .git/worktrees that only expires with gc, and a silent
 	// success here hides the handle leak that caused it.
 	rmErr := os.RemoveAll(wt)
-	fmt.Fprintf(os.Stderr, "warn: agent worktree %s: git worktree remove failed (%s); os.RemoveAll: %v\n",
-		wt, boundedText(stderr, err, 200), rmErrText(rmErr))
+	// Two different faults, two different messages: git REFUSED (err != nil),
+	// or git reported success and the tree is still on disk (a handle held
+	// it open). Saying "remove failed" for the second sends the reader after
+	// a git error that does not exist.
+	cause := fmt.Sprintf("git worktree remove failed (%s)", boundedText(stderr, err, 200))
+	if err == nil {
+		cause = "git worktree remove returned 0 but the tree is still on disk (a handle held it open)"
+	}
+	fmt.Fprintf(warnOut, "warn: agent worktree %s: %s; os.RemoveAll: %v\n",
+		wt, cause, rmErrText(rmErr))
 }
+
+// warnOut is where removeWorktree's warning goes — a variable so a test can
+// prove the warning is actually emitted (a warning with no seam is a
+// warning nothing can pin).
+var warnOut io.Writer = os.Stderr
 
 func rmErrText(err error) string {
 	if err == nil {

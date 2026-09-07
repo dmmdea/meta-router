@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/dmmdea/meta-router/internal/goldtask"
 )
 
 // quarantineSignatures is the UNION of the verifier notes the harness
@@ -43,6 +45,17 @@ var quarantineSignatures = []string{
 	"corrupt patch at",
 	"No valid patches in input",
 }
+
+// quarantineNotePrefix is the note shape the defect produced: goldverify
+// failed at the `git apply` STAGE (applyVerifyOutcome writes
+// "verify-fail: " + verdictDetail, and verdictDetail is "<stage>: <err> |
+// <tail>"). Without this gate the signature scan reads the WHOLE note,
+// including the tail of a `go test` failure — and the goldset is
+// self-hosting (its tasks edit THIS repo, whose sources and fixtures
+// contain the signature strings verbatim), so a held-out test whose output
+// prints "corrupt patch at" would be swept in as a harness fault and a
+// genuine model failure would be laundered into a hole.
+var quarantineNotePrefix = "verify-fail: " + goldtask.StageGitApply + ":"
 
 const quarantineReason = "harness-corrupted candidate diff (git stderr spliced into the patch / build cache swept in) recorded as a model failure; instrument fixed in v0.40.4; hole, re-measure"
 
@@ -70,6 +83,11 @@ type quarantineReport struct {
 	After         map[string]laneStat
 	BeforeAgentic map[string]laneStat // lane → agentic-coding evidence pass rate
 	AfterAgentic  map[string]laneStat
+	// The boundary, printed so the operator sees what the selector REFUSED
+	// rather than inferring it from a count that got smaller.
+	ExcludedStage   int // signature present, but not an apply-stage failure
+	ExcludedPostFix int // signature present at the apply stage, but the row carries diff provenance ⇒ written under v0.40.4+, so its failure is the model's
+	Undecodable     int // non-empty lines the selector could not read as a row
 }
 
 // quarantineSelect matches every EVIDENCE-bearing row (all classes,
@@ -88,11 +106,16 @@ func quarantineSelect(in []byte) quarantineReport {
 	}
 	for i, line := range bytes.Split(in, []byte("\n")) {
 		body := bytes.TrimSpace(line)
-		if len(body) == 0 || body[0] != '{' {
+		if len(body) == 0 {
 			continue
 		}
+		// Every non-empty line the selector cannot read as an identified row
+		// is COUNTED, not silently dropped: a torn line, a non-JSON line and
+		// a row without lane/task are all invisible to the selector, and a
+		// report that does not say so reads as full coverage.
 		var r Row
-		if json.Unmarshal(body, &r) != nil || r.Task == "" || r.Lane == "" {
+		if body[0] != '{' || json.Unmarshal(body, &r) != nil || r.Task == "" || r.Lane == "" {
+			rep.Undecodable++
 			continue
 		}
 		if !rowIsEvidence(r) {
@@ -103,6 +126,26 @@ func quarantineSelect(in []byte) quarantineReport {
 			if strings.Contains(r.Note, sig) {
 				hit = true
 				break
+			}
+		}
+		// Two bounds on the signature, each closing a laundering path.
+		// STAGE: the failure must be `git apply` itself, not a signature
+		// string appearing in some other stage's captured output.
+		// PROVENANCE: the row must predate the fix. A row carrying
+		// diff_source was written by v0.40.4+, where a worktree diff that
+		// fails to apply is ALREADY a hole and a printed diff that fails to
+		// apply is by design the model's failure (the anti-laundering rule);
+		// quarantining those would relabel measured failures as harness
+		// faults. Absent means unknown, which is exactly the pre-fix
+		// population this mode exists for (all 22 live rows are absent).
+		if hit {
+			switch {
+			case !strings.HasPrefix(r.Note, quarantineNotePrefix):
+				rep.ExcludedStage++
+				hit = false
+			case r.DiffSource != "":
+				rep.ExcludedPostFix++
+				hit = false
 			}
 		}
 		add := func(m map[string]laneStat, k string) {
@@ -144,14 +187,27 @@ func quarantineSelect(in []byte) quarantineReport {
 	return rep
 }
 
+// quarantineMode is what the report header must tell the operator: a dry
+// run wrote nothing, an APPLY wrote, and an ABORTED apply wrote NOTHING —
+// the third case used to print the same "APPLY" header as a successful one,
+// so a failed apply read like a completed one with an error tacked on.
+type quarantineMode int
+
+const (
+	qDryRun quarantineMode = iota
+	qApplied
+	qAborted
+)
+
 // render prints the plan the way the operator reads it before -apply.
-func (rep quarantineReport) render(stamp string, apply bool) string {
+func (rep quarantineReport) render(stamp string, mode quarantineMode) string {
 	var b strings.Builder
-	mode := "DRY RUN — nothing written; pass -apply to stamp"
-	if apply {
-		mode = "APPLY"
-	}
-	fmt.Fprintf(&b, "requarantine (%s): %d evidence row(s) match the harness-corruption signatures; stamp quarantined=%q\n", mode, len(rep.Matched), stamp)
+	modeText := map[quarantineMode]string{
+		qDryRun:  "DRY RUN — nothing written; pass -apply to stamp",
+		qApplied: "APPLY",
+		qAborted: "APPLY ABORTED — nothing was written; the oracle is unchanged",
+	}[mode]
+	fmt.Fprintf(&b, "requarantine (%s): %d evidence row(s) match the harness-corruption signatures; stamp quarantined=%q\n", modeText, len(rep.Matched), stamp)
 	keys := make([]string, 0, len(rep.ByLaneModel))
 	for k := range rep.ByLaneModel {
 		keys = append(keys, k)
@@ -185,7 +241,11 @@ func (rep quarantineReport) render(stamp string, apply bool) string {
 		fmt.Fprintf(&b, "  %-9s %s → %s | %s → %s\n", l,
 			rep.Before[l].rate(), rep.After[l].rate(), rep.BeforeAgentic[l].rate(), rep.AfterAgentic[l].rate())
 	}
-	if len(rep.Matched) > 0 {
+	if rep.ExcludedStage > 0 || rep.ExcludedPostFix > 0 || rep.Undecodable > 0 {
+		fmt.Fprintf(&b, "  boundary: %d signature-carrying row(s) NOT selected — %d failed at another verifier stage, %d carry diff provenance (written under v0.40.4+, so an apply failure there is the model's); %d line(s) undecodable\n",
+			rep.ExcludedStage+rep.ExcludedPostFix, rep.ExcludedStage, rep.ExcludedPostFix, rep.Undecodable)
+	}
+	if len(rep.Matched) > 0 && mode != qAborted {
 		b.WriteString("  receipt: these rows become HOLES (never evidence, refilled by the next sweep at the same pin — no drift refusal). Applying withdraws every figure derived from them until re-measured, and every refill is a re-dispatch: a paid one on copilot (month credits) and a weekly-window one on codex.\n")
 	}
 	return b.String()
@@ -268,49 +328,76 @@ func oracleCommitted(path string) error {
 	return nil
 }
 
+// requarantineAfterRead is a test seam; production leaves it nil.
+var requarantineAfterRead func()
+
 // requarantineFile runs the selector and, with apply, rewrites the file via
-// write-temp-then-rename. The oracle is re-stat'ed immediately before the
-// rename and the apply ABORTS if its size or mtime moved: a sweep appending
-// between read and rename would otherwise lose its rows to the rename.
-func requarantineFile(path, stamp string, apply bool) (quarantineReport, error) {
+// write-temp-then-rename. Immediately before the rename the oracle is READ
+// BACK and compared to the bytes this rewrite was built from; the apply
+// ABORTS on any difference, because the rename would otherwise drop whatever
+// a live sweep appended in between.
+//
+// By IDENTITY (the bytes), not by size+mtime. A stat baseline has to be
+// taken either before or after the read, and either way there is a window
+// where a write is invisible to it — the ordering cannot be pinned by a test
+// because it is the window itself that differs. It also cannot see a
+// same-size in-place edit, or any change on a filesystem with a coarse
+// mtime. Re-reading removes the window and the ordering question together.
+func requarantineFile(path, stamp string, apply bool) (quarantineReport, string, error) {
 	in, err := os.ReadFile(path)
 	if err != nil {
-		return quarantineReport{}, err
+		return quarantineReport{}, "", err
 	}
-	st0, err := os.Stat(path)
-	if err != nil {
-		return quarantineReport{}, err
+	// Test seam (nil in production): the concurrent-writer guard is the one
+	// path here that can LOSE data, and a race is not reproducible on its
+	// own. Firing an append exactly here makes both orderings observable —
+	// stat-before-read aborts and keeps the appended row, stat-after-read
+	// sees a baseline that already includes it and renames the row away.
+	if requarantineAfterRead != nil {
+		requarantineAfterRead()
 	}
 	if err := looksLikeOracle(in); err != nil {
-		return quarantineReport{}, fmt.Errorf("%s: %w", filepath.Base(path), err)
+		return quarantineReport{}, "", fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}
 	rep := quarantineSelect(in)
 	if !apply || len(rep.Matched) == 0 {
-		return rep, nil
+		return rep, "", nil
 	}
 	if err := oracleCommitted(path); err != nil {
-		return rep, err
+		return rep, "", err
 	}
 	bak := path + ".bak-requarantine-" + strings.ReplaceAll(strings.ReplaceAll(stamp, "/", "_"), "\\", "_")
+	if _, err := os.Stat(bak); err == nil {
+		return rep, "", fmt.Errorf("backup %s already exists: a previous apply at this stamp left it behind; move or delete it first so this run cannot overwrite the older pre-state", filepath.Base(bak))
+	}
 	if err := os.WriteFile(bak, in, 0o644); err != nil {
-		return rep, fmt.Errorf("backup: %w", err)
+		return rep, "", fmt.Errorf("backup: %w", err)
+	}
+	// From here the backup exists only to describe a COMPLETED apply: every
+	// abort below removes it, so a .bak beside the oracle always means the
+	// rewrite happened.
+	abort := func(format string, args ...any) (quarantineReport, string, error) {
+		os.Remove(path + ".tmp")
+		os.Remove(bak)
+		return rep, "", fmt.Errorf(format, args...)
 	}
 	out, err := requarantine(in, rep, stamp)
 	if err != nil {
-		return rep, err
+		return abort("%v", err)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return rep, err
+		return abort("%v", err)
 	}
-	st1, err := os.Stat(path)
-	if err != nil || st1.Size() != st0.Size() || !st1.ModTime().Equal(st0.ModTime()) {
-		os.Remove(tmp)
-		return rep, fmt.Errorf("%s changed while the quarantine was being prepared (another process is writing it): nothing applied, re-run when the oracle is quiet", filepath.Base(path))
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		return abort("re-reading %s before the rename: %v", filepath.Base(path), err)
+	}
+	if !bytes.Equal(cur, in) {
+		return abort("%s changed while the quarantine was being prepared (%d bytes on disk vs the %d this rewrite was built from — another process is writing it): nothing applied, re-run when the oracle is quiet", filepath.Base(path), len(cur), len(in))
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return rep, fmt.Errorf("rename %s: %w", filepath.Base(tmp), err)
+		return abort("rename %s: %v", filepath.Base(tmp), err)
 	}
-	return rep, nil
+	return rep, bak, nil
 }
