@@ -77,6 +77,30 @@ type CodexFacts struct {
 	Has5h      bool
 	Models     map[string]CodexModelUsage
 	Additional []CodexAdditionalLimit
+	// Undecodable5h: the main allowance carried a short-span rate-limit
+	// window that yielded no 5h snapshot (null used_percent, zero reset_at,
+	// or an unrecognised span). Has5h is false in that case too, which is
+	// exactly why this fact is separate: absent and unreadable are not the
+	// same claim about the PLAN.
+	Undecodable5h bool
+}
+
+// Saw5hElsewhere reports whether the SAME response carried a 5h window in any
+// additional_rate_limits block (the checked-in prolite capture: the
+// GPT-5.3-Codex-Spark block has its own 5h + 7d). It is the corroboration
+// the codex_5h_estimate_off gate requires: a bare Has5h=false is the Plus
+// case Q10 protects (wham omitted a window it has), whereas "no 5h on the
+// main allowance while a sibling block in the same body reports one" is
+// wham demonstrably emitting 5h windows and choosing not to for this plan.
+func (f CodexFacts) Saw5hElsewhere() bool {
+	for _, a := range f.Additional {
+		for _, s := range a.Snapshots {
+			if s.Window == ledger.Win5h {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // PollCodex polls the unofficial wham usage endpoint as BEST-EFFORT EVIDENCE
@@ -118,21 +142,37 @@ func pollCodex(c *http.Client, baseURL, authPath string, now time.Time) Result {
 
 // windowSnapshots maps a wham rate_limit block onto 5h/7d snapshots by
 // limit_window_seconds (never by primary/secondary position).
-func windowSnapshots(rl codexRateLimit) ([]Snapshot, map[ledger.WindowKind]bool) {
+//
+// It returns TWO different facts about each window, and the difference is
+// load-bearing for the codex_5h_estimate_off gate: `seen` means "we decoded a
+// usable snapshot", `present` means "a block of that SPAN was in the body at
+// all". A window that is there but carries a null used_percent, a zero
+// reset_at, or a span we do not recognise is NOT seen — and reading that as
+// "this plan has no such window" is how a decoding failure becomes a
+// capacity decision.
+func windowSnapshots(rl codexRateLimit) ([]Snapshot, map[ledger.WindowKind]bool, bool) {
 	var out []Snapshot
 	seen := map[ledger.WindowKind]bool{}
+	shortPresent := false
 	for _, w := range []*codexWindow{rl.Primary, rl.Secondary} {
-		if w == nil || w.UsedPercent == nil || w.ResetAt <= 0 {
+		if w == nil {
 			continue
 		}
 		kind, ok := windowKindOf(w.LimitWindowSeconds)
-		if !ok {
-			continue // an unrecognized window span is not one of our buckets
+		// PRESENCE is judged before the payload, and an unrecognised span
+		// counts too: wham re-spanning the short window (5h → 3h or 8h)
+		// must read as "a short window exists and we cannot read it", never
+		// as "this plan has no short window".
+		if (ok && kind == ledger.Win5h) || (!ok && w.LimitWindowSeconds > 0 && w.LimitWindowSeconds < 24*3600) {
+			shortPresent = true
+		}
+		if w.UsedPercent == nil || w.ResetAt <= 0 || !ok {
+			continue
 		}
 		out = append(out, Snapshot{Lane: LaneCodex, Window: kind, UsedPct: *w.UsedPercent, ResetsAt: time.Unix(w.ResetAt, 0).UTC()})
 		seen[kind] = true
 	}
-	return out, seen
+	return out, seen, shortPresent
 }
 
 func pollCodexFacts(c *http.Client, baseURL, authPath string, now time.Time) (Result, CodexFacts) {
@@ -165,7 +205,7 @@ func pollCodexFacts(c *http.Client, baseURL, authPath string, now time.Time) (Re
 		r.Absences = append(r.Absences, Absence{Lane: LaneCodex, Window: "all", Reason: "parse_error"})
 		return r, CodexFacts{}
 	}
-	snaps, seen := windowSnapshots(u.RateLimit)
+	snaps, seen, shortPresent := windowSnapshots(u.RateLimit)
 	r.Snapshots = append(r.Snapshots, snaps...)
 	if !seen[ledger.Win5h] {
 		r.Absences = append(r.Absences, Absence{Lane: LaneCodex, Window: "5h", Reason: "window_omitted"})
@@ -173,9 +213,10 @@ func pollCodexFacts(c *http.Client, baseURL, authPath string, now time.Time) (Re
 	if !seen[ledger.Win7d] {
 		r.Absences = append(r.Absences, Absence{Lane: LaneCodex, Window: "7d", Reason: "window_omitted"})
 	}
-	facts := CodexFacts{PlanType: u.PlanType, Has5h: seen[ledger.Win5h], Models: u.ModelUsage}
+	facts := CodexFacts{PlanType: u.PlanType, Has5h: seen[ledger.Win5h], Models: u.ModelUsage,
+		Undecodable5h: shortPresent && !seen[ledger.Win5h]}
 	for _, a := range u.Additional {
-		as, _ := windowSnapshots(a.RateLimit)
+		as, _, _ := windowSnapshots(a.RateLimit)
 		facts.Additional = append(facts.Additional, CodexAdditionalLimit{Name: a.Name, Feature: a.Feature, Snapshots: as})
 	}
 	return r, facts

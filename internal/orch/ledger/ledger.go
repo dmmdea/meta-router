@@ -545,6 +545,47 @@ func (l *Ledger) SetCapacityEstimate(lane string, w WindowKind, capTokens int64)
 	b.CapSource = CapSourceEstimate
 }
 
+// ClearCapacity withdraws a NON-provider bucket's capacity so it can no
+// longer derive a percentage: CapTokens 0, CapSource cleared, CapVersion
+// bumped, UsedPct -1 (the addShadowLocked uncapped rule, RS4). ShadowTokens
+// and ResetsAt are KEPT — the shadow floor and the anchor are evidence, and
+// calib.Fit reads ShadowTokens, never CapTokens. A provider-sourced bucket is
+// untouched: the vendor's reading outranks any local capacity decision.
+//
+// Why a clear and not a "clear derived": addShadowLocked re-derives
+// UsedPct on EVERY subsequent dispatch whenever CapTokens > 0 and the window
+// is anchored, so resetting UsedPct alone is undone four lines later in the
+// same call; only an uncapped bucket stays at -1. It self-reverts: the
+// caller's seed (`CapTokens == 0` ⇒ re-seed the estimate) restores today's
+// behaviour the moment the caller stops clearing. Returns whether anything
+// changed.
+func (l *Ledger) ClearCapacity(lane string, w WindowKind, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.get(lane, "", w)
+	b.roll(now)
+	if b.Source == "provider" {
+		return false
+	}
+	// Only an ESTIMATE is withdrawn. A capacity that was FITTED from measured
+	// shadow usage is evidence, not a guess, and S2R-3's exhaust gate exists
+	// precisely because a fit is trustworthy enough to deny on; clearing it
+	// would remove that gate rather than a phantom brake.
+	if b.CapTokens != 0 && b.CapSource != CapSourceEstimate {
+		return false
+	}
+	if b.CapTokens == 0 && b.CapSource == "" && b.UsedPct == -1 {
+		return false
+	}
+	b.CapTokens = 0
+	b.CapSource = ""
+	b.CapVersion++
+	b.UsedPct = -1
+	b.Source = "shadow"
+	b.ObservedAt = now
+	return true
+}
+
 func (l *Ledger) Bucket(lane string, w WindowKind) (Bucket, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

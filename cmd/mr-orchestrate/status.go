@@ -334,7 +334,7 @@ func runStatus(args []string) error {
 	}
 	// Codex plan facts as last recorded by finishPolls (re-read from disk so
 	// this run's own poll, if it fired, is what renders).
-	st.CodexPlan = codexPlanStatus(loadPollState())
+	st.CodexPlan = codexPlanStatus(loadPollState(), cfg, now)
 	// GLM 1313 hard-stop latch: same passthrough — cleared only by
 	// `probe --ack-glm`.
 	if raw, err := os.ReadFile(glmAlertPath()); err == nil && json.Valid(raw) {

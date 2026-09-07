@@ -29,14 +29,20 @@ type pollState struct {
 	LastCodex  *time.Time `json:"last_codex,omitempty"`
 	// Codex plan facts from the last SUCCESSFUL default-subject wham poll
 	// (quotapoll.CodexFacts): plan type, whether a 5h window was reported,
-	// the models the plan lists, the models carrying their own limits.
-	// EVIDENCE for status/probe planning; nothing in admission reads it. An
-	// outage preserves the last facts (a failed fetch is not "no plan").
-	CodexPlan       string          `json:"codex_plan,omitempty"`
-	CodexHas5h      *bool           `json:"codex_has_5h,omitempty"`
-	CodexModels     map[string]bool `json:"codex_models,omitempty"`
-	CodexAdditional []string        `json:"codex_additional_limits,omitempty"`
-	CodexFactsAt    *time.Time      `json:"codex_facts_at,omitempty"`
+	// whether a 5h window appeared in a sibling additional-limits block of
+	// the same response, the models the plan lists, the models carrying
+	// their own limits. EVIDENCE for status/probe planning — and, since
+	// v0.40.6, the ONE admission-adjacent reader: codex5hEstimateGate reads
+	// CodexHas5h + CodexSaw5hElsewhere + CodexFactsAt (freshness) when the
+	// operator arms codex_5h_estimate_off. An outage preserves the last
+	// facts (a failed fetch is not "no plan").
+	CodexPlan           string          `json:"codex_plan,omitempty"`
+	CodexHas5h          *bool           `json:"codex_has_5h,omitempty"`
+	CodexSaw5hElsewhere *bool           `json:"codex_saw_5h_elsewhere,omitempty"`
+	CodexUndecodable5h  *bool           `json:"codex_undecodable_5h,omitempty"`
+	CodexModels         map[string]bool `json:"codex_models,omitempty"`
+	CodexAdditional     []string        `json:"codex_additional_limits,omitempty"`
+	CodexFactsAt        *time.Time      `json:"codex_facts_at,omitempty"`
 }
 
 func stampKey(lane, subject string) string {
@@ -303,6 +309,10 @@ func recordCodexFacts(ps *pollState, sf subjectFetch, now time.Time) {
 	ps.CodexPlan = f.PlanType
 	has := f.Has5h
 	ps.CodexHas5h = &has
+	saw := f.Saw5hElsewhere()
+	ps.CodexSaw5hElsewhere = &saw
+	und := f.Undecodable5h
+	ps.CodexUndecodable5h = &und
 	ps.CodexModels = map[string]bool{}
 	for m, u := range f.Models {
 		ps.CodexModels[m] = u.Available
@@ -319,21 +329,38 @@ func recordCodexFacts(ps *pollState, sf subjectFetch, now time.Time) {
 type CodexPlanStatus struct {
 	PlanType         string          `json:"plan_type"`
 	Has5hWindow      *bool           `json:"has_5h_window,omitempty"`
+	Saw5hElsewhere   *bool           `json:"saw_5h_elsewhere,omitempty"`  // a sibling additional-limits block of the same response carried a 5h window (v0.40.6 corroboration)
+	Undecodable5h    *bool           `json:"undecodable_5h,omitempty"`    // a short-window block was present but yielded no snapshot: unreadable, not absent
 	Models           map[string]bool `json:"models,omitempty"`
 	AdditionalLimits []string        `json:"additional_limits,omitempty"`
 	ObservedAt       *time.Time      `json:"observed_at,omitempty"`
-	Note             string          `json:"note"`
+	// The codex_5h_estimate_off gate as it would decide RIGHT NOW (v0.40.6):
+	// armed = the config knob; suppressing = all four legs hold; reason =
+	// the leg that decided, in the gate's own words. Rendered from the same
+	// function the dispatch path calls, so status and the receipt cannot
+	// disagree.
+	EstimateOffArmed       bool   `json:"estimate_off_armed"`
+	EstimateOffSuppressing bool   `json:"estimate_off_suppressing"`
+	EstimateOffReason      string `json:"estimate_off_reason"`
+	Note                   string `json:"note"`
 }
 
 // codexPlanStatus renders poll-state's codex facts; nil when none were ever
-// recorded (an absent block, not an empty one).
-func codexPlanStatus(ps pollState) *CodexPlanStatus {
-	if ps.CodexPlan == "" {
+// recorded (an absent block, not an empty one). cfg/now feed the gate view.
+func codexPlanStatus(ps pollState, cfg orchcfg.Config, now time.Time) *CodexPlanStatus {
+	// An ARMED knob always has a status surface, even with no facts at all:
+	// otherwise the operator arms it, sees no change, runs status, and gets
+	// no evidence the binary knows the knob exists — while the gate's own
+	// "poll first" reason is exactly the diagnostic for that state.
+	if ps.CodexPlan == "" && !cfg.Codex5hEstimateOff {
 		return nil
 	}
+	gate := codex5hEstimateGate(cfg, ps, now)
 	return &CodexPlanStatus{
-		PlanType: ps.CodexPlan, Has5hWindow: ps.CodexHas5h, Models: ps.CodexModels,
+		PlanType: ps.CodexPlan, Has5hWindow: ps.CodexHas5h, Saw5hElsewhere: ps.CodexSaw5hElsewhere,
+		Undecodable5h: ps.CodexUndecodable5h, Models: ps.CodexModels,
 		AdditionalLimits: ps.CodexAdditional, ObservedAt: ps.CodexFactsAt,
-		Note: "evidence from the wham usage poll (default subject); admission does not read it — a 5h window omitted by wham was unreliable on Plus (Q10), so has_5h_window=false is an observation, not proof",
+		EstimateOffArmed: cfg.Codex5hEstimateOff, EstimateOffSuppressing: gate.Suppress, EstimateOffReason: gate.Reason,
+		Note: "evidence from the wham usage poll (default subject); admission does not read it — a 5h window omitted by wham was unreliable on Plus (Q10), so has_5h_window=false is an observation, not proof; the ONE admission-adjacent reader is codex_5h_estimate_off (default off), which suppresses the 5h capacity estimate only when has_5h_window=false is corroborated by saw_5h_elsewhere on fresh facts",
 	}
 }

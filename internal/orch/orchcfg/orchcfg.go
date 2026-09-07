@@ -26,9 +26,37 @@ type Config struct {
 
 	// Lane tiers as config — §6b "upgrade is a number change". These are DATA
 	// about the operator's current plans, never constants of nature.
-	CodexUsagePoll         bool    `json:"codex_usage_poll"`         // W1: default ON as BEST-EFFORT EVIDENCE (Daniel 2026-07-23; Q10 caveats encoded in quotapoll)
-	CodexPlus5hCredits     float64 `json:"codex_plus_5h_credits"`    // default 40 (Plus 5h band 15–80, fact refresh)
-	CodexDegradationFactor float64 `json:"codex_degradation_factor"` // default 15 (10–20× observed, #28879)
+	CodexUsagePoll bool `json:"codex_usage_poll"` // W1: default ON as BEST-EFFORT EVIDENCE (Daniel 2026-07-23; Q10 caveats encoded in quotapoll)
+	// CodexPlus5hCredits is the 5h capacity ESTIMATE seeded on the codex lane
+	// when no provider 5h reading exists (default 40 = the Plus 5h band
+	// 15–80 at fact refresh). S2R-3: an estimate may throttle, never
+	// exhaust. On a plan whose vendor poll reports NO 5h window at all (Pro
+	// Lite, 2026-09-06: only the 7d main allowance) the estimate becomes a
+	// phantom brake — 585% modeled against a 27% vendor week — and
+	// codex_5h_estimate_off is the knob that suppresses it.
+	CodexPlus5hCredits float64 `json:"codex_plus_5h_credits"`
+	// Codex5hEstimateOff (default OFF, B8) suppresses the 5h capacity
+	// estimate ONLY when the recorded plan facts corroborate its absence:
+	// poll-state facts fresher than quota_stale_hours, has_5h_window=false
+	// AND a 5h window seen in an additional_rate_limits block of the same
+	// response (Saw5hElsewhere). A bare absence changes nothing (Q10). When
+	// armed and corroborated, the 5h bucket's capacity is cleared so its
+	// percentage stays -1 (unanchored/uncapped never derives, RS4); a
+	// provider snapshot still overrides, a real 429 still exhausts, and
+	// disarming re-seeds the estimate on the next dispatch. Arming is an
+	// operator act; flipping this default needs gold evidence measured under
+	// the v0.40.4+ replay instrument.
+	Codex5hEstimateOff bool `json:"codex_5h_estimate_off"`
+	// Codex5hEstimateOffPlans is the closed list of plan types MEASURED to
+	// have no 5h window at all; the gate refuses to suppress on any other
+	// plan, whatever the poll says. Q10 is about Plus, where wham omits a
+	// window the plan really has — and the corroboration leg cannot tell
+	// that apart, because a sibling model block reporting its own 5h says
+	// nothing about the main allowance. So the plan itself is a leg.
+	// Default ["prolite"] (the 2026-09-06 capture: only the 7d main
+	// allowance). Empty means the same as the knob being off.
+	Codex5hEstimateOffPlans []string `json:"codex_5h_estimate_off_plans"`
+	CodexDegradationFactor  float64  `json:"codex_degradation_factor"` // default 15 (10–20× observed, #28879)
 	// CodexWindowsSandbox is the native Windows sandbox mode seeded into every
 	// per-run CODEX_HOME ("elevated" recommended, "unelevated" fallback). Codex
 	// CLI >=0.153 rejects every shell command on Windows without one — the
@@ -252,7 +280,7 @@ const CopilotMinAiCredits int64 = 30
 func Defaults() Config {
 	return Config{
 		ClaudeBillingMode: BillingSubscription, OAuthUsagePoll: true,
-		CodexUsagePoll: true, CodexPlus5hCredits: 40, CodexDegradationFactor: 15, CodexWindowsSandbox: "elevated", GLM5hPrompts: 80,
+		CodexUsagePoll: true, CodexPlus5hCredits: 40, Codex5hEstimateOffPlans: []string{"prolite"}, CodexDegradationFactor: 15, CodexWindowsSandbox: "elevated", GLM5hPrompts: 80,
 		GLMPacing: true, GLMPaceMinSec: 20, GLMPaceJitterSec: 20,
 		CopilotMonthlyCredits: 1500, CopilotMaxAiCredits: 60, CopilotUsagePoll: true, CopilotReviewCredits: 25,
 		CopilotModel: CopilotDefaultModel, GLMRetired: true,
@@ -325,6 +353,11 @@ func Load(path string) Config {
 	}
 	if c.QuotaStaleHours == 0 {
 		c.QuotaStaleHours = 48
+	}
+	// An absent allowlist takes the measured default; an explicitly EMPTY
+	// list is a deliberate "no plan may suppress", which the gate honours.
+	if c.Codex5hEstimateOffPlans == nil {
+		c.Codex5hEstimateOffPlans = []string{"prolite"}
 	}
 	if c.LocalMaxPerMin == 0 {
 		c.LocalMaxPerMin = 20 // absent field / hand-edit zero → default; negative = explicitly off

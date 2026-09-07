@@ -81,12 +81,30 @@ func laneGate(bs []ledger.Bucket, lane string, now time.Time, th admission.Thres
 //
 // Returns the 5h UsedPct the ledger PREDICTED before this run's usage landed —
 // the burn-anomaly input (Task 4).
-func applyCodexOutcome(l *ledger.Ledger, o codexlane.Outcome, cfg orchcfg.Config, now time.Time) (predictedUsedPct float64) {
+func applyCodexOutcome(l *ledger.Ledger, o codexlane.Outcome, cfg orchcfg.Config, now time.Time, gate codex5hGate) (predictedUsedPct float64) {
 	predictedUsedPct = -1
 	if b, ok := l.Bucket("codex", ledger.Win5h); ok {
 		predictedUsedPct = b.UsedPct
 	}
-	if b, ok := l.Bucket("codex", ledger.Win5h); !ok || b.CapTokens == 0 {
+	if gate.Suppress {
+		// The 5h estimate is a phantom on this plan (corroborated absence):
+		// withdraw the capacity so the bucket cannot derive a percentage —
+		// AddShadow below keeps accumulating the floor, the anchor stays,
+		// a provider snapshot still overrides, ObserveLimit still exhausts.
+		// DISCLOSED, and stated at full strength: while this gate suppresses,
+		// codexlane.BurnAnomaly is disabled OUTRIGHT on the 5h window (it
+		// returns nothing for a negative prediction). Not merely "still
+		// inert": Bucket.roll zeroes ShadowTokens at every 5h reset, so under
+		// today's behaviour the prediction re-enters the 0–70% band at the
+		// start of every window — precisely where the latch fires on a real
+		// 429. Under suppression it is -1 forever, so a vendor 429 arriving
+		// at genuine headroom is never latched or surfaced, on every future
+		// window. S2R-3 names that latch as the compensating control, and
+		// arming this knob trades it away knowingly. What remains: a real
+		// 429 still EXHAUSTS through ObserveLimit, and the 7d window keeps
+		// its own brake.
+		l.ClearCapacity("codex", ledger.Win5h, now)
+	} else if b, ok := l.Bucket("codex", ledger.Win5h); !ok || b.CapTokens == 0 {
 		l.SetCapacityEstimate("codex", ledger.Win5h, int64(cfg.CodexPlus5hCredits*1000)) // millicredits
 	}
 	l.AnchorIfUnset("codex", ledger.Win7d, now.Add(7*24*time.Hour), now)
@@ -173,8 +191,9 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		return 1, err // config_error: bad args / version gate — never reached the binary
 	}
 	predicted := -1.0
+	gate := codex5hEstimateGate(cfg, loadPollState(), now)
 	warnIf(updateLedger(func(fresh *ledger.Ledger) {
-		predicted = applyCodexOutcome(fresh, o, cfg, now)
+		predicted = applyCodexOutcome(fresh, o, cfg, now, gate)
 	}), "ledger update (post-run)")
 	// Burn-anomaly latch (fact-refresh gap #6): a real veto at predicted
 	// headroom is a vendor-misfire signal — latch it visibly, never mutate
@@ -183,9 +202,12 @@ func runCodexLane(out io.Writer, prompt, model, effort, cwd string, timeoutSec i
 		fmt.Fprintln(os.Stderr, "WARN:", note)
 		warnIf(writeCodexAlert(codexAlertPath(), note, now), "codex alert latch")
 	}
+	// A silent suppression is itself a defect: the receipt names it, the
+	// plan, the corroborating window and its timestamp.
+	admitReason := codexAdmitReason(g.Reason, gate)
 	rec := dispatch.Record{
 		TS: now, Lane: "codex", Model: model, OutcomeClass: o.Class, RateLimitOrigin: upstreamRLO(o.Class, ""),
-		Admit: true, AdmitState: g.State, AdmitReason: g.Reason,
+		Admit: true, AdmitState: g.State, AdmitReason: admitReason,
 		TokensIn: o.Usage.Input, TokensOut: o.Usage.Output + o.Usage.ReasoningOutput,
 		NumTurns: o.Turns,
 		Origin:   origin, TaskClass: rf.TaskClass, RecLane: rf.RecLane, RecModel: rf.RecModel,
