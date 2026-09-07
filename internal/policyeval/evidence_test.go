@@ -29,9 +29,23 @@ func TestIsEvidence(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := IsEvidence(c.dispatched, c.class); got != c.want {
-				t.Fatalf("IsEvidence(%v, %q) = %v, want %v", c.dispatched, c.class, got, c.want)
+			if got := IsEvidence(c.dispatched, c.class, ""); got != c.want {
+				t.Fatalf("IsEvidence(%v, %q, \"\") = %v, want %v", c.dispatched, c.class, got, c.want)
 			}
 		})
+	}
+}
+
+// A quarantined row is a hole whatever its class says: the marker names the
+// instrument fix that proved the verdict was the harness's (v0.40.4).
+func TestIsEvidenceQuarantined(t *testing.T) {
+	if IsEvidence(true, "ok", "v0.40.4") {
+		t.Fatal("quarantined ok row must not be evidence")
+	}
+	if IsEvidence(true, "dispatched-not-ok", "v0.40.4") {
+		t.Fatal("quarantined dispatched-not-ok row must not be evidence")
+	}
+	if !IsEvidence(true, "ok", "") {
+		t.Fatal("an unquarantined ok row is evidence")
 	}
 }

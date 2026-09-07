@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,6 +73,11 @@ type Row struct {
 	// diff (trailing prose, a second diff, narration). Zero is omitted.
 	// Receipt-everything: a truncation that leaves no trace is a silent cap.
 	DiffTruncatedLines int `json:"diff_truncated_lines,omitempty"`
+	// Quarantined names the instrument fix that retroactively made this row
+	// a HOLE (-requarantine): the class stays as written, the row is no
+	// longer evidence, resume refills it. QuarantineReason says why.
+	Quarantined      string `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantine_reason,omitempty"`
 }
 
 // Diff provenance values (Row.DiffSource).
@@ -100,7 +106,7 @@ func rowKey(task, lane, model, effort string, trial int) string {
 // the B15 canary). Three drifting copies of the list are how error rows were
 // simultaneously "already recorded" and "not evidence" (review 2026-08-12).
 func rowIsEvidence(r Row) bool {
-	return policyeval.IsEvidence(r.Dispatched, r.OutcomeClass)
+	return policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined)
 }
 
 // cellKey identifies a cell WITHOUT its effort — the index the effort-drift
@@ -193,10 +199,27 @@ func loadDone(path string) resumeState {
 			continue
 		}
 		var r Row
-		if json.Unmarshal([]byte(line), &r) == nil && r.Task != "" && rowIsEvidence(r) {
+		if json.Unmarshal([]byte(line), &r) != nil || r.Task == "" {
+			continue
+		}
+		// A QUARANTINED row is a hole (not in the resume set: the next sweep
+		// refills it) that KEEPS ITS IDENTITY in the drift indexes: it was
+		// recorded at this model and effort, so refilling it at the same pin
+		// is a re-measurement, not a re-key. Without this, quarantining every
+		// gpt-6-astra row removed astra from modelsByIdent while terra/luna
+		// stayed, the model tier fired, and the next codex sweep died at
+		// os.Exit(2) before dispatching anything — including the unrelated
+		// cells it was launched for.
+		ev := rowIsEvidence(r)
+		if !ev && r.Quarantined == "" {
+			continue
+		}
+		{
 			lane, model := strings.TrimSpace(r.Lane), strings.TrimSpace(r.Model)
 			eff := policyeval.NormalizeEffort(r.Effort)
-			rs.done[rowKey(r.Task, lane, model, eff, r.Trial)] = true
+			if ev {
+				rs.done[rowKey(r.Task, lane, model, eff, r.Trial)] = true
+			}
 			ck := cellKey(r.Task, lane, model, r.Trial)
 			if rs.effortsByCell[ck] == nil {
 				rs.effortsByCell[ck] = map[string]bool{}
@@ -642,6 +665,10 @@ func main() {
 	for _, lane := range freelane.Lanes {
 		freeEffortFlags[lane] = flag.String(lane+"-effort", "", effortHelp(lane))
 	}
+	requarantinePath := flag.String("requarantine", "",
+		"quarantine the rows the pre-0.40.4 capture defect poisoned (git stderr / build caches in the candidate patch, recorded as model failures): prints the matched rows grouped by lane/model with per-lane pass rates before → after. DRY RUN unless -apply. Additive: stamps quarantined + quarantine_reason, never deletes a row or rewrites a class; quarantined rows are holes the next sweep refills at the same pin")
+	applyQuarantine := flag.Bool("apply", false, "with -requarantine: actually stamp the rows (requires the oracle committed clean in git; backup written beside it; aborts if the file changes while preparing)")
+	quarantineStamp := flag.String("quarantine-stamp", "v0.40.4", "with -requarantine: the value written to `quarantined` — the instrument version whose fix made these rows holes")
 	migrateEffortPath := flag.String("migrate-effort", "",
 		"MIGRATION MODE: stamp effort=\""+policyeval.EffortUnrecorded+"\" on every row of this oracle file that has none, then exit (idempotent; writes <path>.tmp and renames)")
 	timeoutSec := flag.Int("timeout", 900, "per-dispatch timeout (seconds)")
@@ -656,6 +683,34 @@ func main() {
 
 	// Migration is a pure file rewrite: it must not require a goldset, lanes or
 	// pins, and it must never dispatch anything.
+	if *applyQuarantine && *requarantinePath == "" {
+		fatal("-apply has no effect on its own: it gates -requarantine <oracle> only. Re-run with -requarantine, or drop -apply.")
+	}
+	if *requarantinePath != "" {
+		rep, bak, err := requarantineFile(*requarantinePath, *quarantineStamp, *applyQuarantine)
+		mode := qDryRun
+		switch {
+		case *applyQuarantine && err != nil:
+			mode = qAborted
+		case *applyQuarantine:
+			mode = qApplied
+		}
+		fmt.Print(rep.render(*quarantineStamp, mode))
+		if err != nil {
+			// NOT applied: the header says it, and so does the exit line —
+			// an -apply that fails after the report must never read like one
+			// that finished.
+			fatal("requarantine: NOT applied, the oracle is unchanged: %v", err)
+		}
+		if *applyQuarantine {
+			if len(rep.Matched) == 0 {
+				fmt.Printf("requarantine: nothing to stamp — 0 matching rows; %s was not opened for writing and no backup was made\n", *requarantinePath)
+			} else {
+				fmt.Printf("requarantine: %d row(s) stamped → %s (pre-state backup: %s)\n", len(rep.Matched), *requarantinePath, bak)
+			}
+		}
+		return
+	}
 	if *migrateEffortPath != "" {
 		changed, err := migrateEffortFile(*migrateEffortPath)
 		if err != nil {
@@ -1446,9 +1501,22 @@ func removeWorktree(repoPath, wt string) {
 	// the repo's .git/worktrees that only expires with gc, and a silent
 	// success here hides the handle leak that caused it.
 	rmErr := os.RemoveAll(wt)
-	fmt.Fprintf(os.Stderr, "warn: agent worktree %s: git worktree remove failed (%s); os.RemoveAll: %v\n",
-		wt, boundedText(stderr, err, 200), rmErrText(rmErr))
+	// Two different faults, two different messages: git REFUSED (err != nil),
+	// or git reported success and the tree is still on disk (a handle held
+	// it open). Saying "remove failed" for the second sends the reader after
+	// a git error that does not exist.
+	cause := fmt.Sprintf("git worktree remove failed (%s)", boundedText(stderr, err, 200))
+	if err == nil {
+		cause = "git worktree remove returned 0 but the tree is still on disk (a handle held it open)"
+	}
+	fmt.Fprintf(warnOut, "warn: agent worktree %s: %s; os.RemoveAll: %v\n",
+		wt, cause, rmErrText(rmErr))
 }
+
+// warnOut is where removeWorktree's warning goes — a variable so a test can
+// prove the warning is actually emitted (a warning with no seam is a
+// warning nothing can pin).
+var warnOut io.Writer = os.Stderr
 
 func rmErrText(err error) string {
 	if err == nil {

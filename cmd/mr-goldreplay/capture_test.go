@@ -10,6 +10,8 @@ package main
 // and the worktree hygiene — each with the mutation that would silence it.
 
 import (
+	"bytes"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -210,7 +212,7 @@ func TestHarnessCorruptedApplyIsHole(t *testing.T) {
 	applyFail := []byte(`{"task":"AC-02","pass":false,"detail":"git apply: exit status 128\nerror: corrupt patch at line 70"}`)
 	r := Row{Dispatched: true, OutcomeClass: "ok"}
 	applyVerifyOutcome(&r, applyFail, realExitError(t, 1), diffSourceWorktree)
-	if r.OutcomeClass != "verify_error" || r.VerifierPass || policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+	if r.OutcomeClass != "verify_error" || r.VerifierPass || policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 		t.Fatalf("worktree apply failure must be a hole: %+v", r)
 	}
 	if !strings.Contains(r.Note, "harness fault") || !strings.Contains(r.Note, "corrupt patch") {
@@ -219,7 +221,7 @@ func TestHarnessCorruptedApplyIsHole(t *testing.T) {
 	for _, src := range []string{diffSourcePrinted, diffSourceRaw, ""} {
 		r = Row{Dispatched: true, OutcomeClass: "ok"}
 		applyVerifyOutcome(&r, applyFail, realExitError(t, 1), src)
-		if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+		if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 			t.Fatalf("%q apply failure must stay a measured failure: %+v", src, r)
 		}
 		if !strings.HasPrefix(r.Note, "verify-fail: git apply") {
@@ -229,7 +231,7 @@ func TestHarnessCorruptedApplyIsHole(t *testing.T) {
 	testFail := []byte(`{"task":"AC-02","pass":false,"detail":"go test: exit status 1\n--- FAIL: TestX"}`)
 	r = Row{Dispatched: true, OutcomeClass: "ok"}
 	applyVerifyOutcome(&r, testFail, realExitError(t, 1), diffSourceWorktree)
-	if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+	if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 		t.Fatalf("worktree diff failing held-out tests is evidence: %+v", r)
 	}
 }
@@ -281,7 +283,7 @@ func TestReplayOneRecordsDiffProvenance(t *testing.T) {
 	t.Setenv("GOLDREPLAY_FAKE_VERIFY_STDOUT", `{"pass":false,"detail":"git apply: exit status 128\nerror: corrupt patch"}`)
 	t.Setenv("GOLDREPLAY_FAKE_VERIFY_EXIT", "1")
 	row = replayOne(task, cfg, 1, os.Args[0], os.Args[0], repos, 30, 10, "")
-	if row.OutcomeClass != "verify_error" || row.DiffSource != diffSourceWorktree || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass) {
+	if row.OutcomeClass != "verify_error" || row.DiffSource != diffSourceWorktree || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass, row.Quarantined) {
 		t.Fatalf("worktree apply failure must be a hole end to end: %+v", row)
 	}
 
@@ -294,7 +296,7 @@ func TestReplayOneRecordsDiffProvenance(t *testing.T) {
 	if row.OutcomeClass != "ok" || row.VerifierPass || row.DiffSource != diffSourcePrinted || row.DiffTruncatedLines != 2 {
 		t.Fatalf("printed case: %+v", row)
 	}
-	if !policyeval.IsEvidence(row.Dispatched, row.OutcomeClass) {
+	if !policyeval.IsEvidence(row.Dispatched, row.OutcomeClass, row.Quarantined) {
 		t.Fatalf("a printed patch that does not apply is the model's failure: %+v", row)
 	}
 
@@ -383,8 +385,14 @@ func TestGitOutTimeoutReturnsOnBlockingGit(t *testing.T) {
 			defer c.Close() // hold it open, never reply
 		}
 	}()
+	// WaitDelay is set WIDE here on purpose: with it at 4s a WaitDelay rescue
+	// cannot return before timeout+4s = 5s, so a bound of 3s is only
+	// satisfiable by a kill that actually reached the process holding the
+	// pipes. At the old 2s delay the rescue path returned at ~3s and passed
+	// the old 8s bound, so the test proved "returns eventually", not what
+	// its message claimed.
 	prev := gitWaitDelay
-	gitWaitDelay = 2 * time.Second
+	gitWaitDelay = 4 * time.Second
 	defer func() { gitWaitDelay = prev }()
 	start := time.Now()
 	_, _, err = gitOut(t.TempDir(), 1, "ls-remote", "git://"+ln.Addr().String()+"/x")
@@ -392,8 +400,11 @@ func TestGitOutTimeoutReturnsOnBlockingGit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "timeout after 1s") {
 		t.Fatalf("blocking git must report the timeout, got %v after %s", err, el)
 	}
-	if el > 8*time.Second {
-		t.Fatalf("gitOut returned only after %s — the kill did not reach the process that holds the pipes", el)
+	if el >= 1*time.Second+gitWaitDelay {
+		t.Fatalf("gitOut returned only after %s — that is the WaitDelay rescue (timeout 1s + delay %s), not a kill that reached the process holding the pipes", el, gitWaitDelay)
+	}
+	if el > 3*time.Second {
+		t.Fatalf("gitOut returned after %s — the kill reached the process but far too slowly", el)
 	}
 }
 
@@ -408,7 +419,26 @@ func TestGitOutWaitDelayReleasesHeldPipe(t *testing.T) {
 	gitWaitDelay = 2 * time.Second
 	defer func() { gitWaitDelay = prev }()
 	exe := filepath.ToSlash(os.Args[0])
-	t.Setenv("GOLDREPLAY_FAKE_HOLD", "1")
+	// The helper holds git's inherited stderr until WE release it: a fixed
+	// sleep outlived the test binary and made `go test` print a spurious
+	// unlinkat/Access-denied. Sentinel in the system temp dir, not
+	// t.TempDir(), because the helper inherits the cwd and outlives the body.
+	sentinel := filepath.Join(os.TempDir(), fmt.Sprintf("goldreplay-hold-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	if err := os.WriteFile(sentinel, []byte("hold"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOLDREPLAY_FAKE_HOLD", sentinel)
+	t.Cleanup(func() {
+		os.Remove(sentinel) // release it
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+			if _, err := os.Stat(sentinel + ".gone"); err == nil {
+				os.Remove(sentinel + ".gone")
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Errorf("the pipe-holder did not exit after the sentinel was removed: it would outlive the test binary")
+	})
 	done := make(chan error, 1)
 	start := time.Now()
 	go func() {
@@ -443,7 +473,7 @@ func TestReplayOneCaptureFailureIsHole(t *testing.T) {
 	t.Setenv("GOLDREPLAY_FAKE_ORCH_EXIT", "0")
 	t.Setenv("GOLDREPLAY_FAKE_ORCH_BREAK", "1")
 	row := replayOne(task, cfg, 1, os.Args[0], os.Args[0], "tr="+dir, 30, 10, "")
-	if row.OutcomeClass != "verify_error" || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass) {
+	if row.OutcomeClass != "verify_error" || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass, row.Quarantined) {
 		t.Fatalf("a failed capture must be a hole: %+v", row)
 	}
 	if !strings.HasPrefix(row.Note, "worktree capture: git add -N: ") || !strings.Contains(row.Note, "stderr:") {
@@ -491,17 +521,90 @@ func TestRemoveWorktreeFallsBackToRemoveAll(t *testing.T) {
 	dir, _ := newTempRepo(t)
 	stray := filepath.Join(t.TempDir(), "goldreplay-stray")
 	mustWrite(t, filepath.Join(stray, "f.txt"), []byte("x"))
+	var buf bytes.Buffer
+	prev := warnOut
+	warnOut = &buf
+	defer func() { warnOut = prev }()
 	removeWorktree(dir, stray)
 	if _, err := os.Stat(stray); !os.IsNotExist(err) {
 		t.Fatal("fallback must reclaim a tree git cannot remove")
 	}
+	// Reclaiming the files is not success: git left a stale admin entry and
+	// the warning is the only trace. A silent fallback hides the handle leak.
+	got := buf.String()
+	for _, want := range []string{"git worktree remove failed", stray, "stale admin entry"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the fallback must warn (%q missing): %q", want, got)
+		}
+	}
 }
 
-// boundedText: a cut is receipted and never lands mid-rune.
+// The other half of the branch: git returns 0 and the tree is STILL there (a
+// handle held it open). Saying "git worktree remove failed" there sends the
+// reader after an error that does not exist.
+func TestRemoveWorktreeWarnsWhenGitSucceedsButTreePersists(t *testing.T) {
+	dir, _ := newTempRepo(t)
+	wt := filepath.Join(t.TempDir(), "goldreplay-live")
+	if _, _, err := gitOut(dir, 60, "worktree", "add", "--detach", wt); err != nil {
+		t.Skipf("worktree add unavailable: %v", err)
+	}
+	// Re-create the directory the instant git removes it, so the post-remove
+	// stat sees a tree that persisted through a SUCCESSFUL git remove.
+	var buf bytes.Buffer
+	prev := warnOut
+	warnOut = &buf
+	defer func() { warnOut = prev }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			if _, err := os.Stat(wt); os.IsNotExist(err) {
+				os.MkdirAll(wt, 0o755)
+				os.WriteFile(filepath.Join(wt, "resurrected"), []byte("x"), 0o644)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	removeWorktree(dir, wt)
+	<-done
+	os.RemoveAll(wt)
+	if got := buf.String(); got != "" && !strings.Contains(got, "returned 0 but the tree is still on disk") && !strings.Contains(got, "git worktree remove failed") {
+		t.Fatalf("unexpected warning shape: %q", got)
+	}
+}
+
+// boundedText: a cut is receipted and never lands mid-rune. Swept across
+// every cut position through the multi-byte run — at max=20 the cut lands on
+// a rune START, so the backoff loop never iterates and deleting it stays
+// green. Only a max that cuts INSIDE 'ñ'/'ú' exercises it.
 func TestBoundedTextReceiptsTheCut(t *testing.T) {
-	s := boundedText([]byte("fatal: 'C:/tmp/ñandú/goldreplay-x' already exists\nsecond line"), nil, 20)
-	if !strings.Contains(s, "…(+") || !utf8.ValidString(s) {
-		t.Fatalf("cut must be marked and rune-safe: %q", s)
+	in := []byte("fatal: 'C:/tmp/ñandú/goldreplay-x' already exists\nsecond line")
+	full := "fatal: 'C:/tmp/ñandú/goldreplay-x' already exists | second line"
+	sawBackoff := false
+	for max := 14; max <= 30; max++ {
+		s := boundedText(in, nil, max)
+		if !utf8.ValidString(s) {
+			t.Fatalf("max=%d cut mid-rune: %q", max, s)
+		}
+		head, marker, ok := strings.Cut(s, "…(+")
+		if !ok || !strings.HasSuffix(marker, " bytes)") {
+			t.Fatalf("max=%d must be marked: %q", max, s)
+		}
+		if !strings.HasPrefix(full, head) {
+			t.Fatalf("max=%d head is not a prefix of the input: %q", max, head)
+		}
+		// The receipt counts the bytes actually dropped, and the backoff
+		// means head can be SHORTER than max — that is the mutant's tell.
+		if want := fmt.Sprintf("%d bytes)", len(full)-len(head)); !strings.HasSuffix(s, want) {
+			t.Fatalf("max=%d receipt must count the real cut (%s): %q", max, want, s)
+		}
+		if len(head) < max {
+			sawBackoff = true
+		}
+	}
+	if !sawBackoff {
+		t.Fatal("no cut position landed mid-rune: the sweep never exercised the backoff")
 	}
 	if got := boundedText([]byte("a\r\nb"), nil, 100); got != "a | b" {
 		t.Fatalf("lines fold: %q", got)

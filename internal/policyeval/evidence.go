@@ -23,8 +23,16 @@ import "strings"
 //     failure. Recording infrastructure faults as measured failures let a
 //     missing goldverify binary score an entire replay as incompetent.
 //   - any "exit-N" outcome
-func IsEvidence(dispatched bool, outcomeClass string) bool {
-	if !dispatched {
+//   - QUARANTINED (non-empty `quarantined` on the row): the row was recorded
+//     as measured, and a later instrument fix proved the harness, not the
+//     model, produced the verdict (v0.40.4: the replay spliced git's stderr
+//     into the candidate patch). The class is left as written — the marker
+//     is additive and names the fix — but the row is a hole from then on,
+//     refilled by the next sweep. Every consumer passes the field; a
+//     consumer decoding a subset without it would count quarantined rows as
+//     evidence, which is the three-drifting-copies hole in a new coat.
+func IsEvidence(dispatched bool, outcomeClass, quarantined string) bool {
+	if !dispatched || quarantined != "" {
 		return false
 	}
 	switch outcomeClass {

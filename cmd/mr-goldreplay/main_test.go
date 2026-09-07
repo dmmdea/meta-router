@@ -741,7 +741,7 @@ func TestApplyVerifyOutcome(t *testing.T) {
 	if r.VerifierPass || r.OutcomeClass != "ok" || !strings.Contains(r.Note, "verify-fail") {
 		t.Fatalf("exit 1 must be a measured failure with WHY in the note: %+v", r)
 	}
-	if !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+	if !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 		t.Fatal("a measured verify failure IS evidence")
 	}
 
@@ -750,7 +750,7 @@ func TestApplyVerifyOutcome(t *testing.T) {
 	if r.OutcomeClass != "verify_error" {
 		t.Fatalf("an unexpected verifier exit must be verify_error, got %+v", r)
 	}
-	if policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+	if policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 		t.Fatal("verifier infrastructure failure must be a HOLE, not evidence")
 	}
 
