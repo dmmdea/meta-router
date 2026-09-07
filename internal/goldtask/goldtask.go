@@ -28,6 +28,12 @@ type Key struct {
 	Pattern string `json:"pattern"`
 }
 
+// StageGitApply is the verdict-detail stage label mr-goldverify writes when
+// the candidate diff fails to apply ("git apply: <err>" newline "<tail>"). mr-goldreplay
+// keys its worktree-vs-printed anti-laundering rule on it; ONE constant so a
+// relabel on the producer side cannot silently disable the consumer.
+const StageGitApply = "git apply"
+
 // VerifySpec is a task's programmatic verifier.
 type VerifySpec struct {
 	Kind         string   `json:"kind"`                    // pure | vgo | vpy | vpester

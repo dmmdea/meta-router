@@ -20,6 +20,7 @@ package main
 // (review round 4).
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
 	"github.com/dmmdea/meta-router/internal/policyeval"
@@ -49,22 +51,73 @@ func TestMain(m *testing.M) {
 	// and script its stdout + exit code through the environment, so the real
 	// dispatch → decode → annotate → return path runs end to end with no lane
 	// binary and no spend.
+	// Pipe-holder mode: a git `ext::` remote helper that never answers and
+	// never exits on its own — a child of the real git that inherits its
+	// stderr, the WaitDelay scenario (a hook behaves the same way).
+	if os.Getenv("GOLDREPLAY_FAKE_HOLD") != "" {
+		time.Sleep(8 * time.Second) // longer than the test's bound, short enough to be gone soon after
+		os.Exit(0)
+	}
 	if fixture := os.Getenv("GOLDREPLAY_FAKE_ORCH_STDOUT"); fixture != "" {
 		// Fake-VERIFIER mode: replayOne spawns the verifier with `-patch`,
 		// which the orchestrator argv never carries. Scripted the same way.
 		if hasArg(os.Args, "-patch") {
+			// GOLDREPLAY_FAKE_VERIFY_EXPECT: the patch handed to the verifier
+			// must contain this text, or the fake fails the way goldverify
+			// would — so the worktree case proves the agent's edit actually
+			// reached the verifier, not just that some diff did.
+			if want := os.Getenv("GOLDREPLAY_FAKE_VERIFY_EXPECT"); want != "" {
+				b, err := os.ReadFile(argAfter(os.Args, "-patch"))
+				if err != nil || !strings.Contains(string(b), want) {
+					fmt.Printf(`{"pass":false,"detail":"fake verifier: patch lacks %q (read err %v)"}`, want, err)
+					os.Exit(1)
+				}
+			}
 			fmt.Print(os.Getenv("GOLDREPLAY_FAKE_VERIFY_STDOUT"))
-			code, _ := strconv.Atoi(os.Getenv("GOLDREPLAY_FAKE_VERIFY_EXIT"))
+			code, err := strconv.Atoi(os.Getenv("GOLDREPLAY_FAKE_VERIFY_EXIT"))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "fake verifier: bad GOLDREPLAY_FAKE_VERIFY_EXIT:", err)
+				os.Exit(7)
+			}
 			os.Exit(code)
 		}
 		// A tool-enabled agent edits files IN PLACE: "name=content" written
 		// into the -cwd the replay handed us, so the worktree capture path
-		// runs for real (a real git, a real diff) with no lane binary.
+		// runs for real (a real git, a real diff) with no lane binary. A
+		// fixture write failure exits 7 loudly: swallowed, it would read as
+		// "the agent printed nothing", a misleading diagnosis.
 		if w := os.Getenv("GOLDREPLAY_FAKE_ORCH_WRITE"); w != "" {
 			name, content, _ := strings.Cut(w, "=")
+			// "hex:…" carries bytes an environment value cannot (NUL — the
+			// Windows setenv rejects it), for binary fixtures.
+			if h, ok := strings.CutPrefix(content, "hex:"); ok {
+				b, err := hex.DecodeString(h)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "fake orchestrator: hex:", err)
+					os.Exit(7)
+				}
+				content = string(b)
+			}
 			if cwd := argAfter(os.Args, "-cwd"); cwd != "" {
-				_ = os.MkdirAll(filepath.Dir(filepath.Join(cwd, name)), 0o755)
-				_ = os.WriteFile(filepath.Join(cwd, name), []byte(content), 0o644)
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(cwd, name)), 0o755); err != nil {
+					fmt.Fprintln(os.Stderr, "fake orchestrator: mkdir:", err)
+					os.Exit(7)
+				}
+				if err := os.WriteFile(filepath.Join(cwd, name), []byte(content), 0o644); err != nil {
+					fmt.Fprintln(os.Stderr, "fake orchestrator: write:", err)
+					os.Exit(7)
+				}
+			}
+		}
+		// GOLDREPLAY_FAKE_ORCH_BREAK: the agent wrecks its own worktree
+		// (removes the .git gitfile), so the capture's git fails — the
+		// capture-failure hole at the replayOne seam.
+		if os.Getenv("GOLDREPLAY_FAKE_ORCH_BREAK") != "" {
+			if cwd := argAfter(os.Args, "-cwd"); cwd != "" {
+				if err := os.Remove(filepath.Join(cwd, ".git")); err != nil {
+					fmt.Fprintln(os.Stderr, "fake orchestrator: break:", err)
+					os.Exit(7)
+				}
 			}
 		}
 		fmt.Print(fixture)

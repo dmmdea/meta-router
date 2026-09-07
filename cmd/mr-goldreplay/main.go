@@ -29,8 +29,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
 	"github.com/dmmdea/meta-router/internal/orch/childenv"
@@ -352,9 +354,15 @@ func truncateDiffN(d string) (string, int) {
 		}
 		out = append(out, line)
 	}
-	cut := len(lines) - len(out)
-	if cut > 0 && strings.TrimSpace(strings.Join(lines[len(out):], "\n")) == "" {
-		cut = 0 // only a trailing newline / blank tail: nothing of substance was cut
+	// The receipt counts SUBSTANTIVE lines cut: blank separators and the
+	// empty element strings.Split leaves after a trailing newline are not
+	// content, and counting them made the same narration yield a different
+	// number depending on how the stream ended.
+	cut := 0
+	for _, l := range lines[len(out):] {
+		if strings.TrimSpace(l) != "" {
+			cut++
+		}
 	}
 	return strings.Join(out, "\n"), cut
 }
@@ -426,14 +434,17 @@ func capturePathspec() []string {
 // output", which is SCORED). An empty diff with a nil error is the fail-open
 // case: the agent printed its diff instead, and the caller falls through.
 func captureWorktreeDiff(cwd string, timeoutSec int) (string, error) {
+	// Notes carry the ERROR first, then the bounded stderr: under the live
+	// autocrlf/safecrlf=warn shape stderr begins with CRLF warnings, and a
+	// first-line note would name the warning instead of the failure.
 	addArgs := append([]string{"add", "-N"}, capturePathspec()...)
 	if _, stderr, err := gitOut(cwd, timeoutSec, addArgs...); err != nil {
-		return "", fmt.Errorf("git add -N: %s", firstLine(stderr, err))
+		return "", fmt.Errorf("git add -N: %v; stderr: %s", err, boundedText(stderr, nil, 240))
 	}
 	diffArgs := append([]string{"diff", "HEAD"}, capturePathspec()...)
 	stdout, stderr, err := gitOut(cwd, timeoutSec, diffArgs...)
 	if err != nil {
-		return "", fmt.Errorf("git diff HEAD: %s", firstLine(stderr, err))
+		return "", fmt.Errorf("git diff HEAD: %v; stderr: %s", err, boundedText(stderr, nil, 240))
 	}
 	if len(strings.TrimSpace(string(stdout))) == 0 {
 		return "", nil
@@ -1170,7 +1181,7 @@ func applyStageFailure(vOut []byte) bool {
 	var v struct {
 		Detail string `json:"detail"`
 	}
-	return json.Unmarshal(vOut, &v) == nil && strings.HasPrefix(v.Detail, "git apply:")
+	return json.Unmarshal(vOut, &v) == nil && strings.HasPrefix(v.Detail, goldtask.StageGitApply+":")
 }
 
 // applyVerifyOutcome folds mr-goldverify's process result into the row.
@@ -1335,10 +1346,20 @@ func gitOut(dir string, timeoutSec int, args ...string) (stdout, stderr []byte, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitExe(), args...)
 	cmd.Dir = dir
+	// git runs the repo's hooks with this environment; scrubbed like every
+	// other spawn here (B13, R10).
+	cmd.Env = childenv.Scrub(os.Environ())
 	var so, se bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &so, &se
+	// WaitDelay: after the kill, Wait must not block on a child that still
+	// holds the inherited stdout/stderr pipe (a hook, or the Git for Windows
+	// launcher's real git). Without it the timeout mapping below is
+	// unreachable — the replay hangs at the cell with no row and no note,
+	// the most silent shape possible (review 2026-09-07, reproduced against
+	// C:\Program Files\Git\cmd\git.exe). Same precedent as the lane runners.
+	cmd.WaitDelay = gitWaitDelay
 	err = cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("git %s: timeout after %ds", strings.Join(args, " "), timeoutSec)
@@ -1346,15 +1367,49 @@ func gitOut(dir string, timeoutSec int, args ...string) (stdout, stderr []byte, 
 	return so.Bytes(), se.Bytes(), err
 }
 
+// gitWaitDelay bounds Wait after a context kill; a variable so the timeout
+// test can shorten it.
+var gitWaitDelay = 10 * time.Second
+
+// gitExe resolves git ONCE. On Windows the PATH entry is the Git for Windows
+// LAUNCHER (cmd\git.exe), which spawns the real mingw64\bin\git.exe as a
+// child: a context kill stops the launcher and orphans the real git, which
+// keeps running — holding the agent worktree's handles — and keeps the pipes
+// open. Substituting the real binary when it sits beside the launcher makes
+// the kill reach the process that does the work (measured: the mingw64
+// binary returns at the deadline, the launcher hangs past it).
+var gitExe = func() func() string {
+	var once sync.Once
+	resolved := "git"
+	return func() string {
+		once.Do(func() {
+			p, err := exec.LookPath("git")
+			if err != nil {
+				return
+			}
+			resolved = p
+			dir, base := filepath.Split(p)
+			if strings.EqualFold(base, "git.exe") && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cmd") {
+				real := filepath.Join(filepath.Dir(filepath.Clean(dir)), "mingw64", "bin", "git.exe")
+				if st, err := os.Stat(real); err == nil && !st.IsDir() {
+					resolved = real
+				}
+			}
+		})
+		return resolved
+	}
+}()
+
 // cellNonce makes one cell's temp paths unique to THIS process and moment:
 // two sweeps replaying the same (task,lane,trial) — or a rerun after a
 // killed sweep left its tree behind — collided on the old deterministic
 // path (`worktree add` → "already exists"), and `defer os.Remove(pf)` on
 // the same-keyed candidate-diff path let one sweep delete the patch another
 // was about to verify (A3, 2026-09-06).
-func cellNonce() string {
+var cellNonce = func() string {
 	// pid + clock + a process counter: the Windows clock hands two
-	// back-to-back calls the same nanosecond (measured in the test).
+	// back-to-back calls the same nanosecond (measured in the test). A
+	// variable so a test can pin the path and pre-create it.
 	return fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), atomic.AddUint64(&nonceSeq, 1))
 }
 
@@ -1386,9 +1441,20 @@ func removeWorktree(repoPath, wt string) {
 			return
 		}
 	}
-	if rmErr := os.RemoveAll(wt); rmErr != nil {
-		fmt.Fprintf(os.Stderr, "warn: agent worktree %s not reclaimed: git: %s; remove: %v\n", wt, firstLine(stderr, err), rmErr)
+	// git failed (or left the tree): say so even when RemoveAll then
+	// succeeds — a failed `worktree remove` leaves a stale admin entry under
+	// the repo's .git/worktrees that only expires with gc, and a silent
+	// success here hides the handle leak that caused it.
+	rmErr := os.RemoveAll(wt)
+	fmt.Fprintf(os.Stderr, "warn: agent worktree %s: git worktree remove failed (%s); os.RemoveAll: %v\n",
+		wt, boundedText(stderr, err, 200), rmErrText(rmErr))
+}
+
+func rmErrText(err error) string {
+	if err == nil {
+		return "reclaimed the files (a stale admin entry may remain in .git/worktrees)"
 	}
+	return "FAILED: " + err.Error()
 }
 
 // boundedText renders a captured stream for a note, whole (newlines folded
@@ -1400,7 +1466,13 @@ func boundedText(b []byte, err error, max int) string {
 		s = err.Error()
 	}
 	if len(s) > max {
-		s = s[:max]
+		// Cut on a rune boundary (git quotes non-ASCII paths) and SAY how
+		// much was cut — a bare truncation is a silent cap.
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + fmt.Sprintf("…(+%d bytes)", len(s)-cut)
 	}
 	return s
 }
