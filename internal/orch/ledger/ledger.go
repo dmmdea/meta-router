@@ -567,6 +567,13 @@ func (l *Ledger) ClearCapacity(lane string, w WindowKind, now time.Time) bool {
 	if b.Source == "provider" {
 		return false
 	}
+	// Only an ESTIMATE is withdrawn. A capacity that was FITTED from measured
+	// shadow usage is evidence, not a guess, and S2R-3's exhaust gate exists
+	// precisely because a fit is trustworthy enough to deny on; clearing it
+	// would remove that gate rather than a phantom brake.
+	if b.CapTokens != 0 && b.CapSource != CapSourceEstimate {
+		return false
+	}
 	if b.CapTokens == 0 && b.CapSource == "" && b.UsedPct == -1 {
 		return false
 	}

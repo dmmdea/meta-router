@@ -31,8 +31,31 @@ func TestFinishPollsRecordsCodexPlanFacts(t *testing.T) {
 	if got.CodexSaw5hElsewhere == nil || !*got.CodexSaw5hElsewhere {
 		t.Fatalf("the sibling 5h window must be recorded as corroboration: %+v", got)
 	}
+	// The negative half of the same record: this capture's main allowance
+	// carried NO short-window block, so "unreadable" is false. Without an
+	// assertion here, recordCodexFacts could hardcode either gate input.
+	if got.CodexUndecodable5h == nil || *got.CodexUndecodable5h {
+		t.Fatalf("a clean absence must record undecodable_5h=false, not nil: %+v", got.CodexUndecodable5h)
+	}
+	// And the POSITIVE case, or the field could simply be hardcoded false:
+	// a poll whose main allowance carried an unreadable short window must
+	// record it, because that is the input the gate refuses on.
+	undFacts := facts
+	undFacts.Undecodable5h = true
+	ps2 := loadPollState()
+	finishPolls(pollFetch{subjects: []subjectFetch{{Lane: "codex", Subject: "default", Origin: "wham_poll", OK: true, CodexFacts: &undFacts}}}, &ps2, now.Add(time.Minute))
+	if u := loadPollState().CodexUndecodable5h; u == nil || !*u {
+		t.Fatalf("an unreadable short window must be recorded as such: %+v", u)
+	}
+	armedCfg := orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true, Codex5hEstimateOffPlans: []string{"prolite"}}
+	if g := codex5hEstimateGate(armedCfg, loadPollState(), now.Add(2*time.Minute)); g.Suppress {
+		t.Fatalf("and the gate must refuse on it: %+v", g)
+	}
 	// Status view, knob OFF (the default): facts rendered, corroboration
 	// rendered, gate reported as not armed and not suppressing.
+	armed := func() orchcfg.Config {
+		return orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true, Codex5hEstimateOffPlans: []string{"prolite"}}
+	}
 	st := codexPlanStatus(got, orchcfg.Config{QuotaStaleHours: 6}, now.Add(time.Minute))
 	if st == nil || st.PlanType != "prolite" || st.Has5hWindow == nil || *st.Has5hWindow || st.AdditionalLimits[0] != "GPT-5.3-Codex-Spark" || st.Note == "" {
 		t.Fatalf("status view: %+v", st)
@@ -45,13 +68,13 @@ func TestFinishPollsRecordsCodexPlanFacts(t *testing.T) {
 	}
 	// Knob ON with fresh, corroborated facts: status reports the suppression
 	// with the SAME reason text the dispatch receipt carries (one function).
-	on := codexPlanStatus(got, orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true}, now.Add(time.Minute))
-	want := codex5hEstimateGate(orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true}, got, now.Add(time.Minute))
+	on := codexPlanStatus(got, armed(), now.Add(time.Minute))
+	want := codex5hEstimateGate(armed(), got, now.Add(time.Minute))
 	if !on.EstimateOffArmed || !on.EstimateOffSuppressing || !want.Suppress || on.EstimateOffReason != want.Reason || !strings.Contains(on.EstimateOffReason, "suppressed") {
 		t.Fatalf("knob on: gate view must mirror the gate: %+v vs %+v", on, want)
 	}
 	// Knob ON but stale facts: armed, NOT suppressing, and the reason names staleness.
-	stale := codexPlanStatus(got, orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true}, now.Add(7*time.Hour))
+	stale := codexPlanStatus(got, armed(), now.Add(7*time.Hour))
 	if !stale.EstimateOffArmed || stale.EstimateOffSuppressing || !strings.Contains(stale.EstimateOffReason, "stale") {
 		t.Fatalf("knob on + stale: %+v", stale)
 	}
