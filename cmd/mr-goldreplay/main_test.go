@@ -731,13 +731,13 @@ func TestApplyVerifyOutcome(t *testing.T) {
 	base := func() Row { return Row{Task: "T-01", Dispatched: true, OutcomeClass: "ok"} }
 
 	r := base()
-	applyVerifyOutcome(&r, []byte(`{"pass":true}`), nil)
+	applyVerifyOutcome(&r, []byte(`{"pass":true}`), nil, "")
 	if !r.VerifierPass || r.OutcomeClass != "ok" {
 		t.Fatalf("exit 0 must be a measured pass: %+v", r)
 	}
 
 	r = base()
-	applyVerifyOutcome(&r, []byte(`{"detail":"held-out test failed"}`), realExitError(t, 1))
+	applyVerifyOutcome(&r, []byte(`{"detail":"held-out test failed"}`), realExitError(t, 1), "")
 	if r.VerifierPass || r.OutcomeClass != "ok" || !strings.Contains(r.Note, "verify-fail") {
 		t.Fatalf("exit 1 must be a measured failure with WHY in the note: %+v", r)
 	}
@@ -746,7 +746,7 @@ func TestApplyVerifyOutcome(t *testing.T) {
 	}
 
 	r = base()
-	applyVerifyOutcome(&r, []byte("git: bad -repos path"), realExitError(t, 2))
+	applyVerifyOutcome(&r, []byte("git: bad -repos path"), realExitError(t, 2), "")
 	if r.OutcomeClass != "verify_error" {
 		t.Fatalf("an unexpected verifier exit must be verify_error, got %+v", r)
 	}
@@ -759,7 +759,7 @@ func TestApplyVerifyOutcome(t *testing.T) {
 	if spawnErr == nil {
 		t.Fatal("expected a spawn error")
 	}
-	applyVerifyOutcome(&r, nil, spawnErr)
+	applyVerifyOutcome(&r, nil, spawnErr, "")
 	if r.OutcomeClass != "verify_error" || !strings.Contains(r.Note, "goldverify:") {
 		t.Fatalf("a missing verifier binary must be verify_error: %+v", r)
 	}

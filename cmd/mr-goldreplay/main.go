@@ -19,6 +19,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,7 +29,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dmmdea/meta-router/internal/goldtask"
 	"github.com/dmmdea/meta-router/internal/orch/childenv"
@@ -53,7 +58,29 @@ type Row struct {
 	VerifierPass bool   `json:"verifier_pass"`
 	LatencyMs    int64  `json:"latency_ms"`
 	Note         string `json:"note,omitempty"`
+	// DiffSource records WHERE the candidate diff came from: worktree (the
+	// agent edited files in place and `git diff HEAD` captured them),
+	// printed-decoded (decoded from the lane's structured stdout),
+	// printed-raw (cut from the raw stream) or none (no diff at all). It is
+	// set only where that branch actually yielded a non-empty diff. ABSENT
+	// MEANS UNKNOWN, never "worktree": rows written before v0.40.4 carry no
+	// provenance, and the AC-02/AC-08 astra cells are unattributable for
+	// exactly that reason (B6). Not part of rowKey — resume must not re-key
+	// on it (pinned by TestIntegrationDiffSourceDoesNotRekeyResume).
+	DiffSource string `json:"diff_source,omitempty"`
+	// DiffTruncatedLines counts the lines truncateDiff cut from a PRINTED
+	// diff (trailing prose, a second diff, narration). Zero is omitted.
+	// Receipt-everything: a truncation that leaves no trace is a silent cap.
+	DiffTruncatedLines int `json:"diff_truncated_lines,omitempty"`
 }
+
+// Diff provenance values (Row.DiffSource).
+const (
+	diffSourceWorktree = "worktree"
+	diffSourcePrinted  = "printed-decoded"
+	diffSourceRaw      = "printed-raw"
+	diffSourceNone     = "none"
+)
 
 // rowKey identifies an oracle cell. MODEL AND EFFORT ARE PART OF THE IDENTITY:
 // a mandatory pin that is not in the key is a no-op, because resume then treats
@@ -297,14 +324,21 @@ func extractDiff(text string) string {
 // truncateDiff cuts a printed diff at the first line that violates unified-diff
 // grammar (agents narrate after the final hunk; git apply calls that corrupt).
 func truncateDiff(d string) string {
+	out, _ := truncateDiffN(d)
+	return out
+}
+
+// truncateDiffN is truncateDiff with a receipt: the number of lines it cut.
+func truncateDiffN(d string) (string, int) {
 	if d == "" {
-		return ""
+		return "", 0
 	}
 	prefixes := []string{"diff --git", "index ", "--- ", "+++ ", "@@ ", "+", "-", " ",
 		"new file mode", "deleted file mode", "old mode", "new mode", "similarity ",
 		"rename ", "copy ", "Binary files", "\\ No newline"}
+	lines := strings.Split(d, "\n")
 	var out []string
-	for _, line := range strings.Split(d, "\n") {
+	for _, line := range lines {
 		if line == "" { // blank lines end a printed diff (context lines keep their leading space)
 			break
 		}
@@ -320,7 +354,102 @@ func truncateDiff(d string) string {
 		}
 		out = append(out, line)
 	}
-	return strings.Join(out, "\n")
+	// The receipt counts SUBSTANTIVE lines cut: blank separators and the
+	// empty element strings.Split leaves after a trailing newline are not
+	// content, and counting them made the same narration yield a different
+	// number depending on how the stream ended.
+	cut := 0
+	for _, l := range lines[len(out):] {
+		if strings.TrimSpace(l) != "" {
+			cut++
+		}
+	}
+	return strings.Join(out, "\n"), cut
+}
+
+// patchGrammarViolation scans a WORKTREE-captured patch for a line that is
+// not unified-diff grammar. The capture is `git diff HEAD` stdout, so every
+// line is a header, a hunk marker, a +/-/space content line or a
+// "\ No newline" note — anything else is OUR machinery writing into the
+// patch (the 2026-09-06 shape: git's CRLF warnings on the combined stream
+// spliced mid-hunk, which then applied at exit 0 and wrote git's own
+// warning text into a source file, producing a genuine-looking compile
+// failure with no error in the note). A "Binary files" stanza is rejected
+// too: the capture carries no --binary payload, so it cannot be re-applied
+// and would fail at the verifier as a model failure. It scans the WHOLE
+// stream, not the leading edge — leading junk applies at exit 0 and mid-hunk
+// junk is the fatal one. Returns the offending line ("" = clean).
+func patchGrammarViolation(diff string) string {
+	prefixes := []string{"diff --git ", "index ", "--- ", "+++ ", "@@ ", "+", "-", " ",
+		"new file mode", "deleted file mode", "old mode", "new mode", "similarity index",
+		"dissimilarity index", "rename from", "rename to", "copy from", "copy to", "\\ No newline"}
+	for _, line := range strings.Split(diff, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "Binary files ") {
+			return line
+		}
+		ok := false
+		for _, p := range prefixes {
+			if strings.HasPrefix(line, p) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return line
+		}
+	}
+	return ""
+}
+
+// captureExcludes is the DENY-list of build junk an agent's tool calls leave
+// in its worktree: `go test`/`go build` caches redirected into the tree,
+// Python caches, venvs, node_modules. Excluding them at the pathspec keeps
+// their binary objects out of the candidate patch. A deny-list, never an
+// extension allowlist: AC-06/AC-07 require creating untracked non-source
+// fixtures (`internal/catalog/testdata/*.md`), so a `.go`-only filter would
+// make those cells structurally unpassable forever.
+var captureExcludes = []string{".go-cache", ".gocache", ".go-build-cache", ".cache",
+	"__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "node_modules"}
+
+// capturePathspec is `-- . :(exclude)...` for both capture calls: the
+// root-level name and the same name at any depth.
+func capturePathspec() []string {
+	ps := []string{"--", "."}
+	for _, x := range captureExcludes {
+		ps = append(ps, ":(exclude)"+x, ":(exclude,glob)**/"+x+"/**")
+	}
+	return ps
+}
+
+// captureWorktreeDiff is the candidate-diff capture at the worktree seam:
+// `git add -N` (so new files are diffable) then `git diff HEAD`, stdout
+// ONLY, both timed. Non-nil error = OUR machinery failed (a hole, never a
+// scored row): add -N failed or timed out (a ctx-killed add -N leaves new
+// files untracked — a silently truncated patch), or the diff failed or
+// timed out (the old code's `err == nil` guard fell through to "no diff in
+// output", which is SCORED). An empty diff with a nil error is the fail-open
+// case: the agent printed its diff instead, and the caller falls through.
+func captureWorktreeDiff(cwd string, timeoutSec int) (string, error) {
+	// Notes carry the ERROR first, then the bounded stderr: under the live
+	// autocrlf/safecrlf=warn shape stderr begins with CRLF warnings, and a
+	// first-line note would name the warning instead of the failure.
+	addArgs := append([]string{"add", "-N"}, capturePathspec()...)
+	if _, stderr, err := gitOut(cwd, timeoutSec, addArgs...); err != nil {
+		return "", fmt.Errorf("git add -N: %v; stderr: %s", err, boundedText(stderr, nil, 240))
+	}
+	diffArgs := append([]string{"diff", "HEAD"}, capturePathspec()...)
+	stdout, stderr, err := gitOut(cwd, timeoutSec, diffArgs...)
+	if err != nil {
+		return "", fmt.Errorf("git diff HEAD: %v; stderr: %s", err, boundedText(stderr, nil, 240))
+	}
+	if len(strings.TrimSpace(string(stdout))) == 0 {
+		return "", nil
+	}
+	return string(stdout), nil // RAW bytes — git apply needs the trailing newline
 }
 
 // decodeAgentText recovers the agent's REAL text from structured lane stdout:
@@ -676,8 +805,12 @@ func main() {
 		}
 		b, _ := json.Marshal(row)
 		fmt.Fprintln(out, string(b))
-		fmt.Printf("[%s %s/%s/%s trial %d] dispatched=%v outcome=%s pass=%v (%dms) %s\n",
-			row.Task, row.Lane, row.Model, row.Effort, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, row.Note)
+		src := ""
+		if row.DiffSource != "" {
+			src = " src=" + row.DiffSource
+		}
+		fmt.Printf("[%s %s/%s/%s trial %d] dispatched=%v outcome=%s pass=%v (%dms)%s %s\n",
+			row.Task, row.Lane, row.Model, row.Effort, row.Trial, row.Dispatched, row.OutcomeClass, row.VerifierPass, row.LatencyMs, src, row.Note)
 	}
 	fmt.Printf("\nreplay complete: %d cells (%d run now, %d already recorded) → %s\n",
 		plan.Total, len(plan.Run), plan.Skipped, *outPath)
@@ -874,16 +1007,21 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 
 	// Exec tasks get a fresh agent worktree at the parent commit as cwd.
 	cwd := ""
+	nonce := cellNonce()
 	if t.Verify.Kind != "pure" {
 		repoPath := repoDir(t.Verify.Repo, repos)
-		wt := filepath.Join(os.TempDir(), fmt.Sprintf("goldreplay-%s-%s-%d", strings.ToLower(t.ID), lane, trial))
-		if out, err := gitC(repoPath, timeoutSec, "worktree", "add", "--detach", wt, t.Verify.Parent); err != nil {
+		wt := worktreePath(t.ID, lane, trial, nonce)
+		if _, stderr, err := gitOut(repoPath, timeoutSec, "worktree", "add", "--detach", wt, t.Verify.Parent); err != nil {
 			row.OutcomeClass = "error"
-			row.Note = "agent worktree: " + firstLine(out, err)
+			// The FULL stderr, not firstLine: `worktree add` into an existing
+			// path writes "Preparing worktree (detached HEAD …)" and THEN
+			// "fatal: '<path>' already exists", and a first-line note kept
+			// the success banner (10 such holes across four lanes, 2026-09-06).
+			row.Note = "agent worktree: " + boundedText(stderr, err, 400)
 			row.LatencyMs = time.Since(start).Milliseconds()
 			return row
 		}
-		defer func() { _, _ = gitC(repoPath, 60, "worktree", "remove", "--force", wt) }()
+		defer removeWorktree(repoPath, wt)
 		cwd = wt
 	}
 
@@ -962,12 +1100,24 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 	}
 	// Prefer the WORKTREE diff: a tool-enabled agent edits files in place and
 	// rarely prints a diff. `add -N` makes new files diffable; the leakage
-	// guard downstream still rejects test-file tampering.
+	// guard downstream still rejects test-file tampering. The capture is
+	// stdout-only, deny-listed and timed (captureWorktreeDiff): the
+	// 2026-09-06 astra/luna/claude/copilot "git apply" cells were this seam
+	// splicing git's stderr and the agent's build caches into the patch and
+	// recording the corrupt result as a model failure.
 	diff := ""
 	if cwd != "" {
-		_, _ = gitC(cwd, 60, "add", "-N", ".")
-		if b, err := gitC(cwd, 120, "diff", "HEAD"); err == nil && len(strings.TrimSpace(string(b))) > 0 {
-			diff = string(b) // RAW bytes — git apply needs the trailing newline
+		b, err := captureWorktreeDiff(cwd, 120)
+		if err != nil {
+			// OUR machinery failed, not the agent's diff — a hole, never a
+			// measured failure (the same seam as the write/goldverify holes).
+			row.OutcomeClass = "verify_error"
+			row.Note = "worktree capture: " + err.Error()
+			return row
+		}
+		if b != "" {
+			diff = b
+			row.DiffSource = diffSourceWorktree
 		}
 	}
 	if diff == "" {
@@ -976,20 +1126,36 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 		// then cut trailing prose — agents narrate after the last hunk and
 		// git apply rejects it as a corrupt patch.
 		if txt := decodeAgentText(stdout); txt != "" {
-			diff = truncateDiff(extractDiff(txt))
+			if d, cut := truncateDiffN(extractDiff(txt)); d != "" {
+				diff, row.DiffSource, row.DiffTruncatedLines = d, diffSourcePrinted, cut
+			}
 		}
 	}
 	if diff == "" {
-		diff = truncateDiff(extractDiff(stdout)) // last resort: raw stream
+		if d, cut := truncateDiffN(extractDiff(stdout)); d != "" { // last resort: raw stream
+			diff, row.DiffSource, row.DiffTruncatedLines = d, diffSourceRaw, cut
+		}
 	}
 	if diff == "" {
+		row.DiffSource = diffSourceNone
 		row.Note = "no diff in output"
 		return row
+	}
+	if row.DiffSource == diffSourceWorktree {
+		// Pre-apply assertion — should never fire post-fix. A worktree
+		// capture is git's own output; a non-grammar line in it is the
+		// harness, and applying it would either fail (scored as the model's
+		// failure) or, worse, apply at exit 0 with the junk inside a file.
+		if bad := patchGrammarViolation(diff); bad != "" {
+			row.OutcomeClass = "verify_error"
+			row.Note = "worktree capture not a patch: " + boundedText([]byte(bad), nil, 200)
+			return row
+		}
 	}
 	if !strings.HasSuffix(diff, "\n") {
 		diff += "\n" // git apply requires the trailing newline
 	}
-	pf := filepath.Join(os.TempDir(), fmt.Sprintf("goldreplay-%s-%s-%d.diff", strings.ToLower(t.ID), lane, trial))
+	pf := candidateDiffPath(t.ID, lane, trial, nonce)
 	if err := os.WriteFile(pf, []byte(diff), 0o644); err != nil {
 		// Same seam as the goldverify infra branch below: OUR machinery
 		// failed, not the agent's diff — a hole, never a measured failure.
@@ -1005,15 +1171,32 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 	vc := exec.Command(verifyBin, vArgs...)
 	vc.Env = childenv.Scrub(os.Environ())
 	vOut, vErr := vc.CombinedOutput()
-	applyVerifyOutcome(&row, vOut, vErr)
+	applyVerifyOutcome(&row, vOut, vErr, row.DiffSource)
 	return row
+}
+
+// applyStageFailure reports whether goldverify's exit-1 verdict failed at
+// the `git apply` stage (Verdict.Detail is "<stage>: <err>\n<tail>").
+func applyStageFailure(vOut []byte) bool {
+	var v struct {
+		Detail string `json:"detail"`
+	}
+	return json.Unmarshal(vOut, &v) == nil && strings.HasPrefix(v.Detail, goldtask.StageGitApply+":")
 }
 
 // applyVerifyOutcome folds mr-goldverify's process result into the row.
 // Exactly three shapes exist:
 //   - exit 0: the diff verified — a measured PASS;
 //   - exit 1: goldverify ran and the diff failed — a measured FAILURE, with
-//     WHY in the note, never silent;
+//     WHY in the note, never silent — EXCEPT a WORKTREE-sourced diff that
+//     fails at the `git apply` stage. That diff was taken at the task's
+//     parent commit and is re-applied to a fresh checkout of that same
+//     commit, so it applies by construction unless WE corrupted it: a
+//     harness fault, a hole. A PRINTED diff that fails to apply stays a
+//     measured model failure — the agent printed a patch that does not
+//     apply. This asymmetry is the anti-laundering rule (pinned by
+//     TestHarnessCorruptedApplyIsHole): without it the fix would turn every
+//     model's malformed patch into a hole too;
 //   - anything else (missing/stale binary, a spawn failure, an unexpected
 //     exit): the VERIFIER'S infrastructure failed, which says nothing about
 //     the agent's diff. Leaving outcome_class "ok" here recorded a measured
@@ -1021,12 +1204,22 @@ func replayOne(t goldtask.Task, cfg policyeval.Config, trial int, orchBin, verif
 //     binary scored an entire replay as incompetent — the hole-as-failure
 //     defect at the verify seam (review 2026-08-12). verify_error is a HOLE
 //     (policyeval.IsEvidence): never evidence, always re-attemptable.
-func applyVerifyOutcome(row *Row, vOut []byte, vErr error) {
+//
+// It ASSIGNS row.Note on the failing shapes, so a receipt set before the
+// verifier call is clobbered on exactly the failing rows — receipts belong
+// here or in the servedNote defer.
+func applyVerifyOutcome(row *Row, vOut []byte, vErr error, diffSource string) {
 	if vErr == nil {
 		row.VerifierPass = true
 		return
 	}
 	if ee, ok := vErr.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+		if diffSource == diffSourceWorktree && applyStageFailure(vOut) {
+			row.VerifierPass = false
+			row.OutcomeClass = "verify_error"
+			row.Note = "worktree diff failed to apply at its own parent (harness fault): " + verdictDetail(vOut)
+			return
+		}
 		row.VerifierPass = false
 		row.Note = "verify-fail: " + verdictDetail(vOut)
 		return
@@ -1143,10 +1336,145 @@ func pinFlagsFor(lanes []string) string {
 	return strings.Join(flags, " ")
 }
 
-func gitC(dir string, timeoutSec int, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+// gitOut runs git with stdout and stderr captured SEPARATELY and the timeout
+// honoured (the old gitC ignored its timeoutSec and returned CombinedOutput,
+// which is how git's CRLF warnings became patch bytes). A timeout is
+// reported as an error naming it, so callers route it to a hole.
+func gitOut(dir string, timeoutSec int, args ...string) (stdout, stderr []byte, err error) {
+	if timeoutSec <= 0 {
+		timeoutSec = 60
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gitExe(), args...)
 	cmd.Dir = dir
-	return cmd.CombinedOutput()
+	// git runs the repo's hooks with this environment; scrubbed like every
+	// other spawn here (B13, R10).
+	cmd.Env = childenv.Scrub(os.Environ())
+	var so, se bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &so, &se
+	// WaitDelay: after the kill, Wait must not block on a child that still
+	// holds the inherited stdout/stderr pipe (a hook, or the Git for Windows
+	// launcher's real git). Without it the timeout mapping below is
+	// unreachable — the replay hangs at the cell with no row and no note,
+	// the most silent shape possible (review 2026-09-07, reproduced against
+	// C:\Program Files\Git\cmd\git.exe). Same precedent as the lane runners.
+	cmd.WaitDelay = gitWaitDelay
+	err = cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("git %s: timeout after %ds", strings.Join(args, " "), timeoutSec)
+	}
+	return so.Bytes(), se.Bytes(), err
+}
+
+// gitWaitDelay bounds Wait after a context kill; a variable so the timeout
+// test can shorten it.
+var gitWaitDelay = 10 * time.Second
+
+// gitExe resolves git ONCE. On Windows the PATH entry is the Git for Windows
+// LAUNCHER (cmd\git.exe), which spawns the real mingw64\bin\git.exe as a
+// child: a context kill stops the launcher and orphans the real git, which
+// keeps running — holding the agent worktree's handles — and keeps the pipes
+// open. Substituting the real binary when it sits beside the launcher makes
+// the kill reach the process that does the work (measured: the mingw64
+// binary returns at the deadline, the launcher hangs past it).
+var gitExe = func() func() string {
+	var once sync.Once
+	resolved := "git"
+	return func() string {
+		once.Do(func() {
+			p, err := exec.LookPath("git")
+			if err != nil {
+				return
+			}
+			resolved = p
+			dir, base := filepath.Split(p)
+			if strings.EqualFold(base, "git.exe") && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cmd") {
+				real := filepath.Join(filepath.Dir(filepath.Clean(dir)), "mingw64", "bin", "git.exe")
+				if st, err := os.Stat(real); err == nil && !st.IsDir() {
+					resolved = real
+				}
+			}
+		})
+		return resolved
+	}
+}()
+
+// cellNonce makes one cell's temp paths unique to THIS process and moment:
+// two sweeps replaying the same (task,lane,trial) — or a rerun after a
+// killed sweep left its tree behind — collided on the old deterministic
+// path (`worktree add` → "already exists"), and `defer os.Remove(pf)` on
+// the same-keyed candidate-diff path let one sweep delete the patch another
+// was about to verify (A3, 2026-09-06).
+var cellNonce = func() string {
+	// pid + clock + a process counter: the Windows clock hands two
+	// back-to-back calls the same nanosecond (measured in the test). A
+	// variable so a test can pin the path and pre-create it.
+	return fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), atomic.AddUint64(&nonceSeq, 1))
+}
+
+var nonceSeq uint64
+
+// worktreeRoot is the parent of every agent worktree and candidate diff;
+// a variable so tests can point it at their own temp dir.
+var worktreeRoot = os.TempDir
+
+func worktreePath(taskID, lane string, trial int, nonce string) string {
+	return filepath.Join(worktreeRoot(), fmt.Sprintf("goldreplay-%s-%s-%d-%s", strings.ToLower(taskID), lane, trial, nonce))
+}
+
+func candidateDiffPath(taskID, lane string, trial int, nonce string) string {
+	return filepath.Join(worktreeRoot(), fmt.Sprintf("goldreplay-%s-%s-%d-%s.diff", strings.ToLower(taskID), lane, trial, nonce))
+}
+
+// removeWorktree reclaims a cell's tree: `worktree remove --force`, then
+// os.RemoveAll as the fallback (a held handle makes git return 255, delete
+// the .git gitfile and drop the admin entry while leaving the files), the
+// error SURFACED on stderr rather than discarded. It never prunes anything
+// it did not create: a blanket `git worktree prune` mutates the operator's
+// real repos, and a prefix sweep of the root would delete a concurrent
+// sweep's live tree.
+func removeWorktree(repoPath, wt string) {
+	_, stderr, err := gitOut(repoPath, 60, "worktree", "remove", "--force", wt)
+	if err == nil {
+		if _, statErr := os.Stat(wt); os.IsNotExist(statErr) {
+			return
+		}
+	}
+	// git failed (or left the tree): say so even when RemoveAll then
+	// succeeds — a failed `worktree remove` leaves a stale admin entry under
+	// the repo's .git/worktrees that only expires with gc, and a silent
+	// success here hides the handle leak that caused it.
+	rmErr := os.RemoveAll(wt)
+	fmt.Fprintf(os.Stderr, "warn: agent worktree %s: git worktree remove failed (%s); os.RemoveAll: %v\n",
+		wt, boundedText(stderr, err, 200), rmErrText(rmErr))
+}
+
+func rmErrText(err error) string {
+	if err == nil {
+		return "reclaimed the files (a stale admin entry may remain in .git/worktrees)"
+	}
+	return "FAILED: " + err.Error()
+}
+
+// boundedText renders a captured stream for a note, whole (newlines folded
+// to " | ") and capped at max bytes; the error stands in for an empty stream.
+func boundedText(b []byte, err error, max int) string {
+	s := strings.TrimSpace(string(b))
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", " | ")
+	if s == "" && err != nil {
+		s = err.Error()
+	}
+	if len(s) > max {
+		// Cut on a rune boundary (git quotes non-ASCII paths) and SAY how
+		// much was cut — a bare truncation is a silent cap.
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + fmt.Sprintf("…(+%d bytes)", len(s)-cut)
+	}
+	return s
 }
 
 func repoDir(name, overrides string) string {

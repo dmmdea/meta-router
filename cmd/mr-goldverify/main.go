@@ -101,7 +101,7 @@ func runExec(t goldtask.Task, patch []byte, repoPath string, timeoutSec int) Ver
 		// --recount: agents hand-write diffs with wrong hunk counts; recount
 		// from content (no-op for machine-generated diffs).
 		if out, err := run(ctx, wt, "git", "apply", "--whitespace=nowarn", "--recount", ".candidate.diff"); err != nil {
-			return fail(t.ID, "git apply", out, err)
+			return fail(t.ID, goldtask.StageGitApply, out, err)
 		}
 		_ = os.Remove(pf)
 	}
