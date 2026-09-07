@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/meta-router/internal/orch/ledger"
 	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 )
 
@@ -15,14 +16,18 @@ func TestFinishPollsRecordsCodexPlanFacts(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir())
 	now := time.Date(2026, 9, 6, 22, 50, 0, 0, time.UTC)
 	facts := quotapoll.CodexFacts{PlanType: "prolite", Has5h: false,
-		Models:     map[string]quotapoll.CodexModelUsage{"gpt-6-astra": {Available: true}},
-		Additional: []quotapoll.CodexAdditionalLimit{{Name: "GPT-5.3-Codex-Spark", Feature: "codex_bengalfox"}}}
+		Models: map[string]quotapoll.CodexModelUsage{"gpt-6-astra": {Available: true}},
+		Additional: []quotapoll.CodexAdditionalLimit{{Name: "GPT-5.3-Codex-Spark", Feature: "codex_bengalfox",
+			Snapshots: []quotapoll.Snapshot{{Lane: "codex", Window: ledger.Win5h, UsedPct: 0}, {Lane: "codex", Window: ledger.Win7d, UsedPct: 0}}}}}
 	ps := loadPollState()
 	finishPolls(pollFetch{subjects: []subjectFetch{{Lane: "codex", Subject: "default", Origin: "wham_poll", OK: true, CodexFacts: &facts}}}, &ps, now)
 
 	got := loadPollState()
 	if got.CodexPlan != "prolite" || got.CodexHas5h == nil || *got.CodexHas5h || !got.CodexModels["gpt-6-astra"] || len(got.CodexAdditional) != 1 || got.CodexFactsAt == nil {
 		t.Fatalf("facts must persist in poll-state: %+v", got)
+	}
+	if got.CodexSaw5hElsewhere == nil || !*got.CodexSaw5hElsewhere {
+		t.Fatalf("the sibling 5h window must be recorded as corroboration: %+v", got)
 	}
 	st := codexPlanStatus(got)
 	if st == nil || st.PlanType != "prolite" || st.Has5hWindow == nil || *st.Has5hWindow || st.AdditionalLimits[0] != "GPT-5.3-Codex-Spark" || st.Note == "" {

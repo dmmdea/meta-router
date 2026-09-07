@@ -79,6 +79,24 @@ type CodexFacts struct {
 	Additional []CodexAdditionalLimit
 }
 
+// Saw5hElsewhere reports whether the SAME response carried a 5h window in any
+// additional_rate_limits block (the checked-in prolite capture: the
+// GPT-5.3-Codex-Spark block has its own 5h + 7d). It is the corroboration
+// the codex_5h_estimate_off gate requires: a bare Has5h=false is the Plus
+// case Q10 protects (wham omitted a window it has), whereas "no 5h on the
+// main allowance while a sibling block in the same body reports one" is
+// wham demonstrably emitting 5h windows and choosing not to for this plan.
+func (f CodexFacts) Saw5hElsewhere() bool {
+	for _, a := range f.Additional {
+		for _, s := range a.Snapshots {
+			if s.Window == ledger.Win5h {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // PollCodex polls the unofficial wham usage endpoint as BEST-EFFORT EVIDENCE
 // (Q10: the 5h window is unreliably reported on Plus — an omitted window is a
 // typed absence, never a zero). Wired per Daniel's 2026-07-23 approval.

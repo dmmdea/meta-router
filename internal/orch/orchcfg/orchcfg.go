@@ -26,8 +26,27 @@ type Config struct {
 
 	// Lane tiers as config — §6b "upgrade is a number change". These are DATA
 	// about the operator's current plans, never constants of nature.
-	CodexUsagePoll         bool    `json:"codex_usage_poll"`         // W1: default ON as BEST-EFFORT EVIDENCE (Daniel 2026-07-23; Q10 caveats encoded in quotapoll)
-	CodexPlus5hCredits     float64 `json:"codex_plus_5h_credits"`    // default 40 (Plus 5h band 15–80, fact refresh)
+	CodexUsagePoll bool `json:"codex_usage_poll"` // W1: default ON as BEST-EFFORT EVIDENCE (Daniel 2026-07-23; Q10 caveats encoded in quotapoll)
+	// CodexPlus5hCredits is the 5h capacity ESTIMATE seeded on the codex lane
+	// when no provider 5h reading exists (default 40 = the Plus 5h band
+	// 15–80 at fact refresh). S2R-3: an estimate may throttle, never
+	// exhaust. On a plan whose vendor poll reports NO 5h window at all (Pro
+	// Lite, 2026-09-06: only the 7d main allowance) the estimate becomes a
+	// phantom brake — 585% modeled against a 27% vendor week — and
+	// codex_5h_estimate_off is the knob that suppresses it.
+	CodexPlus5hCredits float64 `json:"codex_plus_5h_credits"`
+	// Codex5hEstimateOff (default OFF, B8) suppresses the 5h capacity
+	// estimate ONLY when the recorded plan facts corroborate its absence:
+	// poll-state facts fresher than quota_stale_hours, has_5h_window=false
+	// AND a 5h window seen in an additional_rate_limits block of the same
+	// response (Saw5hElsewhere). A bare absence changes nothing (Q10). When
+	// armed and corroborated, the 5h bucket's capacity is cleared so its
+	// percentage stays -1 (unanchored/uncapped never derives, RS4); a
+	// provider snapshot still overrides, a real 429 still exhausts, and
+	// disarming re-seeds the estimate on the next dispatch. Arming is an
+	// operator act; flipping this default needs gold evidence measured under
+	// the v0.40.4+ replay instrument.
+	Codex5hEstimateOff     bool    `json:"codex_5h_estimate_off"`
 	CodexDegradationFactor float64 `json:"codex_degradation_factor"` // default 15 (10–20× observed, #28879)
 	// CodexWindowsSandbox is the native Windows sandbox mode seeded into every
 	// per-run CODEX_HOME ("elevated" recommended, "unelevated" fallback). Codex

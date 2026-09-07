@@ -39,6 +39,17 @@ func TestPollCodexFactsProlite(t *testing.T) {
 	if !wins[ledger.Win5h] || !wins[ledger.Win7d] {
 		t.Fatalf("the Spark block carries BOTH windows (mapped by seconds): %+v", f.Additional[0].Snapshots)
 	}
+	// The corroboration the codex_5h_estimate_off gate needs: no 5h on the
+	// main allowance, a 5h in a sibling block of the same body.
+	if !f.Saw5hElsewhere() {
+		t.Fatal("Saw5hElsewhere must be true on the prolite capture (Spark carries a 5h window)")
+	}
+	if (CodexFacts{}).Saw5hElsewhere() {
+		t.Fatal("no additional blocks → no corroboration")
+	}
+	if (CodexFacts{Additional: []CodexAdditionalLimit{{Name: "x", Snapshots: []Snapshot{{Window: ledger.Win7d}}}}}).Saw5hElsewhere() {
+		t.Fatal("a sibling block with only a 7d window is not 5h corroboration")
+	}
 	// The additional block's windows are NOT main-lane snapshots.
 	for _, s := range r.Snapshots {
 		if s.Window == ledger.Win5h {

@@ -25,7 +25,7 @@ func TestApplyCodexOutcomeModeledExhaustionOnlyThrottles(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ledger.json")
 	if err := ledger.Update(p, func(l *ledger.Ledger) {
 		for i := 0; i < 12; i++ { // 12×4047 ≈ 48.6k > the 40k millicredit cap
-			applyCodexOutcome(l, codexlane.Outcome{Class: "ok", Usage: fixtureUsage}, orchcfg.Defaults(), tnow)
+			applyCodexOutcome(l, codexlane.Outcome{Class: "ok", Usage: fixtureUsage}, orchcfg.Defaults(), tnow, codex5hGate{})
 		}
 	}); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestApplyCodexOutcomeModeledExhaustionOnlyThrottles(t *testing.T) {
 func TestApplyCodexOutcomeRateLimitExhaustsLane(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ledger.json")
 	if err := ledger.Update(p, func(l *ledger.Ledger) {
-		applyCodexOutcome(l, codexlane.Outcome{Class: "rate_limit"}, orchcfg.Defaults(), tnow)
+		applyCodexOutcome(l, codexlane.Outcome{Class: "rate_limit"}, orchcfg.Defaults(), tnow, codex5hGate{})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestApplyCodexOutcomeRateLimitExhaustsLane(t *testing.T) {
 func TestApplyCodexOutcomeAnchors7dUncapped(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ledger.json")
 	if err := ledger.Update(p, func(l *ledger.Ledger) {
-		applyCodexOutcome(l, codexlane.Outcome{Class: "ok", Usage: fixtureUsage}, orchcfg.Defaults(), tnow)
+		applyCodexOutcome(l, codexlane.Outcome{Class: "ok", Usage: fixtureUsage}, orchcfg.Defaults(), tnow, codex5hGate{})
 	}); err != nil {
 		t.Fatal(err)
 	}

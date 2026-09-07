@@ -29,14 +29,19 @@ type pollState struct {
 	LastCodex  *time.Time `json:"last_codex,omitempty"`
 	// Codex plan facts from the last SUCCESSFUL default-subject wham poll
 	// (quotapoll.CodexFacts): plan type, whether a 5h window was reported,
-	// the models the plan lists, the models carrying their own limits.
-	// EVIDENCE for status/probe planning; nothing in admission reads it. An
-	// outage preserves the last facts (a failed fetch is not "no plan").
-	CodexPlan       string          `json:"codex_plan,omitempty"`
-	CodexHas5h      *bool           `json:"codex_has_5h,omitempty"`
-	CodexModels     map[string]bool `json:"codex_models,omitempty"`
-	CodexAdditional []string        `json:"codex_additional_limits,omitempty"`
-	CodexFactsAt    *time.Time      `json:"codex_facts_at,omitempty"`
+	// whether a 5h window appeared in a sibling additional-limits block of
+	// the same response, the models the plan lists, the models carrying
+	// their own limits. EVIDENCE for status/probe planning — and, since
+	// v0.40.6, the ONE admission-adjacent reader: codex5hEstimateGate reads
+	// CodexHas5h + CodexSaw5hElsewhere + CodexFactsAt (freshness) when the
+	// operator arms codex_5h_estimate_off. An outage preserves the last
+	// facts (a failed fetch is not "no plan").
+	CodexPlan           string          `json:"codex_plan,omitempty"`
+	CodexHas5h          *bool           `json:"codex_has_5h,omitempty"`
+	CodexSaw5hElsewhere *bool           `json:"codex_saw_5h_elsewhere,omitempty"`
+	CodexModels         map[string]bool `json:"codex_models,omitempty"`
+	CodexAdditional     []string        `json:"codex_additional_limits,omitempty"`
+	CodexFactsAt        *time.Time      `json:"codex_facts_at,omitempty"`
 }
 
 func stampKey(lane, subject string) string {
@@ -303,6 +308,8 @@ func recordCodexFacts(ps *pollState, sf subjectFetch, now time.Time) {
 	ps.CodexPlan = f.PlanType
 	has := f.Has5h
 	ps.CodexHas5h = &has
+	saw := f.Saw5hElsewhere()
+	ps.CodexSaw5hElsewhere = &saw
 	ps.CodexModels = map[string]bool{}
 	for m, u := range f.Models {
 		ps.CodexModels[m] = u.Available
