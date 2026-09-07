@@ -49,6 +49,9 @@ type oracleRow struct {
 	Dispatched   bool   `json:"dispatched"`
 	OutcomeClass string `json:"outcome_class"`
 	VerifierPass bool   `json:"verifier_pass"`
+	// Quarantined names the instrument fix that made this row a hole
+	// (mr-goldreplay -requarantine); non-empty → not evidence.
+	Quarantined string `json:"quarantined"`
 }
 
 // ran reports whether this row is EVIDENCE — i.e. the dispatch actually
@@ -61,7 +64,7 @@ type oracleRow struct {
 // the B15 canary, because three drifting copies are how a cell was
 // simultaneously "already recorded" and "not evidence".
 func (r oracleRow) ran() bool {
-	return policyeval.IsEvidence(r.Dispatched, r.OutcomeClass)
+	return policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined)
 }
 
 // config is the row's evidence cell.

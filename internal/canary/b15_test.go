@@ -62,6 +62,7 @@ func loadOracleModels(t *testing.T) map[string]bool {
 			Model        string `json:"model"`
 			OutcomeClass string `json:"outcome_class"`
 			Dispatched   bool   `json:"dispatched"`
+			Quarantined  string `json:"quarantined"`
 		}
 		if json.Unmarshal(line, &r) != nil || r.Lane == "" {
 			continue
@@ -74,7 +75,7 @@ func loadOracleModels(t *testing.T) map[string]bool {
 		// oracle). The definition lives in policyeval.IsEvidence — ONE list
 		// shared with the scorecard and the replay's resume set; this used to
 		// be the third byte-identical copy, and copies drift.
-		if !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+		if !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 			continue
 		}
 		out[r.Lane+"|"+r.Model] = true

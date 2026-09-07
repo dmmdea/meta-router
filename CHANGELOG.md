@@ -4,6 +4,18 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.40.5] — 2026-09-07
+
+### Added — `mr-goldreplay -requarantine`: quarantine the rows the pre-0.40.4 capture defect poisoned (dry run by default)
+v0.40.4 fixed the instrument; the rows it wrote before the fix are still in the oracle as measured model failures — 22 on the live table (claude 4, codex 13 across astra/luna/sol/spark, copilot 4, glm 1; 17 `ok`, 5 `dispatched-not-ok`). This mode finds them and, on the operator's keystroke, turns them into holes.
+
+- **Selector:** the UNION `{warning: in the working copy, lacks filename information, recount: unexpected line, corrupt patch at, No valid patches in input}` over EVERY evidence-bearing class. The three-signature version was lane-biased (7 codex + 4 copilot, zero claude/glm) and missed the `recount` class that carries the cleanest cross-vendor proof. Holes and already-quarantined rows are never touched.
+- **Additive, never a class rewrite, never a delete:** a byte-splice stamp of `quarantined` (the instrument version, default `v0.40.4`) and `quarantine_reason`; unknown fields, key order and CR terminators survive (the migrate-effort discipline). `policyeval.IsEvidence` now takes the marker — the ONE evidence definition — so `mr-goldreplay`'s resume set, `mr-scorecard`'s admission and the B15 canary all read a quarantined row as a hole; the compiler forces every consumer through it.
+- **No drift refusal on the refill:** `loadDone` keeps a quarantined row's model and effort in the drift indexes while dropping it from the resume set, so the next sweep refills the cell at the same pin as a re-measurement. Without this, quarantining every `gpt-6-astra` row removed astra from the identity index, the model tier fired and the next codex sweep died at `os.Exit(2)` before dispatching anything.
+- **Dry run by default:** prints matched rows grouped by lane/model with outcome classes and per-lane evidence pass rates before → after (all classes | agentic-coding), plus the receipt: applying withdraws every figure derived from those rows until re-measured and every refill is a re-dispatch — paid on copilot, weekly-window on codex.
+- **`-apply` guards:** the oracle must be a tracked, clean file in git (pre-state recoverable from history); a `.bak-requarantine-<stamp>` copy is written beside it; the file is re-stat'ed immediately before the rename and the apply aborts if its size or mtime moved (a sweep appending in between). Fixed point: a second pass matches nothing and touches nothing.
+- Known consumer left as is: the private `a2-weekly-replay.ps1` filters on `outcome_class -ne 'deferred'` and never used the shared predicate; it needs its own quarantine clause when it is next touched.
+
 ## [0.40.4] — 2026-09-07
 
 ### Fixed — the replay instrument manufactured model failures at the candidate-diff seam

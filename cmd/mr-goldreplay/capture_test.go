@@ -210,7 +210,7 @@ func TestHarnessCorruptedApplyIsHole(t *testing.T) {
 	applyFail := []byte(`{"task":"AC-02","pass":false,"detail":"git apply: exit status 128\nerror: corrupt patch at line 70"}`)
 	r := Row{Dispatched: true, OutcomeClass: "ok"}
 	applyVerifyOutcome(&r, applyFail, realExitError(t, 1), diffSourceWorktree)
-	if r.OutcomeClass != "verify_error" || r.VerifierPass || policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+	if r.OutcomeClass != "verify_error" || r.VerifierPass || policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 		t.Fatalf("worktree apply failure must be a hole: %+v", r)
 	}
 	if !strings.Contains(r.Note, "harness fault") || !strings.Contains(r.Note, "corrupt patch") {
@@ -219,7 +219,7 @@ func TestHarnessCorruptedApplyIsHole(t *testing.T) {
 	for _, src := range []string{diffSourcePrinted, diffSourceRaw, ""} {
 		r = Row{Dispatched: true, OutcomeClass: "ok"}
 		applyVerifyOutcome(&r, applyFail, realExitError(t, 1), src)
-		if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+		if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 			t.Fatalf("%q apply failure must stay a measured failure: %+v", src, r)
 		}
 		if !strings.HasPrefix(r.Note, "verify-fail: git apply") {
@@ -229,7 +229,7 @@ func TestHarnessCorruptedApplyIsHole(t *testing.T) {
 	testFail := []byte(`{"task":"AC-02","pass":false,"detail":"go test: exit status 1\n--- FAIL: TestX"}`)
 	r = Row{Dispatched: true, OutcomeClass: "ok"}
 	applyVerifyOutcome(&r, testFail, realExitError(t, 1), diffSourceWorktree)
-	if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass) {
+	if r.OutcomeClass != "ok" || r.VerifierPass || !policyeval.IsEvidence(r.Dispatched, r.OutcomeClass, r.Quarantined) {
 		t.Fatalf("worktree diff failing held-out tests is evidence: %+v", r)
 	}
 }
@@ -281,7 +281,7 @@ func TestReplayOneRecordsDiffProvenance(t *testing.T) {
 	t.Setenv("GOLDREPLAY_FAKE_VERIFY_STDOUT", `{"pass":false,"detail":"git apply: exit status 128\nerror: corrupt patch"}`)
 	t.Setenv("GOLDREPLAY_FAKE_VERIFY_EXIT", "1")
 	row = replayOne(task, cfg, 1, os.Args[0], os.Args[0], repos, 30, 10, "")
-	if row.OutcomeClass != "verify_error" || row.DiffSource != diffSourceWorktree || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass) {
+	if row.OutcomeClass != "verify_error" || row.DiffSource != diffSourceWorktree || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass, row.Quarantined) {
 		t.Fatalf("worktree apply failure must be a hole end to end: %+v", row)
 	}
 
@@ -294,7 +294,7 @@ func TestReplayOneRecordsDiffProvenance(t *testing.T) {
 	if row.OutcomeClass != "ok" || row.VerifierPass || row.DiffSource != diffSourcePrinted || row.DiffTruncatedLines != 2 {
 		t.Fatalf("printed case: %+v", row)
 	}
-	if !policyeval.IsEvidence(row.Dispatched, row.OutcomeClass) {
+	if !policyeval.IsEvidence(row.Dispatched, row.OutcomeClass, row.Quarantined) {
 		t.Fatalf("a printed patch that does not apply is the model's failure: %+v", row)
 	}
 
@@ -443,7 +443,7 @@ func TestReplayOneCaptureFailureIsHole(t *testing.T) {
 	t.Setenv("GOLDREPLAY_FAKE_ORCH_EXIT", "0")
 	t.Setenv("GOLDREPLAY_FAKE_ORCH_BREAK", "1")
 	row := replayOne(task, cfg, 1, os.Args[0], os.Args[0], "tr="+dir, 30, 10, "")
-	if row.OutcomeClass != "verify_error" || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass) {
+	if row.OutcomeClass != "verify_error" || policyeval.IsEvidence(row.Dispatched, row.OutcomeClass, row.Quarantined) {
 		t.Fatalf("a failed capture must be a hole: %+v", row)
 	}
 	if !strings.HasPrefix(row.Note, "worktree capture: git add -N: ") || !strings.Contains(row.Note, "stderr:") {
