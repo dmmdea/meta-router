@@ -466,3 +466,37 @@ func TestRunUpstream429IsRateLimit(t *testing.T) {
 func fmtSscanf(line string, proto *string, code *int) (int, error) {
 	return fmt.Sscanf(line, "%s %d", proto, code)
 }
+
+// A hand-created credential file may carry a UTF-8 BOM (Notepad, PowerShell
+// 5.1 Set-Content -Encoding UTF8). It is not whitespace, so an unstripped BOM
+// reaches the Authorization header and the vendor answers 401 — a bad-key
+// symptom with a good key. Every local check passes either way, so this is the
+// only place that can catch it.
+func TestLoadTokenStripsUTF8BOM(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "free"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string]string{
+		"bom":            "\ufeffsk-or-KEY",
+		"bom+crlf":       "\ufeffsk-or-KEY\r\n",
+		"bom+spaces":     "\ufeff  sk-or-KEY  \n",
+		"plain":          "sk-or-KEY\n",
+		"leading spaces": "   sk-or-KEY",
+	} {
+		if err := os.WriteFile(TokenPath(dir, LaneOpenRouter), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadToken(dir, LaneOpenRouter)
+		if err != nil || got != "sk-or-KEY" {
+			t.Fatalf("%s: got %q (%v), want the bare key — a BOM in the header is a 401 with a valid key", name, got, err)
+		}
+	}
+	// A BOM-only file is still empty, not a token made of one invisible byte.
+	if err := os.WriteFile(TokenPath(dir, LaneOpenRouter), []byte("\ufeff\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadToken(dir, LaneOpenRouter); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("a BOM-only file must read as empty: %v", err)
+	}
+}
