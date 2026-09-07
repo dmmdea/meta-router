@@ -4,6 +4,11 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.40.3] — 2026-09-06
+
+### Fixed — a UTF-8 BOM in a free-lane credential file became a 401 with a valid key
+The operator provisions `<state>/free/<lane>.token` by hand on two Windows machines, where Notepad's "UTF-8" and PowerShell 5.1's `Set-Content -Encoding UTF8` / `Out-File -Encoding utf8` all prepend a BOM. A BOM is not whitespace, so `TrimSpace` left it in the token, it rode into the `Authorization` header, and the vendor answered a bare 401 — indistinguishable from a bad key. Every local check passed on the way there (the file exists, the token is non-empty, the dry-run prints an endpoint and a body size), which is exactly what makes it worth handling in the loader instead of in a runbook. `LoadToken` now strips a leading BOM and surrounding whitespace; a BOM-only file still reads as empty.
+
 ## [0.40.2] — 2026-09-06
 
 ### Fixed — the codex lane executed nothing on Windows under Codex CLI 0.153.4

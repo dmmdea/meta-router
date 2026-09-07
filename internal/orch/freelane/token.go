@@ -33,9 +33,24 @@ func LoadToken(stateDir, lane string) (string, error) {
 		}
 		return "", fmt.Errorf("free lane %s: credential file %s unreadable: %w", lane, p, err)
 	}
-	tok := strings.TrimSpace(string(b))
+	tok := cleanToken(string(b))
 	if tok == "" {
 		return "", fmt.Errorf("free lane %s: credential file %s is empty", lane, p)
 	}
 	return tok, nil
+}
+
+// utf8BOM is what a Windows editor (Notepad "UTF-8", PowerShell 5.1
+// `Set-Content -Encoding UTF8`, `Out-File -Encoding utf8`) puts at the front of
+// a hand-created file. It is NOT whitespace, so TrimSpace leaves it in place
+// and it rides into the Authorization header — every local check passes (the
+// file exists, the token is non-empty, the dry-run prints an endpoint) and the
+// dispatch fails at the vendor with a bare 401, which reads as a bad key. The
+// operator provisions these files by hand on two machines, so the loader
+// tolerates the byte rather than teaching everyone one editor's quirk.
+const utf8BOM = "\ufeff"
+
+// cleanToken strips a leading BOM and surrounding whitespace/newlines.
+func cleanToken(raw string) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), utf8BOM))
 }
