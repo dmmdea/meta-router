@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -107,8 +109,10 @@ func TestCodex5hGateGuards(t *testing.T) {
 	}
 }
 
-// Knob off ⇒ the ledger bytes are what main writes: the seed lands and the
-// percentage derives exactly as before.
+// Knob off ⇒ the ledger is what main writes: the seed lands and the
+// percentage derives exactly as before. Compared as the SORTED bucket set,
+// not raw bytes: ledger.Save ranges a map, so main's own file order is
+// nondeterministic (two runs of main differ in bytes too).
 func TestCodex5hKnobOffIsByteIdenticalToMain(t *testing.T) {
 	now := tnow
 	run := func(gate codex5hGate) string {
@@ -127,12 +131,21 @@ func TestCodex5hKnobOffIsByteIdenticalToMain(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(raw)
+		var bs []ledger.Bucket
+		if err := json.Unmarshal(raw, &bs); err != nil {
+			t.Fatal(err)
+		}
+		sort.Slice(bs, func(i, j int) bool { return bs[i].Lane+"|"+string(bs[i].Window) < bs[j].Lane+"|"+string(bs[j].Window) })
+		canon, err := json.MarshalIndent(bs, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(canon)
 	}
 	cfg, ps := armedFacts(now, false, true)
 	cfg.Codex5hEstimateOff = false
 	if a, b := run(codex5hGate{}), run(codex5hEstimateGate(cfg, ps, now)); a != b {
-		t.Fatalf("knob off must be byte-identical to the zero gate:\n%s\n---\n%s", a, b)
+		t.Fatalf("knob off must be identical to the zero gate:\n%s\n---\n%s", a, b)
 	}
 }
 

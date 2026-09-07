@@ -1,10 +1,12 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
+	"github.com/dmmdea/meta-router/internal/orch/orchcfg"
 	"github.com/dmmdea/meta-router/internal/orch/quotapoll"
 )
 
@@ -29,9 +31,29 @@ func TestFinishPollsRecordsCodexPlanFacts(t *testing.T) {
 	if got.CodexSaw5hElsewhere == nil || !*got.CodexSaw5hElsewhere {
 		t.Fatalf("the sibling 5h window must be recorded as corroboration: %+v", got)
 	}
-	st := codexPlanStatus(got)
+	// Status view, knob OFF (the default): facts rendered, corroboration
+	// rendered, gate reported as not armed and not suppressing.
+	st := codexPlanStatus(got, orchcfg.Config{QuotaStaleHours: 6}, now.Add(time.Minute))
 	if st == nil || st.PlanType != "prolite" || st.Has5hWindow == nil || *st.Has5hWindow || st.AdditionalLimits[0] != "GPT-5.3-Codex-Spark" || st.Note == "" {
 		t.Fatalf("status view: %+v", st)
+	}
+	if st.Saw5hElsewhere == nil || !*st.Saw5hElsewhere {
+		t.Fatalf("status must render the corroboration: %+v", st)
+	}
+	if st.EstimateOffArmed || st.EstimateOffSuppressing || !strings.Contains(st.EstimateOffReason, "not armed") {
+		t.Fatalf("knob off: gate view must say not armed / not suppressing: %+v", st)
+	}
+	// Knob ON with fresh, corroborated facts: status reports the suppression
+	// with the SAME reason text the dispatch receipt carries (one function).
+	on := codexPlanStatus(got, orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true}, now.Add(time.Minute))
+	want := codex5hEstimateGate(orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true}, got, now.Add(time.Minute))
+	if !on.EstimateOffArmed || !on.EstimateOffSuppressing || !want.Suppress || on.EstimateOffReason != want.Reason || !strings.Contains(on.EstimateOffReason, "suppressed") {
+		t.Fatalf("knob on: gate view must mirror the gate: %+v vs %+v", on, want)
+	}
+	// Knob ON but stale facts: armed, NOT suppressing, and the reason names staleness.
+	stale := codexPlanStatus(got, orchcfg.Config{QuotaStaleHours: 6, Codex5hEstimateOff: true}, now.Add(7*time.Hour))
+	if !stale.EstimateOffArmed || stale.EstimateOffSuppressing || !strings.Contains(stale.EstimateOffReason, "stale") {
+		t.Fatalf("knob on + stale: %+v", stale)
 	}
 
 	// Outage: a failed fetch (OK=false) must not erase the facts.
@@ -56,7 +78,7 @@ func TestFinishPollsRecordsCodexPlanFacts(t *testing.T) {
 // No facts ever recorded → no status block (absent, not empty).
 func TestCodexPlanStatusAbsentWhenNeverPolled(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir())
-	if st := codexPlanStatus(loadPollState()); st != nil {
+	if st := codexPlanStatus(loadPollState(), orchcfg.Config{}, time.Now()); st != nil {
 		t.Fatalf("want nil, got %+v", st)
 	}
 }

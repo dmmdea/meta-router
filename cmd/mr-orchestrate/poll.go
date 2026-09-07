@@ -326,21 +326,32 @@ func recordCodexFacts(ps *pollState, sf subjectFetch, now time.Time) {
 type CodexPlanStatus struct {
 	PlanType         string          `json:"plan_type"`
 	Has5hWindow      *bool           `json:"has_5h_window,omitempty"`
+	Saw5hElsewhere   *bool           `json:"saw_5h_elsewhere,omitempty"` // a sibling additional-limits block of the same response carried a 5h window (v0.40.6 corroboration)
 	Models           map[string]bool `json:"models,omitempty"`
 	AdditionalLimits []string        `json:"additional_limits,omitempty"`
 	ObservedAt       *time.Time      `json:"observed_at,omitempty"`
-	Note             string          `json:"note"`
+	// The codex_5h_estimate_off gate as it would decide RIGHT NOW (v0.40.6):
+	// armed = the config knob; suppressing = all four legs hold; reason =
+	// the leg that decided, in the gate's own words. Rendered from the same
+	// function the dispatch path calls, so status and the receipt cannot
+	// disagree.
+	EstimateOffArmed       bool   `json:"estimate_off_armed"`
+	EstimateOffSuppressing bool   `json:"estimate_off_suppressing"`
+	EstimateOffReason      string `json:"estimate_off_reason"`
+	Note                   string `json:"note"`
 }
 
 // codexPlanStatus renders poll-state's codex facts; nil when none were ever
-// recorded (an absent block, not an empty one).
-func codexPlanStatus(ps pollState) *CodexPlanStatus {
+// recorded (an absent block, not an empty one). cfg/now feed the gate view.
+func codexPlanStatus(ps pollState, cfg orchcfg.Config, now time.Time) *CodexPlanStatus {
 	if ps.CodexPlan == "" {
 		return nil
 	}
+	gate := codex5hEstimateGate(cfg, ps, now)
 	return &CodexPlanStatus{
-		PlanType: ps.CodexPlan, Has5hWindow: ps.CodexHas5h, Models: ps.CodexModels,
+		PlanType: ps.CodexPlan, Has5hWindow: ps.CodexHas5h, Saw5hElsewhere: ps.CodexSaw5hElsewhere, Models: ps.CodexModels,
 		AdditionalLimits: ps.CodexAdditional, ObservedAt: ps.CodexFactsAt,
-		Note: "evidence from the wham usage poll (default subject); admission does not read it — a 5h window omitted by wham was unreliable on Plus (Q10), so has_5h_window=false is an observation, not proof",
+		EstimateOffArmed: cfg.Codex5hEstimateOff, EstimateOffSuppressing: gate.Suppress, EstimateOffReason: gate.Reason,
+		Note: "evidence from the wham usage poll (default subject); admission does not read it — a 5h window omitted by wham was unreliable on Plus (Q10), so has_5h_window=false is an observation, not proof; the ONE admission-adjacent reader is codex_5h_estimate_off (default off), which suppresses the 5h capacity estimate only when has_5h_window=false is corroborated by saw_5h_elsewhere on fresh facts",
 	}
 }
