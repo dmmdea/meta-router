@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -49,6 +50,23 @@ func TestMain(m *testing.M) {
 	// dispatch → decode → annotate → return path runs end to end with no lane
 	// binary and no spend.
 	if fixture := os.Getenv("GOLDREPLAY_FAKE_ORCH_STDOUT"); fixture != "" {
+		// Fake-VERIFIER mode: replayOne spawns the verifier with `-patch`,
+		// which the orchestrator argv never carries. Scripted the same way.
+		if hasArg(os.Args, "-patch") {
+			fmt.Print(os.Getenv("GOLDREPLAY_FAKE_VERIFY_STDOUT"))
+			code, _ := strconv.Atoi(os.Getenv("GOLDREPLAY_FAKE_VERIFY_EXIT"))
+			os.Exit(code)
+		}
+		// A tool-enabled agent edits files IN PLACE: "name=content" written
+		// into the -cwd the replay handed us, so the worktree capture path
+		// runs for real (a real git, a real diff) with no lane binary.
+		if w := os.Getenv("GOLDREPLAY_FAKE_ORCH_WRITE"); w != "" {
+			name, content, _ := strings.Cut(w, "=")
+			if cwd := argAfter(os.Args, "-cwd"); cwd != "" {
+				_ = os.MkdirAll(filepath.Dir(filepath.Join(cwd, name)), 0o755)
+				_ = os.WriteFile(filepath.Join(cwd, name), []byte(content), 0o644)
+			}
+		}
 		fmt.Print(fixture)
 		if os.Getenv("GOLDREPLAY_FAKE_ORCH_EXIT") == "5" {
 			os.Exit(5)
@@ -60,6 +78,24 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(buildDir)
 	}
 	os.Exit(code)
+}
+
+func hasArg(args []string, name string) bool {
+	for _, a := range args {
+		if a == name {
+			return true
+		}
+	}
+	return false
+}
+
+func argAfter(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func goldreplayBin(t *testing.T) string {
