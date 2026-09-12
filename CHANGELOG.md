@@ -4,6 +4,19 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.41.0] — 2026-09-12
+
+### Changed — Claude 5 re-pin: every seed claude row that named `claude-opus-4-8` now names `claude-opus-5` (masterplan queue item 3)
+Opus 4.8 was the seed's Claude flagship on nine rows (hard-repo #1, terminal-bounded #2, workhorse #3, many-tool #1, mcp-structured #1, deep-reasoning #1, formal-math #1, long-context #1) while Anthropic had shipped Opus 5 on 2026-07-24 and Sonnet 5's $2/$10 price had become permanent. Routing kept dispatching a legacy model on every hard class.
+
+- **Re-pinned, same effort per row.** `claude-opus-5` replaces `claude-opus-4-8` on all nine rows; the `claude-sonnet-5` rows stay. Verified headless on the operator's account before the pin moved: `claude -p --model claude-opus-5 --effort high --output-format json` answered with `modelUsage` keyed `claude-opus-5`.
+- **Re-cited, instrument named.** `docs/specs/2026-09-06-frontier-refresh-v5.md` §4 found three boards sharing the "SWE-bench Pro" name, so every evidence string now names its instrument. Where an Opus 5 figure exists it replaces the 4.8 number (SWE-bench Pro vendor-aggregate 79.2 > Sonnet 5 63.2; Terminal-Bench 4.0 official 51.8 with Sonnet 5 at 12.4 — deliberately never the terminal-bounded row; HLE 64.7 / 54.9 across two trackers, directional only). Where NO Opus 5 figure has been published (Tool-Decathlon, MCP-Atlas, USAMO, MRCR/GraphWalks) the string says **LEGACY FIGURE**, names the 4.8 measurement it rests on, and states that the rank is held on the model-family prior (>2x Opus 4.8 on Frontier-Bench v0.1, vendor relative). A held rank is written as a held rank, never re-labelled as an Opus 5 number.
+- **Opus-vs-Sonnet is a rank decision; quota decides claude-vs-other-lane.** Stated in the seed header so nobody reads a within-lane demotion into the table: the throttle shadow price and the burn-rate downshift shift BOTH claude rows of a class together (they are lane facts), so a throttled claude window makes a codex/glm row win, not the sonnet row. Two claude rows per class exist for masking and exclusion, and as the measured fallback order.
+- **The B8 reference config becomes `claude|claude-opus-5|high`** — the lane's best-ranked config by key order (the scorecard's tie rule). It is unmeasured until the 2026-09-12 gold probe lands, so `knownUncovered` in the B15 canary swaps `claude|claude-opus-4-8` for `claude|claude-opus-5` (the 4.8 pair is no longer ranked and would fail the canary as stale). The pair leaves the list in the delivery that records the probe.
+- **`mr-goldreplay -claude-budget-pct` (default 33).** The claude lane joins the probe-budget table on its WEEKLY window (the Max plan's allowance, provider-polled): a claude cell becomes a resumable hole once the 7d window is at or above the cap. The 5h window is not the axis — admission defers on it by itself and the hole resumes at the next window. A 168-cell re-baseline on the most expensive lane is the 2026-09-05 copilot incident on a different bill; the cap exists before the first such run, not after. Pinned by `TestProbeBudgetHoldClaudeWeekly` (verified red with the table entry removed).
+- **Tests that asserted the seed's rank-1 model** (router, fault-open, unclassifiable-desc, MCP route) now assert `claude-opus-5`; fixture strings that merely needed some model id keep the old literal on purpose — they are not seed assertions.
+- **B12:** +18 non-test LOC (the seed header paragraph and the claude budget entry); `docs/complexity-budget.json` raised to 30043.
+
 ## [0.40.6] — 2026-09-07
 
 ### Added — `codex_5h_estimate_off`: suppress the phantom codex 5h estimate on plans that have no 5h window (default OFF)

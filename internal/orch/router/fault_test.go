@@ -3,7 +3,7 @@ package router
 // Task 15 fault matrix — router. Every fault fails OPEN to a safe default,
 // NEVER a panic. Rows already covered by the primary suite are referenced in
 // the evidence doc:
-//   - unknown class → quality-first default (claude-opus-4-8):
+//   - unknown class → quality-first default (claude-opus-5):
 //     TestRouteRankAndMask/"unknown class defaults quality-first";
 //   - empty/all-open ledger → routing proceeds, all lanes candidate:
 //     the openStates() cases throughout TestRouteRankAndMask;
@@ -30,7 +30,7 @@ func TestFaultLoadMissingFileFailsOpenToSeed(t *testing.T) {
 	// And it must still route (a real routing decision, not an empty map).
 	now := time.Now().UTC()
 	d := Route(tbl, HardRepo, map[string]LaneState{"claude": {State: "open"}}, 0, now)
-	if d.Lane != "claude" || d.Model != "claude-opus-4-8" {
+	if d.Lane != "claude" || d.Model != "claude-opus-5" {
 		t.Fatalf("failed-open table must still route hard-repo to opus: %+v", d)
 	}
 }

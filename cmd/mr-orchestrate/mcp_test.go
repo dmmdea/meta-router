@@ -79,7 +79,7 @@ func TestServeMCPTranscript(t *testing.T) {
 	}
 	// The route result JSON is a string inside the tools/call text content, so
 	// its quotes are escaped on the wire — assert the (unambiguous) model id.
-	if !strings.Contains(lines[2], `claude-opus-4-8`) {
+	if !strings.Contains(lines[2], `claude-opus-5`) {
 		t.Fatalf("route tool must return the hard-repo recommendation: %s", lines[2])
 	}
 	// strategy_dispatch with a bare goal and NEITHER steps[] NOR a named strategy
@@ -196,7 +196,7 @@ func TestRunToolDeferralCarriesExitCode3(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	args := []byte(`{"name":"run","arguments":{"prompt":"do a thing","lane":"claude","model":"claude-opus-4-8","dry_run":true}}`)
+	args := []byte(`{"name":"run","arguments":{"prompt":"do a thing","lane":"claude","model":"claude-opus-5","dry_run":true}}`)
 	res := callTool(args)
 	if len(res.Content) == 0 {
 		t.Fatal("no content")

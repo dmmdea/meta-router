@@ -21,11 +21,25 @@ import (
 // had rejected: local at rank 1 for both classes, measured 0.054 pass-rate,
 // scoring 0.816x with NON-INFERIORITY FALSE (audit 2026-07-25). Promotion of a
 // routing-visible change requires that gate (Bible B8).
+//
+// 2026-09-12 — Claude 5 re-pin (masterplan queue item 3). Every claude row that
+// named `claude-opus-4-8` now names `claude-opus-5` at the same effort; the
+// sonnet rows stay on `claude-sonnet-5`. Each evidence string names its
+// INSTRUMENT (docs/specs/2026-09-06-frontier-refresh-v5.md §4: three boards
+// share the "SWE-bench Pro" name) and says when a figure is a LEGACY Opus 4.8
+// measurement with no published Opus 5 replacement — a rank held on the
+// model-family prior is written as such, never re-labelled as an Opus 5 number.
+// Opus-vs-Sonnet within a class is a RANK decision here; the lane's quota
+// state (throttle / burn-rate downshift) shifts both claude rows together, so
+// the quota-dynamic choice is claude-vs-other-lane, not opus-vs-sonnet.
+// Reference config for the B8 split gate becomes `claude|claude-opus-5|high`
+// (the lane's best-ranked config by key order); it is measured by the
+// 2026-09-12 gold probe recorded in the private repo.
 func Seed() Table {
 	return Table{
 		HardRepo: {
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "xhigh", Rank: 1, Evidence: "vals.ai independent same-harness SWE-V: Opus 88.6 > GPT-5.5 82.6; SWE-Pro vendor-triangulated 69.2>62.1>58.6 (baseline §1)"},
-			{Lane: "claude", Model: "claude-sonnet-5", Effort: "high", Rank: 2, Evidence: "SWE-Pro ordering #2 tier; same-lane fallback preserves scaffold binding (baseline §0.1)"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "xhigh", Rank: 1, Evidence: "SWE-bench Pro, vendor-aggregate instrument (llm-stats, frontier v5 §4, 2026-09-06): Opus 5 79.2 > Terra 63.4 > Sonnet 5 63.2 > Luna 62.7 > GLM-5.2 62.1; SWE-bench Verified ~96 third-party (saturated, non-separating); Opus 5 >2x Opus 4.8 on Frontier-Bench v0.1 (vendor, relative). Supersedes the Opus 4.8 SWE-V 88.6 / SWE-Pro 69.2 citation"},
+			{Lane: "claude", Model: "claude-sonnet-5", Effort: "high", Rank: 2, Evidence: "SWE-bench Pro vendor-aggregate 63.2 — same instrument as rank 1 (frontier v5 §4); same-lane fallback preserves scaffold binding (baseline §0.1); $2/$10 permanent (frontier v5 §2.1)"},
 			{Lane: "glm", Model: "glm-5.2", Effort: "high", Rank: 3, Evidence: "SWE-Pro 62.1 vendor-triangulated; entelligence: Sonnet-class on identical Claude Code scaffold"},
 			// Measured fallback (2026-09-02): before this row the class had only claude + glm
 			// entries, so with GLM retired (config) a `--exclude claude` consult deferred with
@@ -39,38 +53,38 @@ func Seed() Table {
 		},
 		TerminalBounded: {
 			{Lane: "codex", Model: "gpt-5.5", Effort: "high", Rank: 1, Evidence: "tbench.ai independent #1: GPT-5.5-in-Codex-CLI 83.4 > Opus-in-Claude-Code 78.9; SURGICAL — Plus degradation 10-20x (#28879), ledger governs"},
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "high", Rank: 2, Evidence: "tbench.ai 78.9 same-harness independent"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "high", Rank: 2, Evidence: "Terminal-Bench 4.0 official (tbench.ai, Sep 2026, frontier v5 §4): Opus 5 on Claude Code 51.8±3.4 vs Astra/Codex 58.2, Fable 5.1 57.9; Sonnet 5 12.4 at the worst $/point on the board — Sonnet is deliberately NOT a terminal-bounded row. Supersedes the Opus 4.8 TB-2.x 78.9 citation (different instrument version)"},
 		},
 		Workhorse: {
 			{Lane: "glm", Model: "glm-5.2", Effort: "high", Rank: 1, Evidence: "entelligence head-to-head 25/45 == Opus-4.7 tie on identical scaffold at ~46% cost; best-harness TB 82.7 (Z.ai-run)"},
-			{Lane: "claude", Model: "claude-sonnet-5", Effort: "high", Rank: 2, Evidence: "Sonnet-class peer; keeps volume off the binding Claude weekly only when GLM masked"},
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "high", Rank: 3, Evidence: "quality ceiling fallback (R14: capacity is there to be used)"},
+			{Lane: "claude", Model: "claude-sonnet-5", Effort: "high", Rank: 2, Evidence: "Sonnet 5: Anthropic's speed+intelligence tier, $2/$10 permanent (frontier v5 §2.1); keeps volume off the binding Claude weekly only when GLM masked"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "high", Rank: 3, Evidence: "quality ceiling fallback (R14: capacity is there to be used); Anthropic: 'start with Opus 5 for most workloads' (frontier v5 §2.1)"},
 		},
 		ManyTool: {
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "xhigh", Rank: 1, Evidence: "Tool-Decathlon 59.9 > 55.6 > 48.2, vendor-against-interest (Z.ai reports its own loss) — most trustworthy tool-use discriminator"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "xhigh", Rank: 1, Evidence: "LEGACY FIGURE: Tool-Decathlon 59.9 > 55.6 > 48.2 was measured on Opus 4.8 (vendor-against-interest, Z.ai reports its own loss — baseline §1); no Opus 5 Tool-Decathlon figure published as of 2026-09-06 (frontier v5 A1). Rank held on the family prior (>2x Opus 4.8 Frontier-Bench v0.1, vendor relative) — re-verify on the next board refresh"},
 			{Lane: "codex", Model: "gpt-5.5", Effort: "high", Rank: 2, Evidence: "Tool-Decathlon 55.6 (< Opus 59.9, > GLM 48.2; vendor-against-interest, baseline §1)"},
 			// GLM deliberately ABSENT: baseline §2 'keep heterogeneous many-tool orchestration off GLM' (48.2, vendor-confessed)
 		},
 		MCPStructured: {
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "high", Rank: 1, Evidence: "MCP-Atlas near-parity 77.8/76.8/75.3 (Z.ai-run) — quota state decides via tie-break"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "high", Rank: 1, Evidence: "LEGACY FIGURE: MCP-Atlas near-parity 77.8/76.8/75.3 was measured on Opus 4.8 (Z.ai-run, baseline §1); no Opus 5 MCP-Atlas figure as of 2026-09-06 (frontier v5 A1). Parity tier retained — quota state decides via tie-break"},
 			{Lane: "codex", Model: "gpt-5.5", Effort: "high", Rank: 1, Evidence: "MCP-Atlas 76.8 — parity tier"},
 			{Lane: "glm", Model: "glm-5.2", Effort: "high", Rank: 1, Evidence: "MCP-Atlas 75.3 — parity tier"},
 		},
 		DeepReasoning: {
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "xhigh", Rank: 1, Evidence: "HLE 49.8/57.9 verified chain (baseline §1)"},
-			{Lane: "claude", Model: "claude-sonnet-5", Effort: "xhigh", Rank: 2, Evidence: "HLE-with-tools 57.4 nearly matches Opus"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "xhigh", Rank: 1, Evidence: "HLE: Opus 5 64.7 / 54.9 on two trackers (frontier v5 A6 — the spread between trackers exceeds the gap between models; directional only). Supersedes the Opus 4.8 49.8/57.9 verified chain (baseline §1)"},
+			{Lane: "claude", Model: "claude-sonnet-5", Effort: "xhigh", Rank: 2, Evidence: "HLE-with-tools 57.4 (Sonnet 5, vendor, baseline §1); no refreshed Sonnet 5 HLE figure as of 2026-09-06 (frontier v5 A1: the numbers surfaced at launch were Sonnet 4.6's)"},
 			{Lane: "codex", Model: "gpt-5.5", Effort: "xhigh", Rank: 3, Evidence: "HLE ordering #3; xhigh reserved tier (stet.sh effort curve: quality 12→65% low→xhigh)"},
 		},
 		FormalMath: {
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "xhigh", Rank: 1, Evidence: "USAMO 96.7 vs Sonnet 79.5 (vendor, verified)"},
-			{Lane: "claude", Model: "claude-sonnet-5", Effort: "xhigh", Rank: 2, Evidence: "USAMO 79.5 (Sonnet-5 fallback below Opus 96.7; vendor, verified, baseline §1)"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "xhigh", Rank: 1, Evidence: "LEGACY FIGURE: USAMO 96.7 vs Sonnet 79.5 was measured on Opus 4.8 (vendor, verified, baseline §1); no Opus 5 USAMO figure as of 2026-09-06 (frontier v5 A1). Rank held on the family prior (>2x Opus 4.8 Frontier-Bench v0.1, vendor relative)"},
+			{Lane: "claude", Model: "claude-sonnet-5", Effort: "xhigh", Rank: 2, Evidence: "USAMO 79.5 (Sonnet 5, vendor, verified, baseline §1) — fallback below the Opus lineage's 96.7 (an Opus 4.8 figure)"},
 		},
 		CompetitionMath: {
 			{Lane: "glm", Model: "glm-5.2", Effort: "high", Rank: 1, Evidence: "AIME saturated: 99.2 ≈ GPT-5.5 98.3 — per-dollar winner in a saturated tier"},
 			{Lane: "codex", Model: "gpt-5.5", Effort: "high", Rank: 2, Evidence: "AIME 98.3 (saturated tier ≈ GLM-5.2 99.2; per-dollar loser, baseline §1)"},
 		},
 		LongContext: {
-			{Lane: "claude", Model: "claude-opus-4-8", Effort: "high", Rank: 1, Evidence: "MRCR 78.3@1M, GraphWalks 68.1 vs GPT-5.5 45.4; Sonnet-5 1M retrieval UNPUBLISHED — prefer Opus >300K; codex ctx-masked >258K (independent, #19319)"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "high", Rank: 1, Evidence: "1M ctx default on Opus 5 and Sonnet 5 (frontier v5 §2.1). LEGACY FIGURE: MRCR 78.3@1M, GraphWalks 68.1 vs GPT-5.5 45.4 were measured on the Opus 4.8 lineage (baseline §1); no Opus 5 or Sonnet 5 1M-retrieval figure as of 2026-09-06 — prefer Opus >300K; codex ctx-masked >258K (independent, #19319)"},
 		},
 		LatencyIter: {
 			{Lane: "glm", Model: "glm-5.2", Effort: "medium", Rank: 1, Evidence: "Artificial Analysis independent: 206.8 tok/s, TTFT 1.42s vs Opus 59.0/40.3s — 3.5x throughput at ~1/6 price; local masked (21s swap TTFT, baseline §2)"},
