@@ -679,6 +679,7 @@ func main() {
 	reMeasure := flag.Bool("re-measure", false, "override the drift guard: dispatch planned cells even when their identity is already recorded under a different effort or model (deliberate re-measurement / new-model measurement)")
 	copilotBudgetPct := flag.Float64("copilot-budget-pct", 33, "probe spend cap for the copilot lane: a copilot cell is recorded as a deferred HOLE (resumable) once the ledger's month window is at or above this percentage; negative disables. Default a third of the month — a 168-cell probe under `auto` consumed the whole month on 2026-09-05")
 	codexBudgetPct := flag.Float64("codex-budget-pct", 33, "probe spend cap for the codex lane: a codex cell is recorded as a deferred HOLE (resumable) once the ledger's 7d window (the wham poll's weekly allowance) is at or above this percentage; negative disables. Same lesson as the copilot cap: a roster probe must never drain the operator's week")
+	claudeBudgetPct := flag.Float64("claude-budget-pct", 33, "probe spend cap for the claude lane: a claude cell is recorded as a deferred HOLE (resumable) once the ledger's 7d window (the Max plan's weekly allowance, polled from the provider) is at or above this percentage; negative disables. The 5h window is NOT the budget axis — admission already defers on it and the hole resumes at the next window; the week is what a 168-cell re-baseline can drain")
 	flag.Parse()
 
 	// Migration is a pure file rewrite: it must not require a goldset, lanes or
@@ -851,7 +852,7 @@ func main() {
 
 	for _, c := range plan.Run {
 		var row Row
-		if hold, why := probeBudgetHold(c.Config.Lane, probeBudgets(*copilotBudgetPct, *codexBudgetPct), time.Now().UTC()); hold {
+		if hold, why := probeBudgetHold(c.Config.Lane, probeBudgets(*copilotBudgetPct, *codexBudgetPct, *claudeBudgetPct), time.Now().UTC()); hold {
 			row = Row{TS: time.Now().UTC().Format(time.RFC3339), Task: c.Task, Class: c.GoldTask.Class,
 				Lane: c.Config.Lane, Model: c.Config.Model, Effort: c.Config.Effort, Trial: c.Trial,
 				OutcomeClass: "deferred", Note: why}
@@ -883,11 +884,14 @@ type probeBudget struct {
 // calendar month (credits, 2026-09-05: 168 planned cells, 110 dispatched,
 // month gone). codex: the weekly window the wham poll reports (the plan's
 // primary allowance; on 2026-09-06 the operator's upgraded plan exposed ONLY
-// that window). A negative pct disables that lane's cap.
-func probeBudgets(copilotPct, codexPct float64) map[string]probeBudget {
+// that window). claude: the Max plan's weekly window (provider-polled; the 5h
+// window defers through admission on its own and resumes by itself). A
+// negative pct disables that lane's cap.
+func probeBudgets(copilotPct, codexPct, claudePct float64) map[string]probeBudget {
 	return map[string]probeBudget{
 		"copilot": {Window: ledger.WinMonth, Pct: copilotPct},
 		"codex":   {Window: ledger.Win7d, Pct: codexPct},
+		"claude":  {Window: ledger.Win7d, Pct: claudePct},
 	}
 }
 

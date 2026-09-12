@@ -18,7 +18,7 @@ func TestRouteRankAndMask(t *testing.T) {
 	now := time.Now().UTC()
 	t.Run("hard-repo picks opus", func(t *testing.T) {
 		d := Route(tbl, HardRepo, openStates(), 0, now)
-		if d.Lane != "claude" || d.Model != "claude-opus-4-8" || d.Strategy != "solo" {
+		if d.Lane != "claude" || d.Model != "claude-opus-5" || d.Strategy != "solo" {
 			t.Fatalf("%+v", d)
 		}
 	})
@@ -80,7 +80,7 @@ func TestRouteRankAndMask(t *testing.T) {
 	})
 	t.Run("unknown class defaults quality-first (R14a)", func(t *testing.T) {
 		d := Route(tbl, Class("nonsense"), openStates(), 0, now)
-		if d.Model != "claude-opus-4-8" || !strings.Contains(d.Reason, "quality-first") {
+		if d.Model != "claude-opus-5" || !strings.Contains(d.Reason, "quality-first") {
 			t.Fatalf("%+v", d)
 		}
 	})

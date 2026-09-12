@@ -118,7 +118,7 @@ func rankedModelsWithoutEvidence(tbl router.Table, observed map[string]bool) []s
 // hides behind the known failure (review 2026-08-12). Shrink this list as the
 // re-baseline measures each pair; when it is empty, delete it.
 var knownUncovered = map[string]bool{
-	"claude|claude-opus-4-8": true,
+	"claude|claude-opus-5": true,
 	"codex|gpt-5.5":          true,
 	"glm|glm-4.7":            true,
 	"local|qwythos":          true,

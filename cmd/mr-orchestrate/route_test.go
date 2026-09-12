@@ -80,13 +80,13 @@ func TestBuildRouteDecisionMasksToGLM(t *testing.T) {
 }
 
 // S2R-11 rank-table assertion: an UNCLASSIFIABLE desc (no --class) routes to
-// claude-opus-4-8, not workhorse-GLM. Classify → HardRepo → Opus.
+// claude-opus-5, not workhorse-GLM. Classify → HardRepo → Opus.
 func TestUnclassifiableDescRoutesToOpus(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir()) // hermeticity: buildRouteDecision loads the real quota trace + rank table
 	c, _ := router.Classify("do something vague and unusual", 5000, false)
 	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, c, 5000, rnow, spendDownReq{})
-	if d.Model != "claude-opus-4-8" {
-		t.Fatalf("unclassifiable desc must route to claude-opus-4-8 (S2R-11): %+v", d)
+	if d.Model != "claude-opus-5" {
+		t.Fatalf("unclassifiable desc must route to claude-opus-5 (S2R-11): %+v", d)
 	}
 }
 
