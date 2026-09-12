@@ -38,7 +38,7 @@ import (
 func Seed() Table {
 	return Table{
 		HardRepo: {
-			{Lane: "claude", Model: "claude-opus-5", Effort: "xhigh", Rank: 1, Evidence: "SWE-bench Pro, vendor-aggregate instrument (llm-stats, frontier v5 §4, 2026-09-06): Opus 5 79.2 > Sonnet 5 63.2 > Terra 63.4 / Luna 62.7 / GLM-5.2 62.1; SWE-bench Verified ~96 third-party (saturated, non-separating); Opus 5 >2x Opus 4.8 on Frontier-Bench v0.1 (vendor, relative). Supersedes the Opus 4.8 SWE-V 88.6 / SWE-Pro 69.2 citation"},
+			{Lane: "claude", Model: "claude-opus-5", Effort: "xhigh", Rank: 1, Evidence: "SWE-bench Pro, vendor-aggregate instrument (llm-stats, frontier v5 §4, 2026-09-06): Opus 5 79.2 > Terra 63.4 > Sonnet 5 63.2 > Luna 62.7 > GLM-5.2 62.1; SWE-bench Verified ~96 third-party (saturated, non-separating); Opus 5 >2x Opus 4.8 on Frontier-Bench v0.1 (vendor, relative). Supersedes the Opus 4.8 SWE-V 88.6 / SWE-Pro 69.2 citation"},
 			{Lane: "claude", Model: "claude-sonnet-5", Effort: "high", Rank: 2, Evidence: "SWE-bench Pro vendor-aggregate 63.2 — same instrument as rank 1 (frontier v5 §4); same-lane fallback preserves scaffold binding (baseline §0.1); $2/$10 permanent (frontier v5 §2.1)"},
 			{Lane: "glm", Model: "glm-5.2", Effort: "high", Rank: 3, Evidence: "SWE-Pro 62.1 vendor-triangulated; entelligence: Sonnet-class on identical Claude Code scaffold"},
 			// Measured fallback (2026-09-02): before this row the class had only claude + glm
