@@ -112,10 +112,10 @@ func (j *jevRunner) evaluate(ctx context.Context, s vp.Snippet) vp.Record {
 	switch choice {
 	case "yes":
 		rec.Verdict = vp.VerdictPass
-		rec.Confidence = a.Probabilities[a.Choice]
+		rec.Confidence = probabilityOf(a.Probabilities, choice)
 	case "no":
 		rec.Verdict = vp.VerdictFail
-		rec.Confidence = a.Probabilities[a.Choice]
+		rec.Confidence = probabilityOf(a.Probabilities, choice)
 	case "unsure":
 		// An honest decline. Confidence stays 0: a non-answer sorts to the
 		// bottom of coverage, the same convention the local column's defer uses.
@@ -139,4 +139,16 @@ func (j *jevRunner) meter() string {
 		model = "(no call was answered)"
 	}
 	return fmt.Sprintf("  served_model=%s  answered_calls=%d  cost=$%.6f", model, j.calls, j.cost)
+}
+
+// probabilityOf looks the chosen option up by the same normalised key the verdict switch
+// used, so a response that echoes its choice in different casing or whitespace than its
+// probabilities map cannot silently read as confidence 0 (review finding, 2026-09-18).
+func probabilityOf(probs map[string]float64, choice string) float64 {
+	for k, v := range probs {
+		if strings.ToLower(strings.TrimSpace(k)) == choice {
+			return v
+		}
+	}
+	return 0
 }

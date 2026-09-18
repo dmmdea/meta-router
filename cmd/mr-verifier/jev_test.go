@@ -50,6 +50,7 @@ func TestJevEvaluateMapsChoices(t *testing.T) {
 		wantGree bool
 	}{
 		{"yes on a good snippet", "yes", map[string]float64{"yes": 0.83, "no": 0.12, "unsure": 0.05}, vp.LabelGood, vp.VerdictPass, 0.83, true},
+		{"choice echoed in another case still finds its probability", "Yes", map[string]float64{"yes": 0.77, "no": 0.20, "unsure": 0.03}, vp.LabelGood, vp.VerdictPass, 0.77, true},
 		{"yes on a bad snippet", "yes", map[string]float64{"yes": 0.61, "no": 0.30, "unsure": 0.09}, vp.LabelBad, vp.VerdictPass, 0.61, false},
 		{"no on a bad snippet", "no", map[string]float64{"yes": 0.09, "no": 0.88, "unsure": 0.03}, vp.LabelBad, vp.VerdictFail, 0.88, true},
 		{"unsure is a non-answer", "unsure", map[string]float64{"yes": 0.4, "no": 0.2, "unsure": 0.4}, vp.LabelGood, vp.VerdictDefer, 0, false},
@@ -70,6 +71,10 @@ func TestJevEvaluateMapsChoices(t *testing.T) {
 			}
 			if rec.Confidence != c.wantConf {
 				t.Fatalf("confidence = %v, want %v (the probability of the chosen option, not the confidence field)", rec.Confidence, c.wantConf)
+			}
+			// a decoded 200 is a billed call even when it names no usable option: metered, never a free error
+			if j.calls != 1 {
+				t.Fatalf("calls = %d, want 1 (a decoded response is metered whatever it named)", j.calls)
 			}
 			if rec.Agree != c.wantGree {
 				t.Fatalf("agree = %v, want %v", rec.Agree, c.wantGree)
