@@ -103,7 +103,7 @@ func main() {
 	flag.StringVar(&cfg.question, "question", defaultQuestion, "the verification gate applied to every snippet")
 	flag.StringVar(&cfg.bin, "bin", "", "offload-harness binary path; empty = resolve from orchestrator config (statepaths.Config)")
 	flag.IntVar(&cfg.timeoutSec, "timeout", 60, "per-snippet local-critic timeout (seconds)")
-	flag.BoolVar(&cfg.jevColumn, "jev-column", false, "also measure the external reference column (SPENDS: about $0.0002 for the committed 40-snippet corpus; skipped with a warning when the credential file is absent)")
+	flag.BoolVar(&cfg.jevColumn, "jev-column", false, "also measure the external reference column (SPENDS: $0.000701 for the committed 40-snippet corpus, measured 2026-09-18; skipped with a warning when the credential file is absent)")
 	flag.StringVar(&cfg.jevOut, "jev-out", "testdata/verifier-seed-jev.jsonl", "where to write the reference column's Record seed JSONL")
 	flag.Parse()
 	os.Exit(run(cfg, os.Stdout))

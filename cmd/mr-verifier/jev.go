@@ -18,9 +18,12 @@ import (
 // local ceiling has something to be a ceiling BELOW — a local decisive accuracy
 // is uninterpretable on its own at this n.
 //
-// It is off by default and it spends: about $0.0002 for a 40-snippet run
-// (measured 2026-09-18). It is never part of a test run and never part of the
-// default command.
+// It is off by default and it spends: $0.000701 for the committed 40-snippet
+// corpus, measured on the live run of 2026-09-18 and read out of the responses
+// (about $0.0000175 per snippet — the per-call figure the backlog estimated
+// from, which is why the whole run costs four times the estimate that was
+// carried over as a run total). It is never part of a test run and never part
+// of the default command.
 
 // jevVerdictKey is the local key the verdict question is filed under. Question
 // keys are never sent to the model — the whole question lives in the
