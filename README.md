@@ -365,6 +365,8 @@ Beyond the surfacer, this repo now carries the **multi-lane orchestrator** (`mr-
 
 The **eval substrate** ships too: a routing gold-set schema + verifier engine (`internal/goldtask`), an execution verifier harness (`mr-goldverify`: checkout parent → apply candidate diff → run held-out tests), and a local-verifier ceiling meter (`mr-verifier`, AURC/AUGRC). **Bring your own gold set**: point `-goldset` at your own task JSONL; the repo's gold-set-dependent tests skip when none is present.
 
+`mr-verifier` can also measure an **external reference column** beside the local one, so a decisive accuracy measured on a small corpus is read against a second verifier rather than against nothing. Arming the reference column runs the same snippets, with the same question, past TypeSafe's Jev — a decision model that returns typed answers with probabilities instead of text — and prints the two ceilings side by side (decisive accuracy, coverage, effective ceiling, AURC, AUGRC). It is **off by default and it spends**: **$0.000701 for the committed 40-snippet corpus** on the live run of 2026-09-18, read out of the responses rather than estimated, at 223–675 ms per snippet (mean 309). The credential comes from `~/.meta-router/orchestrate/free/openrouter.token`, never from the environment; a missing file prints a warning and skips the column, and the run still exits 0 with whatever it could measure. The route and the served model are fixed constants in `internal/jevclient` — there is no flag, option or environment variable through which another model could be reached.
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
