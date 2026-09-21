@@ -28,6 +28,9 @@ type hookInput struct {
 	// an exact composite key — see usagelog.Record. Opaque ids, not content.
 	SessionID string `json:"session_id"`
 	PromptID  string `json:"prompt_id"`
+	// Cwd is the session's working directory, where Claude Code reads the project
+	// (.claude/settings.json) and local (.claude/settings.local.json) settings scopes.
+	Cwd string `json:"cwd"`
 	// TranscriptPath lets the quota banner show once at session start (isFirstPrompt).
 	TranscriptPath string `json:"transcript_path"`
 }
@@ -562,6 +565,10 @@ func main() {
 		mode   string
 		cands  []usagelog.Cand // W9 R9.2b: scored candidates (cosine paths only)
 		hint   string          // §6c RS1 quota+route hint ("" on any error / disabled)
+		// vis is loaded INSIDE the deadline-bounded goroutine: a slow or locked settings
+		// file must degrade to "inject nothing" like every other per-prompt read, never
+		// block the hook past its deadline (review of PR #70).
+		vis skillVisibility
 		// degradeErr carries a cross-encoder failure OUT of the goroutine so it
 		// is stamped on EVERY outcome. Reading `degraded` only on the surfaced
 		// path hid the outage on gated-empty / bm25-fallback / embedder-down
@@ -617,14 +624,14 @@ func main() {
 				hint = appendHint(hint, p)
 			}
 		}
-		ch <- result{ids, topCos, mode, cands, hint, degradeErr, primaryErr}
+		ch <- result{ids, topCos, mode, cands, hint, loadSkillVisibility(claudeConfigDir(), in.Cwd), degradeErr, primaryErr}
 	}()
 
 	select {
 	case r := <-ch:
 		// Suggest only skills the model can act on. Filtered BEFORE Surfaced is recorded, so
 		// the outcome join sees what was shown; the dropped ids are kept in Hidden.
-		r.ids, rec.Hidden = filterInvocable(byID, r.ids, loadSkillVisibility(claudeConfigDir()))
+		r.ids, rec.Hidden = filterInvocable(byID, r.ids, r.vis) // pure: no I/O past the deadline
 		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
 		// One Err slot, causes JOINED — never dropped on conflict. A
 		// first-cause-wins chain here let three non-fatal -ranker notices

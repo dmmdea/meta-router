@@ -32,31 +32,68 @@ func claudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-// loadSkillVisibility reads settings.json (and installed_plugins.json when present).
-// Fail-open: an unreadable or corrupt settings file yields a zero value that filters
-// NOTHING -- the hook's behaviour before this filter existed.
-func loadSkillVisibility(dir string) skillVisibility {
-	if dir == "" {
-		return skillVisibility{}
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+// settingsFields are the two keys this filter needs, from any one scope's file.
+type settingsFields struct {
+	SkillOverrides map[string]string `json:"skillOverrides"`
+	EnabledPlugins map[string]bool   `json:"enabledPlugins"`
+}
+
+// readScope reads one settings file. present=false for a missing file (a scope that is
+// simply not configured); ok=false for a file that exists but cannot be read or parsed.
+func readScope(path string) (f settingsFields, present, ok bool) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return f, false, true
+		}
+		return f, true, false
+	}
+	if json.Unmarshal(raw, &f) != nil {
+		return f, true, false
+	}
+	return f, true, true
+}
+
+// loadSkillVisibility merges the scopes Claude Code merges, in its precedence order
+// user < project < local (later wins per key): userDir/settings.json, then the
+// session's project <projectDir>/.claude/settings.json and settings.local.json.
+// Reading only the user file was wrong both ways (review of PR #70): a plugin a PROJECT
+// enables was hidden, and a skill a project-LOCAL file turns off was still suggested.
+// Managed/policy settings are not read; they are rare and only ever restrict.
+//
+// Fail-open: an unreadable or corrupt user file, or a corrupt project/local file, makes
+// the merged view unknowable -- the zero value filters NOTHING (the old behaviour).
+func loadSkillVisibility(userDir, projectDir string) skillVisibility {
+	if userDir == "" {
 		return skillVisibility{}
 	}
-	var s struct {
-		SkillOverrides map[string]string `json:"skillOverrides"`
-		EnabledPlugins map[string]bool   `json:"enabledPlugins"`
+	paths := []string{filepath.Join(userDir, "settings.json")}
+	if projectDir != "" {
+		paths = append(paths,
+			filepath.Join(projectDir, ".claude", "settings.json"),
+			filepath.Join(projectDir, ".claude", "settings.local.json"))
 	}
-	if json.Unmarshal(raw, &s) != nil {
-		return skillVisibility{}
+	v := skillVisibility{ok: true, overrides: map[string]string{}, installed: map[string]bool{}, enabled: map[string]bool{}}
+	plugins := map[string]bool{} // plugin name -> enabled, last scope wins
+	for i, p := range paths {
+		f, present, ok := readScope(p)
+		if !ok || (i == 0 && !present) {
+			return skillVisibility{} // user file must exist; any corrupt scope -> filter nothing
+		}
+		for name, val := range f.SkillOverrides {
+			v.overrides[name] = val
+		}
+		for key, on := range f.EnabledPlugins {
+			name, _, _ := strings.Cut(key, "@")
+			plugins[name] = on
+		}
 	}
-	v := skillVisibility{ok: true, overrides: s.SkillOverrides, installed: map[string]bool{}, enabled: map[string]bool{}}
-	for key, on := range s.EnabledPlugins {
-		if name, _, _ := strings.Cut(key, "@"); on {
+	for name, on := range plugins {
+		if on {
 			v.enabled[name] = true
 		}
 	}
-	if ip, err := os.ReadFile(filepath.Join(dir, "plugins", "installed_plugins.json")); err == nil {
+	if ip, err := os.ReadFile(filepath.Join(userDir, "plugins", "installed_plugins.json")); err == nil {
 		var inst struct {
 			Plugins map[string]json.RawMessage `json:"plugins"`
 		}
