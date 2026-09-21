@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +25,11 @@ var hintLanes = []string{"claude", "codex", "copilot", "glm",
 // windowOrder pins a stable per-lane window order in the render.
 var windowOrder = []ledger.WindowKind{ledger.Win5h, ledger.Win7d, ledger.WinMonth, ledger.WinDay, ledger.WinTrial}
 
+// quotaHintMaxAge bounds how long after the last metered window the banner
+// still carries news. Beyond it the numbers are unchanged history, and a tick
+// is not a delta.
+const quotaHintMaxAge = 15 * time.Minute
+
 // quotaHint builds a one-line quota+route pointer from the ledger file DIRECTLY
 // (no subprocess, no network — the hook's deadline stands (300ms binary default; 1000ms via -timeout-ms in production); a file read is
 // microseconds). ANY failure or absent signal → "" (inject nothing; fail-open
@@ -37,6 +43,7 @@ func quotaHint(now time.Time) string {
 	if warn != "" {
 		return "" // corrupt/unreadable ledger: a hint with no trustworthy signal is noise
 	}
+
 	snap := l.Snapshot()
 
 	// Index buckets by lane→window.
@@ -97,6 +104,28 @@ func quotaHint(now time.Time) string {
 
 	if len(rows) == 0 {
 		return "" // no signal at all: inject nothing (fail-open)
+	}
+
+	// Staleness gate: report DELTAS, never ticks. Observed live 2026-09-21 -- the
+	// banner re-rendered byte-identical content ("copilot month 100% EXHAUSTED ·
+	// nim trial 6%") on every prompt of a session, costing context every turn
+	// while changing no decision. If nothing has metered a window recently there
+	// is no new pressure to report, and repeating an old number is noise.
+	//
+	// Stateless BY DESIGN: the ledger's own mtime is the signal, so mr-hook still
+	// writes nothing in production. A dispatch touches the ledger, so the next
+	// prompt renders fresh numbers again.
+	//
+	// The GLM hard-stop latch is EXEMPT and must never be suppressed. It is
+	// account protection, not quota reporting, and it is deliberately
+	// ledger-independent -- it renders with no buckets and with no ledger file at
+	// all (TestHookMismatchKeepsQuotaHintE2E seeds only glm-alert.json). Gating it
+	// on ledger freshness silently swallowed a 1313 warning.
+	if !glmLatched {
+		fi, err := os.Stat(statepaths.Ledger())
+		if err != nil || now.Sub(fi.ModTime()) > quotaHintMaxAge {
+			return ""
+		}
 	}
 
 	// rows are already in hintLanes order (deterministic render). The pointer

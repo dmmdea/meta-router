@@ -220,3 +220,77 @@ func TestQuotaHintOmitsFullyUnknownLanes(t *testing.T) {
 		t.Fatalf("a lane with no live number must be omitted, not rendered as ?: %s", h)
 	}
 }
+
+// TestQuotaHintStaleLedgerSuppressed: the hint re-rendered IDENTICAL content on
+// every single prompt (observed live 2026-09-21: "copilot month 100% EXHAUSTED ·
+// nim trial 6%" on every turn of a session). Repeating an unchanged number is a
+// tick, not a delta, and it costs context on every turn while changing no
+// decision. The ledger's own mtime is the stateless freshness signal: if nothing
+// has metered a window recently, there is no new pressure to report.
+//
+// Stateless BY DESIGN -- mr-hook writes no state in production and that
+// invariant is preserved here.
+func TestQuotaHintStaleLedgerSuppressed(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("claude", ledger.Win5h, 42, hnow.Add(3*time.Hour), hnow)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stale := hnow.Add(-30 * time.Minute)
+	if err := os.Chtimes(statepaths.Ledger(), stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if h := quotaHint(hnow); h != "" {
+		t.Fatalf("stale ledger (30m untouched) must suppress the hint, got: %s", h)
+	}
+}
+
+// TestQuotaHintFreshLedgerRenders: the complement -- a ledger touched moments ago
+// carries live pressure and MUST still render. Without this, the gate above
+// could pass by suppressing everything.
+func TestQuotaHintFreshLedgerRenders(t *testing.T) {
+	t.Setenv("MR_ORCH_STATE", t.TempDir())
+	if err := ledger.Update(statepaths.Ledger(), func(l *ledger.Ledger) {
+		l.ObserveProvider("claude", ledger.Win5h, 42, hnow.Add(3*time.Hour), hnow)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := hnow.Add(-1 * time.Minute)
+	if err := os.Chtimes(statepaths.Ledger(), fresh, fresh); err != nil {
+		t.Fatal(err)
+	}
+	h := quotaHint(hnow)
+	if h == "" {
+		t.Fatal("fresh ledger must still render the hint")
+	}
+	if !strings.Contains(h, "42%") {
+		t.Fatalf("fresh hint lost its signal: %s", h)
+	}
+}
+
+// TestQuotaHintGLMLatchExemptFromStaleness: REGRESSION GUARD.
+//
+// The first cut of the staleness gate ran os.Stat(ledger) before rows were
+// built. The GLM hard-stop latch is deliberately ledger-INDEPENDENT -- it
+// renders with no buckets and with no ledger file at all -- so the stat failed
+// and the gate silently swallowed a 1313 account-protection warning
+// (caught by TestHookMismatchKeepsQuotaHintE2E).
+//
+// The latch is account protection, not quota reporting. It must survive any
+// freshness gate, including the no-ledger-at-all case seeded here.
+func TestQuotaHintGLMLatchExemptFromStaleness(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MR_ORCH_STATE", dir)
+	// Only a latch. No ledger file whatsoever.
+	if err := os.WriteFile(statepaths.GLMAlert(), []byte(`{"note":"test latch"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(statepaths.Ledger()); err == nil {
+		t.Fatal("precondition: this test requires NO ledger file")
+	}
+	h := quotaHint(hnow)
+	if !strings.Contains(h, "glm HARD-STOP(1313)") {
+		t.Fatalf("the GLM hard-stop latch must never be suppressed by the staleness gate, got: %q", h)
+	}
+}
