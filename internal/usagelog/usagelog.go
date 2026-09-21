@@ -3,10 +3,10 @@
 package usagelog
 
 import (
-	"math"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 )
@@ -26,11 +26,15 @@ type Record struct {
 	// a build that does not supply them must leave the field ABSENT rather than
 	// write an empty string, which a downstream join would otherwise treat as
 	// one real shared session.
-	SessionID    string   `json:"session_id,omitempty"`
-	PromptID     string   `json:"prompt_id,omitempty"`
-	PromptHash   string   `json:"prompt_hash"`
-	PromptLen    int      `json:"prompt_len"`
-	Surfaced     []string `json:"surfaced"`
+	SessionID  string   `json:"session_id,omitempty"`
+	PromptID   string   `json:"prompt_id,omitempty"`
+	PromptHash string   `json:"prompt_hash"`
+	PromptLen  int      `json:"prompt_len"`
+	Surfaced   []string `json:"surfaced"`
+	// Hidden are ranked candidates dropped because the model cannot invoke them (hidden by
+	// skillOverrides, or from an installed-but-disabled plugin). They are NOT in Surfaced,
+	// so the surfaced-vs-invoked outcome join counts only what was actually shown.
+	Hidden       []string `json:"hidden,omitempty"`
 	TopCosine    float64  `json:"top_cosine"`
 	LatencyMs    int64    `json:"latency_ms"`
 	Mode         string   `json:"mode"` // embed | rerank | hybrid | bm25-fallback | gated-empty | embedder-down | too-short | tpl-mismatch | error
