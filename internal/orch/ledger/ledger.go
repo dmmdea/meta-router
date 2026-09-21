@@ -30,6 +30,7 @@ package ledger
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -84,15 +85,23 @@ type Bucket struct {
 	// Subject scopes the bucket to a credential subject (account); "" is the
 	// default subject. W1 keys for this so W2's multi-account profiles don't
 	// have to retrofit the key shape (cheap to key now, painful later).
-	Subject      string     `json:"subject,omitempty"`
-	Window       WindowKind `json:"window"`
-	UsedPct      float64    `json:"used_pct"` // 0..100; -1 = unknown
-	ResetsAt     time.Time  `json:"resets_at"`
-	Source       string     `json:"source"` // "provider" | "shadow"
-	ObservedAt   time.Time  `json:"observed_at"`
-	ShadowTokens int64      `json:"shadow_tokens"`
-	CapTokens    int64      `json:"cap_tokens"` // learned capacity estimate; 0 = unlearned
-	CapVersion   int        `json:"cap_version"`
+	Subject    string     `json:"subject,omitempty"`
+	Window     WindowKind `json:"window"`
+	UsedPct    float64    `json:"used_pct"` // 0..100; -1 = unknown
+	ResetsAt   time.Time  `json:"resets_at"`
+	Source     string     `json:"source"` // "provider" | "shadow"
+	ObservedAt time.Time  `json:"observed_at"`
+	// ChangedAt is when a DISPLAYED value last changed: the rounded UsedPct or
+	// ResetsAt. Stamped by UpdateChecked, never by an observation that merely
+	// re-reports the same numbers -- ObservedAt covers that, and it moves on every
+	// poll. Consumers that report news (the mr-hook quota banner) key on this;
+	// the ledger FILE's mtime is useless for that, because every route/status/run
+	// consult rewrites it whether or not anything changed. Zero = never stamped
+	// (a ledger written before this field existed).
+	ChangedAt    time.Time `json:"changed_at,omitzero"`
+	ShadowTokens int64     `json:"shadow_tokens"`
+	CapTokens    int64     `json:"cap_tokens"` // learned capacity estimate; 0 = unlearned
+	CapVersion   int       `json:"cap_version"`
 	// CapSource marks the capacity's provenance: "" = fitted/measured,
 	// CapSourceEstimate = config guess (S2R-3: throttle-only, never exhaust).
 	CapSource string `json:"cap_source,omitempty"`
@@ -165,6 +174,7 @@ type Observation struct {
 func (l *Ledger) Observe(o Observation, now time.Time) (bool, string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	b := l.get(o.Lane, o.Subject, o.Window)
 	b.roll(now)
 	observedAt := o.ObservedAt
@@ -210,6 +220,10 @@ type Ledger struct {
 	mu      sync.Mutex
 	path    string
 	buckets map[string]*Bucket // key: lane + "|" + subject + "|" + window
+	// latestNow is the newest `now` any mutator was handed during the current write;
+	// stampChanges stamps ChangedAt with it so the ledger follows the CALLER's clock
+	// (tests, replays and backfills inject time), never the wall clock behind it.
+	latestNow time.Time
 }
 
 func subjectOrDefault(s string) string {
@@ -309,7 +323,9 @@ func UpdateChecked(path string, fn func(*Ledger)) (string, error) {
 			warn += " — original bytes copied to " + filepath.Base(dst)
 		}
 	}
+	before := l.displayedSnapshot()
 	fn(l)
+	l.stampChanges(before)
 	return warn, l.Save()
 }
 
@@ -390,6 +406,7 @@ func (l *Ledger) ObserveProvider(lane string, w WindowKind, usedPct float64, res
 func (l *Ledger) ObserveProviderSubject(lane, subject string, w WindowKind, usedPct float64, resetsAt, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	b := l.get(lane, subject, w)
 	b.roll(now)
 	b.UsedPct = usedPct
@@ -424,6 +441,7 @@ func (l *Ledger) BucketSubject(lane, subject string, w WindowKind) (Bucket, bool
 func (l *Ledger) AddShadowSubject(lane, subject string, w WindowKind, tokens int64, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	l.addShadowLocked(l.get(lane, subject, w), w, tokens, now)
 }
 
@@ -449,6 +467,7 @@ func (l *Ledger) SnapshotSubject(lane, subject string) []Bucket {
 func (l *Ledger) AnchorIfUnset(lane string, w WindowKind, resetsAt, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	b := l.get(lane, "", w)
 	b.roll(now)
 	if b.Source != "provider" && b.ResetsAt.IsZero() {
@@ -466,6 +485,7 @@ func (l *Ledger) AnchorIfUnset(lane string, w WindowKind, resetsAt, now time.Tim
 func (l *Ledger) AnchorAuthoritative(lane string, w WindowKind, resetsAt, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	b := l.get(lane, "", w)
 	b.roll(now)
 	if b.Source != "provider" {
@@ -476,6 +496,7 @@ func (l *Ledger) AnchorAuthoritative(lane string, w WindowKind, resetsAt, now ti
 func (l *Ledger) AddShadow(lane string, w WindowKind, tokens int64, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	l.addShadowLocked(l.get(lane, "", w), w, tokens, now)
 }
 
@@ -509,6 +530,7 @@ func (l *Ledger) addShadowLocked(b *Bucket, w WindowKind, tokens int64, now time
 func (l *Ledger) ClearShadow(lane string, w WindowKind, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	b := l.get(lane, "", w)
 	b.ShadowTokens = 0
 	if b.Source != "provider" {
@@ -562,6 +584,7 @@ func (l *Ledger) SetCapacityEstimate(lane string, w WindowKind, capTokens int64)
 func (l *Ledger) ClearCapacity(lane string, w WindowKind, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.noteNow(now)
 	b := l.get(lane, "", w)
 	b.roll(now)
 	if b.Source == "provider" {
@@ -626,4 +649,61 @@ func (l *Ledger) Save() error {
 		return err
 	}
 	return os.Rename(tmp, l.path)
+}
+
+// clock is the stamping time source; tests swap it.
+var clock = time.Now
+
+// displayed is what a reader of a bucket actually sees: the percentage at the
+// precision it is rendered ("%.0f%%"; -1 = unknown) and the reset moment.
+// Sub-percent drift is invisible to the reader, so it is not a change.
+type displayed struct {
+	pct   float64
+	reset time.Time
+}
+
+func displayOf(b *Bucket) displayed {
+	pct := -1.0
+	if b.UsedPct >= 0 {
+		pct = math.Round(b.UsedPct)
+	}
+	return displayed{pct: pct, reset: b.ResetsAt}
+}
+
+func (l *Ledger) displayedSnapshot() map[string]displayed {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string]displayed, len(l.buckets))
+	for k, b := range l.buckets {
+		out[k] = displayOf(b)
+	}
+	return out
+}
+
+// stampChanges sets ChangedAt on every bucket that is new or whose displayed
+// value differs from `before`. It is the single stamping point for all
+// mutators, because every write reaches disk through UpdateChecked -- including
+// the expiry roll() that runs inside a mutator.
+func (l *Ledger) stampChanges(before map[string]displayed) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.latestNow
+	if now.IsZero() {
+		now = clock().UTC() // no mutator supplied a time (e.g. SetCapacity)
+	}
+	l.latestNow = time.Time{}
+	for k, b := range l.buckets {
+		prev, existed := before[k]
+		cur := displayOf(b)
+		if !existed || prev.pct != cur.pct || !prev.reset.Equal(cur.reset) {
+			b.ChangedAt = now
+		}
+	}
+}
+
+// noteNow records the newest caller-supplied time of this write. Caller holds l.mu.
+func (l *Ledger) noteNow(now time.Time) {
+	if now.After(l.latestNow) {
+		l.latestNow = now
+	}
 }
