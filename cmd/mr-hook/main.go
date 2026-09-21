@@ -28,6 +28,8 @@ type hookInput struct {
 	// an exact composite key — see usagelog.Record. Opaque ids, not content.
 	SessionID string `json:"session_id"`
 	PromptID  string `json:"prompt_id"`
+	// TranscriptPath lets the quota banner show once at session start (isFirstPrompt).
+	TranscriptPath string `json:"transcript_path"`
 }
 
 type scoredRetriever interface {
@@ -605,7 +607,12 @@ func main() {
 		var hint string
 		if *quotaHintOn {
 			now := time.Now().UTC()
-			hint = quotaHint(now)
+			// Report deltas, never ticks: identical quota content on every prompt costs
+			// context each turn and changes no decision. Render when the ledger reports a
+			// real change (see quotaHintWithFreshness) or on the session's first prompt.
+			if h, fresh := quotaHintWithFreshness(now); h != "" && (fresh || isFirstPrompt(in.TranscriptPath)) {
+				hint = h
+			}
 			if p := delegateProposal(now, in.SessionID); p != "" {
 				hint = appendHint(hint, p)
 			}
