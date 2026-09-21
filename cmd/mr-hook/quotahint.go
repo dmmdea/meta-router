@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -140,7 +140,12 @@ const quotaHintMaxAge = 15 * time.Minute
 
 func bucketIsNews(b ledger.Bucket, now time.Time) bool {
 	if !b.ChangedAt.IsZero() {
-		if b.ChangedAt.After(now) || now.Sub(b.ChangedAt) <= quotaHintMaxAge {
+		age := now.Sub(b.ChangedAt)
+		// A small future stamp (writer/reader skew) is fresh. One further ahead than
+		// the window itself is a clock error and is NOT trusted: skew can neither
+		// silence the banner nor pin it on. The first-prompt rule still shows it once
+		// per session regardless.
+		if age >= -quotaHintMaxAge && age <= quotaHintMaxAge {
 			return true
 		}
 	}
@@ -156,7 +161,13 @@ const (
 	firstPromptCeiling = 16 << 20
 )
 
-var assistantMarker = []byte(`"type":"assistant"`)
+// assistantMarker tolerates whitespace around the colon, so a transcript writer that
+// switched to spaced JSON could not silently turn every prompt into a "first" one.
+var assistantMarker = regexp.MustCompile(`"type"\s*:\s*"assistant"`)
+
+// markerTail is how much of a chunk is carried into the next read: enough for any
+// spacing variant of the marker that straddles a read boundary.
+const markerTail = 64
 
 // isFirstPrompt reports whether the session has not produced an assistant turn yet,
 // so the banner shows once at session start even when nothing is fresh. It streams
@@ -175,19 +186,20 @@ func isFirstPrompt(path string) bool {
 		return true
 	}
 	defer f.Close()
-	buf := make([]byte, firstPromptChunk+len(assistantMarker))
+	buf := make([]byte, firstPromptChunk+markerTail)
 	carry := 0
 	total := 0
+	zeroReads := 0
 	for total < firstPromptCeiling {
 		// read exactly one chunk after the carried tail, so the chunk boundary is real
 		n, rerr := f.Read(buf[carry : carry+firstPromptChunk])
 		if n > 0 {
 			total += n
-			if bytes.Contains(buf[:carry+n], assistantMarker) {
+			if assistantMarker.Match(buf[:carry+n]) {
 				return false
 			}
 			// keep a tail so a marker split across reads is still found
-			keep := len(assistantMarker) - 1
+			keep := markerTail - 1
 			if carry+n < keep {
 				keep = carry + n
 			}
@@ -196,6 +208,12 @@ func isFirstPrompt(path string) bool {
 		}
 		if rerr != nil {
 			return true // EOF with no assistant record: nothing has answered yet
+		}
+		if n == 0 {
+			zeroReads++
+			if zeroReads > 3 {
+				return true // a reader making no progress: treat like EOF, never spin
+			}
 		}
 	}
 	return false

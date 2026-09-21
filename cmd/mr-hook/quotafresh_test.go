@@ -215,3 +215,22 @@ func TestQuotaBannerGateWiredE2E(t *testing.T) {
 		t.Fatalf("first prompt must show the banner once: %q", out)
 	}
 }
+
+// Review finding (HIGH, read side): a stamp far in the future is a clock error.
+// It must not pin the banner on; the first-prompt rule still shows it per session.
+func TestFarFutureChangedAtIsNotTrusted(t *testing.T) {
+	seedBuckets(t, []ledger.Bucket{claudeBucket(fnow.Add(48*time.Hour), fnow.Add(72*time.Hour))})
+	if _, fresh := quotaHintWithFreshness(fnow); fresh {
+		t.Fatal("a ChangedAt two days ahead must not read as fresh forever")
+	}
+}
+
+// Review finding (MEDIUM): a transcript writer that emits spaced JSON must not turn
+// every prompt into a "first" prompt.
+func TestNotFirstPromptWithSpacedMarker(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "t.jsonl")
+	os.WriteFile(p, []byte(`{"type": "user"}`+"\n"+`{"type" : "assistant", "message": {}}`+"\n"), 0o644)
+	if isFirstPrompt(p) {
+		t.Fatal(`"type" : "assistant" (spaced) was not recognised`)
+	}
+}

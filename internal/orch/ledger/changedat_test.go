@@ -130,3 +130,31 @@ func TestChangedAtFollowsCallerClockNotWallClock(t *testing.T) {
 		t.Fatalf("ChangedAt must be UTC like every other field, got %v", got.Location())
 	}
 }
+
+// Review finding (HIGH): a future stamp must be clamped to the wall clock, the same
+// defence Observe applies to ObservedAt. Otherwise one skewed write keeps the banner
+// "fresh" until real time catches up.
+func TestChangedAtFutureStampClampedToWallClock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ledger.json")
+	wall := tc0
+	withClock(t, wall)
+	ahead := wall.Add(48 * time.Hour) // a caller whose clock jumped two days
+	_ = Update(p, func(l *Ledger) { l.ObserveProvider("claude", Win5h, 42, ahead.Add(3*time.Hour), ahead) })
+	if got := bucketAfter(t, p).ChangedAt; !got.Equal(wall) {
+		t.Fatalf("future stamp %v must be clamped to the wall clock %v, got %v", ahead, wall, got)
+	}
+}
+
+// Review finding (MEDIUM, refuted in writing): SetCapacity takes no now, but capacity
+// is not a DISPLAYED value, so calling it alone must never stamp ChangedAt. This pins
+// that, so the untested wall-clock fallback cannot be reached through it.
+func TestSetCapacityAloneDoesNotStamp(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ledger.json")
+	withClock(t, tc0)
+	_ = Update(p, func(l *Ledger) { l.ObserveProvider("claude", Win5h, 42, tc0.Add(3*time.Hour), tc0) })
+	withClock(t, tc0.Add(20*time.Minute))
+	_ = Update(p, func(l *Ledger) { l.SetCapacity("claude", Win5h, 99999) })
+	if got := bucketAfter(t, p).ChangedAt; !got.Equal(tc0) {
+		t.Fatalf("a capacity-only write moved ChangedAt to %v", got)
+	}
+}

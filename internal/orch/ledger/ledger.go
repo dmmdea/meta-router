@@ -97,7 +97,12 @@ type Bucket struct {
 	// poll. Consumers that report news (the mr-hook quota banner) key on this;
 	// the ledger FILE's mtime is useless for that, because every route/status/run
 	// consult rewrites it whether or not anything changed. Zero = never stamped
-	// (a ledger written before this field existed).
+	// (a ledger written before this field existed). The reverse direction matters
+	// too: a binary built before this field loads the ledger, does not know it, and
+	// rewrites the file WITHOUT it. That degrades safely (zero reads as not-fresh, so
+	// the banner falls back to reset recency and the first-prompt rule) but it
+	// persists until every writer of a state dir is upgraded -- which is why
+	// scripts/deploy-fleet.sh rebuilds every mr-* binary together.
 	ChangedAt    time.Time `json:"changed_at,omitzero"`
 	ShadowTokens int64     `json:"shadow_tokens"`
 	CapTokens    int64     `json:"cap_tokens"` // learned capacity estimate; 0 = unlearned
@@ -688,8 +693,16 @@ func (l *Ledger) stampChanges(before map[string]displayed) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.latestNow
+	wall := clock().UTC()
 	if now.IsZero() {
-		now = clock().UTC() // no mutator supplied a time (e.g. SetCapacity)
+		now = wall // no mutator supplied a time (e.g. SetCapacity)
+	}
+	// Clamp a FUTURE stamp to the wall clock, exactly as Observe clamps ObservedAt:
+	// an unclamped future ChangedAt reads as "fresh" until real time catches up,
+	// holding the banner on for days (a jumped clock, a restored or synced ledger,
+	// a replay injecting the wrong now).
+	if now.After(wall) {
+		now = wall
 	}
 	l.latestNow = time.Time{}
 	for k, b := range l.buckets {
