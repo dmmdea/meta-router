@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,11 +33,26 @@ var windowOrder = []ledger.WindowKind{ledger.Win5h, ledger.Win7d, ledger.WinMont
 // it NEVER names a preferred lane or a rank-table model (§6c: policy lives in
 // the rank table only). The GLM 1313 latch renders `glm HARD-STOP(1313)`.
 func quotaHint(now time.Time) string {
+	h, _ := quotaHintWithFreshness(now)
+	return h
+}
+
+// quotaHintWithFreshness returns the hint AND whether it carries news. The content
+// logic is unchanged; freshness is SEMANTIC, from the same single ledger read (no
+// second stat, so no read/stat race):
+//   - the GLM hard-stop latch: always fresh -- account protection, never gated;
+//   - a rendered lane whose bucket ChangedAt is within quotaHintMaxAge -- the
+//     ledger stamps it only when a DISPLAYED value moves, never when route/status
+//     merely re-report the same number (which is what defeated an mtime gate);
+//   - a ChangedAt in the future (clock skew): fresh, so skew can never silence it;
+//   - a rendered lane whose window reset within quotaHintMaxAge -- a lane recovering
+//     changes what the banner shows even if nothing has written the ledger since.
+func quotaHintWithFreshness(now time.Time) (string, bool) {
 	// Read-only: the hook NEVER writes state. OpenChecked fails open (empty
 	// buckets + a warn string) on a missing/corrupt file — both yield "".
 	l, warn := ledger.OpenChecked(statepaths.Ledger())
 	if warn != "" {
-		return "" // corrupt/unreadable ledger: a hint with no trustworthy signal is noise
+		return "", false // corrupt/unreadable ledger: a hint with no trustworthy signal is noise
 	}
 	snap := l.Snapshot()
 
@@ -51,16 +68,27 @@ func quotaHint(now time.Time) string {
 	_, glmLatched := glmlane.Latched(statepaths.GLMAlert())
 
 	var rows []string
+	fresh := false
 	for _, lane := range hintLanes {
 		buckets := byLane[lane]
 		// GLM hard-stop latch: render the marker even with no buckets — it is a
 		// real, ledger-truth account-protection signal.
 		if lane == "glm" && glmLatched {
 			rows = append(rows, "glm HARD-STOP(1313)")
+			fresh = true
 			continue
 		}
 		if len(buckets) == 0 {
 			continue // omit lanes with no buckets (no signal to report)
+		}
+		// Freshness looks at every bucket the banner is BUILT from, before the
+		// render decides whether this lane gets a row: a window that just reset
+		// drops its lane's row, and a row disappearing ("no longer EXHAUSTED") is
+		// a change in what the banner says.
+		for _, b := range buckets {
+			if bucketIsNews(b, now) {
+				fresh = true
+			}
 		}
 		var parts []string
 		live := false // does this lane carry ANY real number?
@@ -96,7 +124,7 @@ func quotaHint(now time.Time) string {
 	}
 
 	if len(rows) == 0 {
-		return "" // no signal at all: inject nothing (fail-open)
+		return "", false // no signal at all: inject nothing (fail-open)
 	}
 
 	// rows are already in hintLanes order (deterministic render). The pointer
@@ -104,7 +132,91 @@ func quotaHint(now time.Time) string {
 	// ~/.claude/rules/mr-orchestrate.md, which has never existed on either
 	// machine (audit 2026-07-25: dangling escape hatch).
 	return "mr-orchestrate quota: " + strings.Join(rows, " · ") +
-		" — delegable work: consult `mr-orchestrate route` first"
+		" — delegable work: consult `mr-orchestrate route` first", fresh
+}
+
+// quotaHintMaxAge bounds how long after a real change the banner still carries news.
+const quotaHintMaxAge = 15 * time.Minute
+
+func bucketIsNews(b ledger.Bucket, now time.Time) bool {
+	if !b.ChangedAt.IsZero() {
+		age := now.Sub(b.ChangedAt)
+		// A small future stamp (writer/reader skew) is fresh. One further ahead than
+		// the window itself is a clock error and is NOT trusted: skew can neither
+		// silence the banner nor pin it on. The first-prompt rule still shows it once
+		// per session regardless.
+		if age >= -quotaHintMaxAge && age <= quotaHintMaxAge {
+			return true
+		}
+	}
+	if !b.ResetsAt.IsZero() && !b.ResetsAt.After(now) && now.Sub(b.ResetsAt) <= quotaHintMaxAge {
+		return true
+	}
+	return false
+}
+
+// firstPromptChunk is the transcript read size; firstPromptCeiling bounds the scan.
+const (
+	firstPromptChunk   = 64 * 1024
+	firstPromptCeiling = 16 << 20
+)
+
+// assistantMarker tolerates whitespace around the colon, so a transcript writer that
+// switched to spaced JSON could not silently turn every prompt into a "first" one.
+var assistantMarker = regexp.MustCompile(`"type"\s*:\s*"assistant"`)
+
+// markerTail is how much of a chunk is carried into the next read: enough for any
+// spacing variant of the marker that straddles a read boundary.
+const markerTail = 64
+
+// isFirstPrompt reports whether the session has not produced an assistant turn yet,
+// so the banner shows once at session start even when nothing is fresh. It streams
+// from the START and stops at the first assistant record: measured on real
+// transcripts that record sits 200-270 KB in, behind the first turn's hook
+// attachments, so a fixed-prefix check would misread long sessions as new.
+// No path, an unreadable file, or one not yet written all mean "first" -- the safe
+// direction, since showing the banner is the pre-gate behaviour. Past the ceiling
+// with no marker, the session is treated as established.
+func isFirstPrompt(path string) bool {
+	if path == "" {
+		return true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	buf := make([]byte, firstPromptChunk+markerTail)
+	carry := 0
+	total := 0
+	zeroReads := 0
+	for total < firstPromptCeiling {
+		// read exactly one chunk after the carried tail, so the chunk boundary is real
+		n, rerr := f.Read(buf[carry : carry+firstPromptChunk])
+		if n > 0 {
+			total += n
+			if assistantMarker.Match(buf[:carry+n]) {
+				return false
+			}
+			// keep a tail so a marker split across reads is still found
+			keep := markerTail - 1
+			if carry+n < keep {
+				keep = carry + n
+			}
+			copy(buf, buf[carry+n-keep:carry+n])
+			carry = keep
+		}
+		if rerr != nil {
+			return true // EOF with no assistant record: nothing has answered yet
+		}
+		if n == 0 {
+			zeroReads++
+			if zeroReads > 3 {
+				return true // a reader making no progress: treat like EOF, never spin
+			}
+		}
+	}
+	return false
 }
 
 // appendHint appends the quota hint to ctx (returns the bare hint when ctx is
