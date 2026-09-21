@@ -622,6 +622,9 @@ func main() {
 
 	select {
 	case r := <-ch:
+		// Suggest only skills the model can act on. Filtered BEFORE Surfaced is recorded, so
+		// the outcome join sees what was shown; the dropped ids are kept in Hidden.
+		r.ids, rec.Hidden = filterInvocable(byID, r.ids, loadSkillVisibility(claudeConfigDir()))
 		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
 		// One Err slot, causes JOINED — never dropped on conflict. A
 		// first-cause-wins chain here let three non-fatal -ranker notices

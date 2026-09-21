@@ -22,7 +22,8 @@ This repo ships **two** tools with different data boundaries. Read the one you r
 - **No raw prompts are persisted.** The usage log (`~/.meta-router/usage.jsonl`) stores a
   SHA-256 hash of the prompt plus its length — never the raw text. It also records the
   `session_id` and `prompt_id` that Claude Code supplies on the hook payload, the skills
-  surfaced, the top cosine, latency and the decision mode. Those two identifiers are opaque
+  surfaced, the skills withheld because the model cannot invoke them (`hidden` — skill IDs from
+  the index, the same kind of value as `surfaced`, never prompt text), the top cosine, latency and the decision mode. Those two identifiers are opaque
   and carry no prompt content.
   **Know what `session_id` is before you share this file, though:** Claude Code names each
   session transcript `~/.claude/projects/<project>/<session_id>.jsonl`, and those transcripts

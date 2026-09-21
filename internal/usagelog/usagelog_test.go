@@ -91,6 +91,8 @@ func TestRecordFieldsAreAllowlisted(t *testing.T) {
 	allowed := map[string]bool{
 		"ts_unix": true, "session_id": true, "prompt_id": true,
 		"prompt_hash": true, "prompt_len": true, "surfaced": true,
+		// hidden: skill IDs from the index (the same kind of value as surfaced) -- never prompt text.
+		"hidden":     true,
 		"top_cosine": true, "latency_ms": true, "mode": true, "err": true,
 		"nudge_offload": true, "quota_hint": true, "cands": true,
 	}
