@@ -18,7 +18,8 @@ This repo ships **two** tools with different data boundaries. Read the one you r
 ### The skill surfacer (`mr-index` / `mr-hook`)
 
 - **It runs entirely on your machine.** Prompt text is sent only to the local embedding
-  endpoint you configure — never to any third-party or cloud service.
+  endpoint you configure — never to any third-party or cloud service. Background-task
+  notifications (`<task-notification>` turns) are not sent anywhere: no retrieval runs for them.
 - **No raw prompts are persisted.** The usage log (`~/.meta-router/usage.jsonl`) stores a
   SHA-256 hash of the prompt plus its length — never the raw text. It also records the
   `session_id` and `prompt_id` that Claude Code supplies on the hook payload, the skills

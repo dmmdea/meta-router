@@ -37,7 +37,7 @@ type Record struct {
 	Hidden       []string `json:"hidden,omitempty"`
 	TopCosine    float64  `json:"top_cosine"`
 	LatencyMs    int64    `json:"latency_ms"`
-	Mode         string   `json:"mode"` // embed | rerank | hybrid | bm25-fallback | gated-empty | embedder-down | too-short | tpl-mismatch | error
+	Mode         string   `json:"mode"` // embed | rerank | hybrid | bm25-fallback | gated-empty | embedder-down | too-short | tpl-mismatch | machine-turn | error
 	Err          string   `json:"err,omitempty"`
 	NudgeOffload bool     `json:"nudge_offload,omitempty"` // an offload-suitability nudge was appended
 	QuotaHint    bool     `json:"quota_hint,omitempty"`    // a quota+route hint was appended (§6c RS1)

@@ -421,6 +421,10 @@ func main() {
 	rec.PromptHash = usagelog.HashPrompt(in.Prompt)
 	rec.PromptLen = len(in.Prompt)
 	rec.SessionID, rec.PromptID = in.SessionID, in.PromptID
+	// A background-task notification is not a request, so no skill retrieval runs for it.
+	// Only the retrieval is skipped: the index load, the identity check and the quota banner
+	// below behave exactly as on any other prompt.
+	machine := isMachineTurn(in.Prompt)
 
 	ip := *indexPath
 	if ip == "" {
@@ -593,7 +597,9 @@ func main() {
 		// rebuild) — but the quota hint below still runs: it reads ledgers,
 		// not vectors, and is the one thing the W9-P spec says survives.
 		mode := "tpl-mismatch"
-		if tplErr == nil {
+		if tplErr == nil && machine {
+			mode = "machine-turn" // nothing is ranked, so the notification never reaches the embedder
+		} else if tplErr == nil {
 			ids, topCos, mode, cands, primaryErr = decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
 			// If the cross-encoder failed and the embed ordering was used
 			// instead, the row must say "embed" — never claim a rerank that
