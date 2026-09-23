@@ -84,7 +84,7 @@ Merge this into `~/.claude/settings.json` (use absolute paths to the binaries yo
 
 | Hook | Fires on | Effect |
 |---|---|---|
-| `UserPromptSubmit` | every prompt | `mr-hook` retrieves the top-k skills and injects them as `additionalContext`. Always exits 0 (fail-open). |
+| `UserPromptSubmit` | every prompt | `mr-hook` retrieves the top-k skills and injects them as `additionalContext`. Background-task notifications get no skill hint. Always exits 0 (fail-open). |
 | `SessionStart` | each new / resumed / cleared session | `mr-index refresh` re-embeds only the skills whose files changed (hash-diff), keeping the index fresh and cheap. |
 
 > On Windows, supplying `args` makes Claude Code spawn the binary directly without a shell, which avoids any misinterpretation of a `C:\\...` path. `mr-hook` takes no arguments (it reads the prompt JSON from stdin); `mr-index` takes `refresh` as a single argument.
@@ -307,6 +307,7 @@ Key properties:
 - **The index is built once; only the query is embedded per prompt.** Skill vectors are cached on disk (the gob/float32 `index.bin` sidecar parses in ~3 ms; the JSON is the source of truth and automatic fallback), so the hot path is a single small embedding call plus in-memory math.
 - **Embed-primary ranking** — measured better than the BM25+RRF hybrid on the 236-case gold-set (covered-only recall@3 0.829 vs 0.732); the hybrid remains one flag away (`-ranker=hybrid`) and in `mr-eval` for comparison.
 - **The gate uses the top raw cosine** as a confidence floor: a prompt with no good semantic match surfaces nothing, which is what keeps the hook quiet and trustworthy.
+- **Machine turns get no skill hint.** Claude Code delivers background-task notifications (a finished background command or subagent, a Monitor event, including ones queued while the model was busy) through the same `UserPromptSubmit` event, as a prompt starting with `<task-notification>`. They are not requests: no retrieval runs, nothing reaches the embedder, and the row logs `mode:"machine-turn"`. The quota banner is decided exactly as on any other prompt, so a GLM hard-stop latch still shows on these turns.
 - **Fail-open is absolute.** No index, malformed input, or blown deadline resolve to "inject nothing, exit 0." A cold/dead embedder fails the dial in ~200 ms and drops to the precision-gated BM25 fallback — tuned on the gold-set for zero wrong surfacings (a wrong fallback surfacing is worse than silence).
 - **Hash-diff refresh** keeps the index current: each entry stores a hash of exactly the embedded text, so `refresh` re-embeds only what changed — with a status line per run in `refresh.log`, a >30% mass-removal guard, and a single dated `.bak` of the replaced index.
 - **Privacy:** the usage log (`~/.meta-router/usage.jsonl`) records a SHA-256 hash of the prompt, its length, the `session_id`/`prompt_id` Claude Code supplies on the hook payload, which skills were surfaced, which ranked skills were withheld because the model cannot invoke them (`hidden`: skill IDs, never prompt text), the top cosine, latency, and the decision mode — never the raw prompt. Note that `session_id` is the filename of the session transcript, which does contain prompt text: see [SECURITY.md](SECURITY.md) before sharing the log.
