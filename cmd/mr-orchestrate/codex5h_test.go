@@ -16,7 +16,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
-// The LIVE bucket shape on 2026-09-07 (ledger.json on Qube): the 5h window
+// The LIVE bucket shape on 2026-09-07 (ledger.json on the reference workstation): the 5h window
 // carrying the config estimate at 230%+ modeled against a vendor week at 27%.
 func liveCodexLedger(t *testing.T, now time.Time) string {
 	t.Helper()

@@ -10,7 +10,7 @@ import (
 
 // absTest builds a path that is FULLY QUALIFIED on the host platform.
 //
-// Hardcoded "D:/Dev/..." literals are absolute on Windows and RELATIVE on Linux —
+// Hardcoded "D:/work/..." literals are absolute on Windows and RELATIVE on Linux —
 // where the allowlist guard correctly refuses them for depending on the process's
 // current directory. That made three of these tests pass locally and fail on the
 // POSIX CI runner (2026-07-26). The gate's behaviour was right; the fixtures were
@@ -36,7 +36,7 @@ func TestSubscriptionLanesAreNotGated(t *testing.T) {
 // inside a real repo. With no allowlist configured that export must be REFUSED,
 // not silently performed.
 func TestRepoContextDeniedByDefault(t *testing.T) {
-	d := Check("glm", absTest("dev", "pepsdubai", "readypep-store"), Options{})
+	d := Check("glm", absTest("dev", "acme", "acme-store"), Options{})
 	if d.Allowed {
 		t.Fatal("repository context to a third-party lane must deny by default")
 	}
@@ -46,7 +46,7 @@ func TestRepoContextDeniedByDefault(t *testing.T) {
 }
 
 func TestAllowlistedRepoIsAllowed(t *testing.T) {
-	root := absTest("Dev", "dmmdea", "meta-router")
+	root := absTest("Dev", "owner", "meta-router")
 	sub := filepath.Join(root, "internal", "orch")
 	d := Check("glm", sub, Options{AllowRepos: []string{root}})
 	if !d.Allowed {
@@ -71,8 +71,8 @@ func TestPrefixSiblingIsNotInside(t *testing.T) {
 // The brand-isolation case, stated concretely: an allowlisted personal repo
 // must not license a client checkout on another path.
 func TestOtherRepoStillDenied(t *testing.T) {
-	d := Check("glm", absTest("dev", "pepsdubai", "peptidoteca"), Options{
-		AllowRepos: []string{absTest("Dev", "dmmdea", "meta-router")},
+	d := Check("glm", absTest("dev", "acme", "acme-lab"), Options{
+		AllowRepos: []string{absTest("Dev", "owner", "meta-router")},
 	})
 	if d.Allowed {
 		t.Fatalf("a non-allowlisted repo must stay denied: %+v", d)
@@ -159,8 +159,8 @@ func TestPlanUsesAnAllowlistedInheritedCwd(t *testing.T) {
 // An EXPLICIT non-allowlisted cwd is a deliberate request for that repo's
 // context and must be refused outright — never silently neutralised.
 func TestPlanRefusesExplicitNonAllowlistedCwd(t *testing.T) {
-	_, cleanup, d := Plan("glm", absTest("dev", "pepsdubai", "client"), Options{
-		AllowRepos: []string{absTest("Dev", "dmmdea", "meta-router")},
+	_, cleanup, d := Plan("glm", absTest("dev", "acme", "client"), Options{
+		AllowRepos: []string{absTest("Dev", "owner", "meta-router")},
 	})
 	defer cleanup()
 	if d.Allowed {
@@ -318,7 +318,7 @@ func TestFullyQualifiedPathShapes(t *testing.T) {
 		// fully qualified there — and saying otherwise is how this test failed on
 		// the Linux runner while passing locally. Each expectation is stated per
 		// platform rather than assuming the author's.
-		{`C:\Dev\repo`, win},
+		{`C:\work\repo`, win},
 		{`\\server\share\repo`, win}, // UNC: filepath.IsAbs reports false even on Windows
 		{`//server/share/repo`, true},
 		{"/tmp/repo", !win}, // absolute on POSIX, drive-dependent on Windows

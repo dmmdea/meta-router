@@ -13,7 +13,7 @@ import (
 )
 
 // The fixture is the FULL live response of `gh api copilot_internal/user` on
-// the exhausted dmmdea account (2026-09-06, tracking id redacted) — every
+// the exhausted operator account (2026-09-06, tracking id redacted) — every
 // key the vendor sent, not the ones the parser consumes. A filtered fixture
 // is what hid the polymorphic-payload bug in the dispatch parser; the same
 // discipline applies here.

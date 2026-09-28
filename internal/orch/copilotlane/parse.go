@@ -12,7 +12,7 @@ import (
 // 2026-09-01) carries the session's cumulative `totalPremiumRequests` and
 // `totalNanoAiu` — SELF-METERED BY THE VENDOR. The field keeps the vendor's
 // key NAME, but on a token-based plan (every monthly plan since 2026-06-01;
-// dmmdea verified 2026-09-06) its UNIT IS AI CREDITS: gemini-3.6-flash
+// operator verified 2026-09-06) its UNIT IS AI CREDITS: gemini-3.6-flash
 // reporting 14 meant 14 credits, and 116 executed dispatches summed to the
 // 1,501 credits the billing page showed. Receipts keep the same key so the
 // month reconciles against `gh api users/<u>/settings/billing/usage`.

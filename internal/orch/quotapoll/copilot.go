@@ -21,7 +21,7 @@ const copilotUserPath = "/copilot_internal/user"
 // subscription: the entitlement (the cap the ledger should carry), what has
 // been consumed, the calendar reset, and whether overage could ever bill.
 // Unit is "credits" on token-based billing (every monthly plan since GitHub's
-// 2026-06-01 switch; verified live on dmmdea 2026-09-06) or "requests" on the
+// 2026-06-01 switch; verified live on the operator's account 2026-09-06) or "requests" on the
 // legacy premium-request plan — a caller must never mix the two.
 type CopilotFacts struct {
 	Unit             string // "credits" | "requests"

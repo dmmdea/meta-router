@@ -94,7 +94,7 @@ func TestCanonicalResolvesAnAncestorLinkForAMissingLeaf(t *testing.T) {
 // Asserted case-insensitively on purpose. The first version of this test
 // demanded byte equality with filepath.Clean and failed on the review machine
 // because an existing ANCESTOR resolved to its true on-disk casing
-// (D:/dev/... -> D:\Dev\...). That is correct behaviour — canonicalization is
+// (D:/work/... -> D:\Work\...). That is correct behaviour — canonicalization is
 // supposed to fix the spelling — and a test that hard-codes one machine's
 // directory casing is the environment assumption that has bitten this repo
 // twice already.
@@ -103,7 +103,7 @@ func TestCanonicalOnAFabricatedPathStaysUsable(t *testing.T) {
 		// absTest, not a "D:/…" literal: on Linux that literal is RELATIVE, so
 		// canonical correctly returns an absolute path and the equality below
 		// would compare an absolute result against a relative expectation.
-		absTest("dev", "pepsdubai", "does-not-exist-anywhere"),
+		absTest("dev", "acme", "does-not-exist-anywhere"),
 		filepath.Join(t.TempDir(), "no", "such", "tree"),
 	} {
 		got, err := canonical(p)
