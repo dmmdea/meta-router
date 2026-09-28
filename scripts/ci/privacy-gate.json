@@ -1,0 +1,7 @@
+{
+  "sanctioned": [
+    "github.com/dmmdea/meta-router",
+    "github.com/dmmdea/offload-harness",
+    "dmmdea/meta-router"
+  ]
+}

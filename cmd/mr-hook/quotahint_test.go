@@ -155,7 +155,7 @@ func TestQuotaHintUnknownRendersQuestionMark(t *testing.T) {
 }
 
 // REGRESSION (audit 2026-07-25): the banner rendered an EXPIRED window's
-// percentage as live pressure. Live Qube state on that day was claude 5h 85%
+// percentage as live pressure. Live reference-workstation state on that day was claude 5h 85%
 // with resets_at 25h in the past and 7d 17% live: the hook printed
 // "claude 5h 85% · 7d 17% THROTTLED" while `route` (which does guard expiry)
 // saw an open lane. An expired window must render "?" and must not contribute

@@ -105,7 +105,7 @@ func (f CodexFacts) Saw5hElsewhere() bool {
 
 // PollCodex polls the unofficial wham usage endpoint as BEST-EFFORT EVIDENCE
 // (Q10: the 5h window is unreliably reported on Plus — an omitted window is a
-// typed absence, never a zero). Wired per Daniel's 2026-07-23 approval.
+// typed absence, never a zero). Wired per the operator's 2026-07-23 approval.
 func PollCodex(now time.Time) Result {
 	return pollCodex(guardedClient(), "https://chatgpt.com", CodexAuthPath(), now)
 }

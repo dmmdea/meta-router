@@ -8,7 +8,7 @@ import (
 
 func TestLoadMissingFailsOpenToDefaults(t *testing.T) {
 	c := Load(filepath.Join(t.TempDir(), "nope.json"))
-	// W1 (Daniel 2026-07-23): usage polls default ON — the old D3 off-gate is
+	// W1 (operator 2026-07-23): usage polls default ON — the old D3 off-gate is
 	// superseded; an explicit false in a hand-edited config is still honored.
 	if c.ClaudeBillingMode != BillingSubscription || !c.OAuthUsagePoll {
 		t.Fatalf("defaults wrong: %+v", c)

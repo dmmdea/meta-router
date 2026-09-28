@@ -259,7 +259,7 @@ func fullyQualified(p string) bool {
 
 // within reports whether path p is inside root, comparing cleaned paths and
 // treating Windows case-insensitively. A prefix test alone would let
-// "C:/repos/client-secret" pass for the root "C:/repos/client".
+// "C:/work/client-secret" pass for the root "C:/work/client".
 func within(p, root string) bool {
 	rel, err := filepath.Rel(root, p)
 	if err != nil {

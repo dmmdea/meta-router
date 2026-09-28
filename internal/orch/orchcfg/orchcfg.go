@@ -22,11 +22,11 @@ const (
 type Config struct {
 	ClaudeBillingMode     string  `json:"claude_billing_mode"`
 	UsageCreditBalanceUSD float64 `json:"usage_credit_balance_usd"` // manual entry; no API surface exists
-	OAuthUsagePoll        bool    `json:"oauth_usage_poll"`         // W1: default ON (Daniel 2026-07-23, supersedes D3) — official-shape endpoint, own subscription token; explicit false still honored
+	OAuthUsagePoll        bool    `json:"oauth_usage_poll"`         // W1: default ON (operator 2026-07-23, supersedes D3) — official-shape endpoint, own subscription token; explicit false still honored
 
 	// Lane tiers as config — §6b "upgrade is a number change". These are DATA
 	// about the operator's current plans, never constants of nature.
-	CodexUsagePoll bool `json:"codex_usage_poll"` // W1: default ON as BEST-EFFORT EVIDENCE (Daniel 2026-07-23; Q10 caveats encoded in quotapoll)
+	CodexUsagePoll bool `json:"codex_usage_poll"` // W1: default ON as BEST-EFFORT EVIDENCE (operator 2026-07-23; Q10 caveats encoded in quotapoll)
 	// CodexPlus5hCredits is the 5h capacity ESTIMATE seeded on the codex lane
 	// when no provider 5h reading exists (default 40 = the Plus 5h band
 	// 15–80 at fact refresh). S2R-3: an estimate may throttle, never

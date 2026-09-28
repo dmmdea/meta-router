@@ -1,6 +1,6 @@
 // Package quotasig ingests the sanctioned quota signals into the ledger:
 // the statusline drop file (rate_limits teed by the operator's statusline
-// command, RS1) and — since W1 (Daniel-approved 2026-07-23, superseding the
+// command, RS1) and — since W1 (operator-approved 2026-07-23, superseding the
 // old D3 off-gate) — vendor-polled snapshots from quotapoll via
 // ApplySnapshots. Every observation that changes a bucket is appended to the
 // scarcity trace with an ORIGIN tag, so drop-vs-poll parity is measurable
