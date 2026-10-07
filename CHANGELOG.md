@@ -4,6 +4,13 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.42.1] — 2026-10-06
+
+### Changed — B15 allowlist: `claude|claude-opus-5` has evidence and leaves `knownUncovered`
+The 2026-09-12 gold probe measured the seed's reference config `claude|claude-opus-5|high` on the full 56-task set at trials 3 (168 cells, 162 evidence rows; private `eval/oracle.jsonl`, merged in private PR #71). The canary demanded the removal itself: against the merged oracle, `TestCanaryB15RankedModelsHaveEvidence` failed on `B15 bookkeeping — these pairs now HAVE evidence and must be removed from knownUncovered: [claude|claude-opus-5]` — that red is the proof the pair is measured. Four pairs remain on the list (`codex|gpt-5.5`, `glm|glm-4.7`, `local|qwythos`, `local|qwythos-think`), still reported loudly on every run.
+
+Full-cell coverage, stated: the reference is covered at both levels; the seed's own four dispatch cells (`claude-opus-5|xhigh`, `claude-sonnet-5|medium`, `gpt-5.5|high`, `gpt-5.6-terra|low`) have no rows, so `router-live` stays UNDEFINED in the scorecard until Plan 4 probes them (private record `docs/specs/2026-09-12-claude-5-repin-and-reference-remeasure.md`). No routing change.
+
 ## [0.42.0] — 2026-09-18
 
 ### Added — `mr-verifier` external reference column: the local ceiling finally has something to be a ceiling below (off by default; it spends)
