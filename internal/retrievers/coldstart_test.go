@@ -91,6 +91,19 @@ func TestProbeEmbedderVerdicts(t *testing.T) {
 	}
 }
 
+// A cold verdict names the id /running will report once the model loads, for the warm-up to
+// watch: the alias's real id when the model was asked for by alias, else the requested name.
+func TestProbeEmbedderNamesWhatToWatchFor(t *testing.T) {
+	alias := routerServer(t, body(`{"running":[]}`), body(modelsAlias))
+	if p := ProbeEmbedder(alias.URL, "embeddinggemma", 150*time.Millisecond); p.State != EmbedCold || p.ListedAs != "egemma-300m" {
+		t.Fatalf("alias: got %+v, want cold watching egemma-300m", p)
+	}
+	plain := routerServer(t, body(`{"running":[]}`), body(modelsPlain))
+	if p := ProbeEmbedder(plain.URL, "embeddinggemma", 150*time.Millisecond); p.State != EmbedCold || p.ListedAs != "embeddinggemma" {
+		t.Fatalf("plain: got %+v, want cold watching embeddinggemma", p)
+	}
+}
+
 func TestProbeEmbedderStaysInsideItsBudget(t *testing.T) {
 	srv := routerServer(t, hang, nil)
 	t0 := time.Now()
@@ -155,64 +168,115 @@ func TestUnreadableUnverifiedEndpointIsNotWarmed(t *testing.T) {
 
 // ---- WarmUpEmbedder -------------------------------------------------------------------
 
-// slowEmbedServer records each embeddings request on arrival and then holds it open the way
-// a router does while it loads a model.
-func slowEmbedServer(t *testing.T, hits *atomic.Int32, got chan<- string) *httptest.Server {
+// warmRouter fakes the two routes a warm-up touches. A POST to /v1/embeddings begins a "load":
+// from then on /running lists listedAs in state, and the POST stays open the way a request
+// does while a model loads. state "" means /running keeps reporting nothing running.
+type warmRouter struct {
+	*httptest.Server
+	posts  atomic.Int32
+	loaded atomic.Bool
+	bodies chan string
+}
+
+func newWarmRouter(t *testing.T, listedAs, state string, withRunning bool) *warmRouter {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	wr := &warmRouter{bodies: make(chan string, 4)}
+	mux := http.NewServeMux()
+	if withRunning {
+		mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+			if wr.loaded.Load() && state != "" {
+				io.WriteString(w, `{"running":[{"model":"`+listedAs+`","state":"`+state+`"}]}`)
+				return
+			}
+			io.WriteString(w, `{"running":[]}`)
+		})
+	}
+	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		hits.Add(1)
-		select {
-		case got <- string(b):
-		default:
-		}
+		wr.posts.Add(1)
+		wr.bodies <- string(b)
+		wr.loaded.Store(true)
 		select {
 		case <-time.After(3 * time.Second):
 		case <-r.Context().Done():
 		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	})
+	wr.Server = httptest.NewServer(mux)
+	t.Cleanup(wr.Close)
+	return wr
 }
 
-func TestWarmUpEmbedderReturnsWithoutWaitingForTheLoad(t *testing.T) {
-	var hits atomic.Int32
-	got := make(chan string, 1)
-	srv := slowEmbedServer(t, &hits, got)
-
+func TestWarmUpEmbedderLeavesOnceTheRouterAdmitsToLoading(t *testing.T) {
+	wr := newWarmRouter(t, "embeddinggemma", "starting", true)
 	t0 := time.Now()
-	if err := WarmUpEmbedder(srv.URL, "embeddinggemma", 0, 500*time.Millisecond); err != nil {
-		t.Fatalf("warm-up: %v", err)
+	st, err := WarmUpEmbedder(wr.URL, "embeddinggemma", "embeddinggemma", time.Second)
+	if err != nil || st != "starting" {
+		t.Fatalf("got state=%q err=%v, want starting", st, err)
 	}
-	if d := time.Since(t0); d > 400*time.Millisecond {
-		t.Fatalf("warm-up took %v: it waited on the load instead of leaving once the request was out", d)
+	if d := time.Since(t0); d > 500*time.Millisecond {
+		t.Fatalf("warm-up took %v: it waited on the load itself", d)
 	}
-	select {
-	case b := <-got:
-		var req struct {
-			Model string   `json:"model"`
-			Input []string `json:"input"`
-		}
-		if err := json.Unmarshal([]byte(b), &req); err != nil || req.Model != "embeddinggemma" || len(req.Input) != 1 || req.Input[0] != "warm" {
-			t.Fatalf("warm-up body %s (%v): want the model and the fixed token", b, err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the router never received the warm-up request")
+	var req struct {
+		Model string   `json:"model"`
+		Input []string `json:"input"`
 	}
-	if n := hits.Load(); n != 1 {
-		t.Fatalf("want exactly 1 request, got %d", n)
+	if err := json.Unmarshal([]byte(<-wr.bodies), &req); err != nil || req.Model != "embeddinggemma" || len(req.Input) != 1 || req.Input[0] != "warm" {
+		t.Fatalf("warm-up body %+v (%v): want the model and the fixed word", req, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := wr.posts.Load(); n != 1 {
+		t.Fatalf("want exactly 1 embeddings request, got %d", n)
 	}
 }
 
-func TestWarmUpEmbedderHoldKeepsTheConnectionOpenThatLong(t *testing.T) {
-	var hits atomic.Int32
-	srv := slowEmbedServer(t, &hits, make(chan string, 1))
-	t0 := time.Now()
-	if err := WarmUpEmbedder(srv.URL, "embeddinggemma", 80*time.Millisecond, time.Second); err != nil {
-		t.Fatalf("warm-up: %v", err)
+// The router reports the REAL id, so the warm-up must watch for that, not the alias it asked by.
+func TestWarmUpEmbedderWatchesTheRealIDOfAnAlias(t *testing.T) {
+	wr := newWarmRouter(t, "egemma-300m", "starting", true)
+	if st, err := WarmUpEmbedder(wr.URL, "embeddinggemma", "egemma-300m", time.Second); err != nil || st != "starting" {
+		t.Fatalf("watching the real id: got %q, %v", st, err)
 	}
-	if d := time.Since(t0); d < 70*time.Millisecond || d > 600*time.Millisecond {
-		t.Fatalf("hold of 80ms took %v", d)
+	wr2 := newWarmRouter(t, "egemma-300m", "starting", true)
+	t0 := time.Now()
+	if st, _ := WarmUpEmbedder(wr2.URL, "embeddinggemma", "embeddinggemma", 150*time.Millisecond); st != "" {
+		t.Fatalf("watching the alias must not find the real id's entry, got %q", st)
+	}
+	if d := time.Since(t0); d < 100*time.Millisecond || d > 600*time.Millisecond {
+		t.Fatalf("an unconfirmed warm-up should end at its 150 ms deadline, took %v", d)
+	}
+}
+
+func TestWarmUpEmbedderStoppingIsNotALoad(t *testing.T) {
+	wr := newWarmRouter(t, "embeddinggemma", "stopping", true)
+	if st, _ := WarmUpEmbedder(wr.URL, "embeddinggemma", "embeddinggemma", 120*time.Millisecond); st != "" {
+		t.Fatalf("a model being stopped is not a load beginning, got %q", st)
+	}
+}
+
+func TestWarmUpEmbedderUnconfirmedAtTheDeadline(t *testing.T) {
+	wr := newWarmRouter(t, "embeddinggemma", "", true) // /running never changes
+	t0 := time.Now()
+	st, err := WarmUpEmbedder(wr.URL, "embeddinggemma", "embeddinggemma", 150*time.Millisecond)
+	if st != "" || err != nil {
+		t.Fatalf("got %q, %v, want unconfirmed without an error", st, err)
+	}
+	if d := time.Since(t0); d < 100*time.Millisecond || d > 600*time.Millisecond {
+		t.Fatalf("took %v, want about the 150 ms deadline", d)
+	}
+	if n := wr.posts.Load(); n != 1 {
+		t.Fatalf("want 1 embeddings request, got %d", n)
+	}
+}
+
+// With no readable /running there is nothing to wait for: leave at once, the request sent.
+func TestWarmUpEmbedderLeavesAtOnceWhenTheLoadCannotBeObserved(t *testing.T) {
+	wr := newWarmRouter(t, "embeddinggemma", "", false) // no /running route
+	t0 := time.Now()
+	st, err := WarmUpEmbedder(wr.URL, "embeddinggemma", "embeddinggemma", time.Second)
+	if st != "" || err != nil {
+		t.Fatalf("got %q, %v", st, err)
+	}
+	if d := time.Since(t0); d > 300*time.Millisecond {
+		t.Fatalf("took %v: nothing observable, so nothing to wait for", d)
 	}
 }
 
@@ -221,7 +285,7 @@ func TestWarmUpEmbedderReportsARefusedConnection(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 	t0 := time.Now()
-	if err := WarmUpEmbedder(url, "embeddinggemma", 0, time.Second); err == nil {
+	if _, err := WarmUpEmbedder(url, "embeddinggemma", "embeddinggemma", time.Second); err == nil {
 		t.Fatal("a refused connection must be reported")
 	}
 	if d := time.Since(t0); d > 500*time.Millisecond {
@@ -231,12 +295,17 @@ func TestWarmUpEmbedderReportsARefusedConnection(t *testing.T) {
 
 func TestWarmUpEmbedderEndsEarlyWhenTheRouterAnswers(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"data":[{"index":0,"embedding":[1,0]}]}`)
+		if r.URL.Path == "/v1/embeddings" {
+			io.WriteString(w, `{"data":[{"index":0,"embedding":[1,0]}]}`)
+			return
+		}
+		io.WriteString(w, `{"running":[]}`)
 	}))
 	defer srv.Close()
 	t0 := time.Now()
-	if err := WarmUpEmbedder(srv.URL, "embeddinggemma", 2*time.Second, 5*time.Second); err != nil {
-		t.Fatalf("warm-up: %v", err)
+	st, err := WarmUpEmbedder(srv.URL, "embeddinggemma", "embeddinggemma", 5*time.Second)
+	if err != nil || st != "ready" {
+		t.Fatalf("got %q, %v, want ready", st, err)
 	}
 	if d := time.Since(t0); d > time.Second {
 		t.Fatalf("an already-warm router answered at once, yet the warm-up held %v", d)

@@ -15,15 +15,14 @@ import (
 // loaded, returns errColdEmbedder at once so decide() takes its BM25 branch, after starting the
 // load with ONE warm-up request that does not hold the hook open.
 //
-// The three numbers are CHOSEN, not fitted. The router answers /running in ~1 ms on loopback,
-// so 100 ms is a ceiling that a healthy router never approaches and a wedged one cannot
-// spend the deadline with; the warm-up needs only the request on the wire (loopback: well
-// under a millisecond) and 50 ms covers a slow dial without ever approaching the 950 ms wait
-// it replaces.
+// The two ceilings are CHOSEN, not fitted. The router answers /running in about a millisecond
+// on loopback, so 100 ms is a bound a healthy router never approaches and a wedged one cannot
+// spend the deadline with. The warm-up holds its request open only until the router lists the
+// model as loading (6 ms on the live router it was measured against); 150 ms is a ceiling for
+// a busy router. Cold path worst case: 100 + 150 ms, against the 950 ms wait it replaces.
 const (
 	runningProbeCap = 100 * time.Millisecond
-	warmUpHold      = 0 * time.Millisecond
-	warmUpDeadline  = 50 * time.Millisecond
+	warmUpCap       = 150 * time.Millisecond
 )
 
 // errColdEmbedder marks "skipped the embed wait because the model is not loaded". decide()
@@ -52,15 +51,15 @@ func hookBudgets(timeoutMs int, coldSkip bool) (embedTO, probeTO time.Duration) 
 type coldSkipRetriever struct {
 	inner scoredRetriever
 	probe func() retrievers.EmbedProbe
-	warm  func(target string) error
+	warm  func(p retrievers.EmbedProbe) (string, error)
 }
 
 func newColdSkip(inner scoredRetriever, endpointSpec, model string, probeTO time.Duration) *coldSkipRetriever {
 	return &coldSkipRetriever{
 		inner: inner,
 		probe: func() retrievers.EmbedProbe { return retrievers.ProbeEmbedder(endpointSpec, model, probeTO) },
-		warm: func(target string) error {
-			return retrievers.WarmUpEmbedder(target, model, warmUpHold, warmUpDeadline)
+		warm: func(p retrievers.EmbedProbe) (string, error) {
+			return retrievers.WarmUpEmbedder(p.Target, model, p.ListedAs, warmUpCap)
 		},
 	}
 }
@@ -75,10 +74,13 @@ func (c *coldSkipRetriever) RetrieveScored(prompt string, k int) ([]retrievers.S
 	case !p.Warmable:
 		note += "; no warm-up sent"
 	default:
-		if err := c.warm(p.Target); err != nil {
+		switch state, err := c.warm(p); {
+		case err != nil:
 			note += "; warm-up failed: " + err.Error()
-		} else {
-			note += "; warm-up sent"
+		case state == "":
+			note += fmt.Sprintf("; warm-up sent, load not confirmed within %v", warmUpCap)
+		default:
+			note += "; warm-up sent, load confirmed (" + state + ")"
 		}
 	}
 	return nil, 0, fmt.Errorf("%w: %s", errColdEmbedder, note)

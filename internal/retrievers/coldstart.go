@@ -9,9 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -19,7 +17,7 @@ import (
 // which takes seconds. A hook whose whole budget is one second that POSTs the query into a
 // cold router waits out that budget, cancels, and falls back to BM25: every first prompt
 // after an idle spell paid the full embed budget for nothing (F42). ProbeEmbedder asks the
-// router first; WarmUpEmbedder starts the load without waiting for it.
+// router first; WarmUpEmbedder starts the load without waiting for it to finish.
 
 // EmbedState is a router's answer to "is the embed model loaded?".
 type EmbedState int
@@ -45,6 +43,9 @@ type EmbedProbe struct {
 	// is already in flight (a second request adds nothing), and false for an unreadable
 	// endpoint nobody configured (nothing proved it is a model router, so it gets no traffic).
 	Warmable bool
+	// ListedAs is the name /running reports this model under (the router's real id, which
+	// differs from the requested name when that was an alias); a warm-up watches for it.
+	ListedAs string
 	Reason   string // one line for the usage row; never a path or prompt text
 }
 
@@ -72,8 +73,9 @@ func ProbeEmbedder(endpointSpec, model string, budget time.Duration) EmbedProbe 
 
 // probeRouter reports answered=false only when the endpoint refused the connection.
 func probeRouter(ctx context.Context, hc *http.Client, ep Endpoint, model string) (EmbedProbe, bool) {
+	listedAs := model
 	cold := func(reason string, warmable bool) (EmbedProbe, bool) {
-		return EmbedProbe{State: EmbedCold, Target: ep.URL, Warmable: warmable, Reason: reason}, true
+		return EmbedProbe{State: EmbedCold, Target: ep.URL, Warmable: warmable, ListedAs: listedAs, Reason: reason}, true
 	}
 	// classify maps a router process state to a verdict. "starting" means a load is already
 	// in flight: skip the wait but send no second request.
@@ -126,6 +128,9 @@ func probeRouter(ctx context.Context, hc *http.Client, ep Endpoint, model string
 	}
 	if readable && !listed {
 		return unknown("model not listed by the router")
+	}
+	if listed {
+		listedAs = realID
 	}
 	if state, up := running[realID]; listed && up {
 		return classify(state)
@@ -218,50 +223,63 @@ func shortErr(err error) string {
 	return "read failed"
 }
 
-// WarmUpEmbedder asks the router at target for a one-token embedding so it starts loading
-// model, and returns without waiting for the load (seconds). It returns once the request is on
-// the wire plus hold, or when deadline passes, then abandons the response: closing the
-// connection does not stop the router's load, which is how a cancelled embed call has always
-// warmed it. The input is a fixed token, never prompt text.
-func WarmUpEmbedder(target, model string, hold, deadline time.Duration) error {
+// WarmUpEmbedder sends the router at target a one-word embedding request so it starts loading
+// model, holds that request open only until /running lists listedAs as starting or ready (a
+// few milliseconds on a live router), then abandons it: closing the connection does not stop
+// a load that has begun. Holding it that long is the point: a request cancelled the instant it
+// was written was dropped by a live router before the load began, while one held until the
+// router admitted to loading it was not. deadline caps the whole call.
+// It returns the state the router reported ("starting" or "ready"), or "" when the load was
+// not confirmed in time (or /running could not be read, which makes waiting pointless).
+// The input is a fixed word, never prompt text.
+func WarmUpEmbedder(target, model, listedAs string, deadline time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
-	defer cancel()
-	wrote := make(chan struct{})
-	var once sync.Once
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		WroteRequest: func(httptrace.WroteRequestInfo) { once.Do(func() { close(wrote) }) },
-	})
+	defer cancel() // abandons the request on every return path
 	body, err := json.Marshal(map[string]any{"model": model, "input": []string{"warm"}})
 	if err != nil {
-		return err
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target+"/v1/embeddings", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	hc := &http.Client{Transport: &http.Transport{
 		DialContext:       (&net.Dialer{Timeout: ConnectTimeout}).DialContext,
 		DisableKeepAlives: true,
 	}}
-	done := make(chan error, 1)
+	sent := make(chan error, 1)
 	go func() {
 		resp, err := hc.Do(req)
 		if err == nil {
 			resp.Body.Close()
 		}
-		done <- err
+		sent <- err
 	}()
-	select {
-	case <-wrote:
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
 		select {
-		case <-time.After(hold):
-			cancel()
-			<-done
-		case <-done: // answered inside the hold: it was already warm
+		case err := <-sent:
+			switch {
+			case err == nil:
+				return "ready", nil // answered outright: it was loaded after all
+			case ctx.Err() == nil:
+				return "", err // refused or failed outright
+			}
+			return "", nil // the deadline
+		case <-tick.C:
+			status, b, err := routerGet(ctx, hc, target+"/running")
+			if err != nil {
+				continue // the deadline, or a blip: the next tick or the deadline decides
+			}
+			running, ok := parseRunning(status, b)
+			if !ok {
+				return "", nil // cannot observe the load, so waiting for it is pointless
+			}
+			if st := strings.ToLower(running[listedAs]); st == "starting" || st == "ready" {
+				return st, nil
+			}
 		}
-		return nil
-	case err := <-done:
-		return err
 	}
 }

@@ -16,18 +16,21 @@ func (s *stubPrimary) RetrieveScored(string, int) ([]retrievers.Scored, float64,
 	return []retrievers.Scored{{ID: "a", Score: 0.9}}, 0.9, nil
 }
 
-func newStubGate(p retrievers.EmbedProbe, warmErr error) (*coldSkipRetriever, *stubPrimary, *[]string) {
+func newStubGate(p retrievers.EmbedProbe, warmState string, warmErr error) (*coldSkipRetriever, *stubPrimary, *[]string) {
 	inner := &stubPrimary{}
 	var warmed []string
 	return &coldSkipRetriever{
 		inner: inner,
 		probe: func() retrievers.EmbedProbe { return p },
-		warm:  func(target string) error { warmed = append(warmed, target); return warmErr },
+		warm: func(p retrievers.EmbedProbe) (string, error) {
+			warmed = append(warmed, p.Target)
+			return warmState, warmErr
+		},
 	}, inner, &warmed
 }
 
 func TestColdSkipRetriever_ColdWarmableWarmsOnceAndSkipsTheEmbed(t *testing.T) {
-	g, inner, warmed := newStubGate(retrievers.EmbedProbe{State: retrievers.EmbedCold, Target: "http://router", Warmable: true, Reason: "embed model not loaded"}, nil)
+	g, inner, warmed := newStubGate(retrievers.EmbedProbe{State: retrievers.EmbedCold, Target: "http://router", Warmable: true, Reason: "embed model not loaded"}, "starting", nil)
 	_, _, err := g.RetrieveScored("a prompt long enough", 3)
 	if !errors.Is(err, errColdEmbedder) {
 		t.Fatalf("want errColdEmbedder, got %v", err)
@@ -38,13 +41,13 @@ func TestColdSkipRetriever_ColdWarmableWarmsOnceAndSkipsTheEmbed(t *testing.T) {
 	if len(*warmed) != 1 || (*warmed)[0] != "http://router" {
 		t.Fatalf("want exactly one warm-up to the answering router, got %v", *warmed)
 	}
-	if !strings.Contains(err.Error(), "warm-up sent") || !strings.Contains(err.Error(), "embed model not loaded") {
+	if !strings.Contains(err.Error(), "load confirmed (starting)") || !strings.Contains(err.Error(), "embed model not loaded") {
 		t.Fatalf("the row must say why and what was done: %q", err.Error())
 	}
 }
 
 func TestColdSkipRetriever_LoadInFlightSendsNoSecondRequest(t *testing.T) {
-	g, _, warmed := newStubGate(retrievers.EmbedProbe{State: retrievers.EmbedCold, Target: "http://router", Warmable: false, Reason: "embed model is loading"}, nil)
+	g, _, warmed := newStubGate(retrievers.EmbedProbe{State: retrievers.EmbedCold, Target: "http://router", Warmable: false, Reason: "embed model is loading"}, "", nil)
 	_, _, err := g.RetrieveScored("a prompt long enough", 3)
 	if !errors.Is(err, errColdEmbedder) || len(*warmed) != 0 {
 		t.Fatalf("err=%v warm-ups=%v, want a skip with no warm-up", err, *warmed)
@@ -52,16 +55,24 @@ func TestColdSkipRetriever_LoadInFlightSendsNoSecondRequest(t *testing.T) {
 }
 
 func TestColdSkipRetriever_FailedWarmUpIsRecordedNotFatal(t *testing.T) {
-	g, _, _ := newStubGate(retrievers.EmbedProbe{State: retrievers.EmbedCold, Target: "http://router", Warmable: true, Reason: "r"}, errors.New("boom"))
+	g, _, _ := newStubGate(retrievers.EmbedProbe{State: retrievers.EmbedCold, Target: "http://router", Warmable: true, Reason: "r"}, "", errors.New("boom"))
 	_, _, err := g.RetrieveScored("a prompt long enough", 3)
 	if !errors.Is(err, errColdEmbedder) || !strings.Contains(err.Error(), "warm-up failed: boom") {
 		t.Fatalf("a failed warm-up must still skip the embed and say so: %v", err)
 	}
 }
 
+func TestColdSkipRetriever_UnconfirmedWarmUpIsSaidSo(t *testing.T) {
+	g, _, warmed := newStubGate(retrievers.EmbedProbe{State: retrievers.EmbedCold, Target: "http://router", Warmable: true, Reason: "r"}, "", nil)
+	_, _, err := g.RetrieveScored("a prompt long enough", 3)
+	if !errors.Is(err, errColdEmbedder) || len(*warmed) != 1 || !strings.Contains(err.Error(), "load not confirmed") {
+		t.Fatalf("err=%v warm-ups=%v, want a skip that says the load was not confirmed", err, *warmed)
+	}
+}
+
 func TestColdSkipRetriever_WarmAndUnknownEmbedAsBefore(t *testing.T) {
 	for _, st := range []retrievers.EmbedState{retrievers.EmbedWarm, retrievers.EmbedUnknown} {
-		g, inner, warmed := newStubGate(retrievers.EmbedProbe{State: st}, nil)
+		g, inner, warmed := newStubGate(retrievers.EmbedProbe{State: st}, "", nil)
 		res, top, err := g.RetrieveScored("a prompt long enough", 3)
 		if err != nil || inner.calls != 1 || len(*warmed) != 0 || top != 0.9 || len(res) != 1 {
 			t.Fatalf("state %d: err=%v inner calls=%d warm-ups=%v", st, err, inner.calls, *warmed)
