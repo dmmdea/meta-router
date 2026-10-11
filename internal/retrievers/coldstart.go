@@ -230,7 +230,8 @@ func shortErr(err error) string {
 // was written was dropped by a live router before the load began, while one held until the
 // router admitted to loading it was not. deadline caps the whole call.
 // It returns the state the router reported ("starting" or "ready"), or "" when the load was
-// not confirmed in time (or /running could not be read, which makes waiting pointless).
+// not confirmed in time (or /running could not be read, which makes waiting pointless). A
+// request the router answers with an HTTP error is an error, never "ready".
 // The input is a fixed word, never prompt text.
 func WarmUpEmbedder(target, model, listedAs string, deadline time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
@@ -252,7 +253,11 @@ func WarmUpEmbedder(target, model, listedAs string, deadline time.Duration) (str
 	go func() {
 		resp, err := hc.Do(req)
 		if err == nil {
+			code := resp.StatusCode
 			resp.Body.Close()
+			if code < 200 || code > 299 {
+				err = fmt.Errorf("embeddings answered status %d", code)
+			}
 		}
 		sent <- err
 	}()
@@ -263,7 +268,7 @@ func WarmUpEmbedder(target, model, listedAs string, deadline time.Duration) (str
 		case err := <-sent:
 			switch {
 			case err == nil:
-				return "ready", nil // answered outright: it was loaded after all
+				return "ready", nil // answered 2xx outright: it was loaded after all
 			case ctx.Err() == nil:
 				return "", err // refused or failed outright
 			}

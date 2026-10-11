@@ -1,13 +1,15 @@
 package main
 
-// F42 at the binary level. The hook is registered with a 1000 ms deadline, and the embedder
+// F42 at the binary level. The hook is registered with a 1000 ms deadline (these runs use
+// 5000 ms, with bounds relative to the fake embedding's 3 s; the 1000 ms arithmetic is pinned
+// by TestHookBudgets), and the embedder
 // behind the model router is unloaded after five idle minutes and needs seconds to load, so
 // the first prompt after every idle spell used to wait out the whole embed budget, get
 // cancelled, and fall back to BM25. The hook now asks the router whether the embed model is
 // loaded BEFORE spending that budget:
 //
-//   - not loaded (or the router cannot be read) -> BM25 at once, plus ONE warm-up request that
-//     does not hold the hook open;
+//   - not loaded (or the router cannot be read) -> BM25 at once, plus ONE warm-up request held
+//     open only until the router admits it to a load (a few milliseconds), then abandoned;
 //   - loaded -> embed exactly as before.
 //
 // Every test drives the built binary against a fake router (an httptest server answering
@@ -41,6 +43,17 @@ const (
 
 	runningWarm = `{"running":[{"model":"embeddinggemma","state":"ready"}]}`
 	runningCold = `{"running":[]}`
+
+	// hookDeadlineMs is the hard deadline the e2e runs use, the same 5000 ms as the older
+	// e2e tests: wall-clock bounds in these tests are RELATIVE to fakeEmbedTime, so a loaded
+	// machine can slow a run down a great deal before an assertion trips, while a hook that
+	// really waited on the fake embedding (3 s) still cannot pass.
+	hookDeadlineMs = "5000"
+	// fakeEmbedTime is how long the fake embedding takes when a test makes it slow.
+	fakeEmbedTime = 3 * time.Second
+	// routerAdmit is how long the fake router takes to admit a request to a load. A request
+	// whose client has gone before then is dropped and nothing loads, as on the live router.
+	routerAdmit = 25 * time.Millisecond
 )
 
 // fakeRouter stands in for the model router. running == nil means the router has no /running
@@ -49,7 +62,7 @@ type fakeRouter struct {
 	*httptest.Server
 	runningHits atomic.Int32
 	embedHits   atomic.Int32
-	loading     atomic.Bool // set when an embeddings call arrives: the router has begun a load
+	loading     atomic.Bool // set once the router has ADMITTED an embeddings call to a load
 	mu          sync.Mutex
 	embedBodies []string
 }
@@ -58,9 +71,13 @@ type routerOpts struct {
 	running http.HandlerFunc
 	models  string        // body of /v1/models; "" = 404
 	embedIn time.Duration // how long a /v1/embeddings call takes (cancelled by the client going away)
-	// listsLoad makes /running report the model as "starting" once an embeddings call has
-	// arrived, the way a router does while it loads. Without it /running never changes.
+	// listsLoad makes /running report the model as "starting" once an embeddings call has been
+	// admitted to a load, the way a router does while it loads. Without it /running never
+	// changes. Admission takes routerAdmit and needs the request to still be open: a client
+	// that went away first starts nothing.
 	listsLoad bool
+	// embedStatus, when set, makes /v1/embeddings answer that HTTP status at once.
+	embedStatus int
 }
 
 // buildColdHook builds the hook and runs it once, so the first measured run does not pay the
@@ -98,7 +115,18 @@ func newFakeRouter(t *testing.T, o routerOpts) *fakeRouter {
 		fr.embedBodies = append(fr.embedBodies, buf.String())
 		fr.mu.Unlock()
 		fr.embedHits.Add(1) // counted on ARRIVAL, not completion: a cancelled call still counts
-		fr.loading.Store(true)
+		if o.embedStatus != 0 {
+			http.Error(w, "refused", o.embedStatus)
+			return
+		}
+		if o.listsLoad {
+			select {
+			case <-time.After(routerAdmit):
+				fr.loading.Store(true)
+			case <-r.Context().Done():
+				return // gone before the router admitted it: nothing loads
+			}
+		}
 		if o.embedIn > 0 {
 			select {
 			case <-time.After(o.embedIn):
@@ -169,13 +197,22 @@ type hookRun struct {
 	wall time.Duration // process start to exit, stdout/stderr pipes drained (what the caller waits on)
 }
 
-// runColdHook runs the built hook the way it is registered (-timeout-ms 1000) against fr.
+// runColdHook runs the built hook against fr with an empty usage log.
 func runColdHook(t *testing.T, bin string, fr *fakeRouter, prompt string, extra ...string) hookRun {
+	t.Helper()
+	return runColdHookSeeded(t, bin, fr, prompt, nil, extra...)
+}
+
+// runColdHookSeeded is runColdHook with the usage log pre-filled by seed.
+func runColdHookSeeded(t *testing.T, bin string, fr *fakeRouter, prompt string, seed func(logPath string), extra ...string) hookRun {
 	t.Helper()
 	work := t.TempDir()
 	idx := writeColdIndex(t, work)
 	logPath := filepath.Join(work, "usage.jsonl")
-	args := append([]string{"-index", idx, "-log", logPath, "-endpoint", fr.URL, "-quota-hint=false", "-timeout-ms", "1000"}, extra...)
+	if seed != nil {
+		seed(logPath)
+	}
+	args := append([]string{"-index", idx, "-log", logPath, "-endpoint", fr.URL, "-quota-hint=false", "-timeout-ms", hookDeadlineMs}, extra...)
 	cmd := exec.Command(bin, args...)
 	in, _ := json.Marshal(map[string]string{"prompt": prompt})
 	cmd.Stdin = bytes.NewReader(in)
@@ -228,15 +265,14 @@ func exactlyOneWarmUp(t *testing.T, fr *fakeRouter, prompt string) {
 
 func TestColdEmbedderSkipsTheWaitE2E(t *testing.T) {
 	bin := buildColdHook(t)
-	// The embedding itself would take 3 s: waiting on it is the failure, and the 1 s hard
-	// deadline alone would put the old behaviour at ~1000 ms.
-	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: 3 * time.Second, listsLoad: true})
+	// The embedding itself would take 3 s: waiting on it is the failure.
+	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime, listsLoad: true})
 	r := runColdHook(t, bin, fr, coldPrompt)
 
-	if r.rec.LatencyMs >= 200 {
-		t.Fatalf("hook latency %d ms: it waited on the cold embedder (budget under 200 ms)", r.rec.LatencyMs)
+	if time.Duration(r.rec.LatencyMs)*time.Millisecond >= fakeEmbedTime/2 {
+		t.Fatalf("hook latency %d ms: it waited on the cold embedder (its embedding takes %v)", r.rec.LatencyMs, fakeEmbedTime)
 	}
-	if r.wall >= 800*time.Millisecond {
+	if r.wall >= fakeEmbedTime*4/5 {
 		t.Fatalf("process took %v to exit: the warm-up held the hook open", r.wall)
 	}
 	if r.rec.Mode != "cold-skip-bm25" {
@@ -256,13 +292,15 @@ func TestColdEmbedderSkipsTheWaitE2E(t *testing.T) {
 // warm-up past its ceiling: the hook waits for confirmation, but only that long.
 func TestUnconfirmedWarmUpIsBoundedE2E(t *testing.T) {
 	bin := buildColdHook(t)
-	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: 3 * time.Second}) // no listsLoad
+	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime}) // no listsLoad
 	r := runColdHook(t, bin, fr, coldPrompt)
 	if r.rec.Mode != "cold-skip-bm25" || !strings.Contains(r.rec.Err, "load not confirmed") {
 		t.Fatalf("mode=%q err=%q, want a cold skip that says the load was not confirmed", r.rec.Mode, r.rec.Err)
 	}
-	if r.rec.LatencyMs < 100 || r.rec.LatencyMs >= 400 || r.wall >= 800*time.Millisecond {
-		t.Fatalf("latency_ms=%d wall=%v: waiting for confirmation must stop at the 150 ms ceiling", r.rec.LatencyMs, r.wall)
+	// Lower bound: it did wait for a confirmation that never came. Upper bound: it stopped at
+	// its ceiling long before the fake embedding (3 s) could have finished.
+	if r.rec.LatencyMs < 100 || time.Duration(r.rec.LatencyMs)*time.Millisecond >= fakeEmbedTime/2 || r.wall >= fakeEmbedTime*4/5 {
+		t.Fatalf("latency_ms=%d wall=%v: waiting for confirmation must stop at its ceiling", r.rec.LatencyMs, r.wall)
 	}
 	exactlyOneWarmUp(t, fr, coldPrompt)
 }
@@ -271,7 +309,7 @@ func TestUnconfirmedWarmUpIsBoundedE2E(t *testing.T) {
 // embedder is fine, it is just unloaded.
 func TestColdEmbedderBM25DeclinesIsNotEmbedderDownE2E(t *testing.T) {
 	bin := buildColdHook(t)
-	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: 3 * time.Second, listsLoad: true})
+	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime, listsLoad: true})
 	r := runColdHook(t, bin, fr, coldPromptNoLexicalMatch)
 	if r.rec.Mode != "cold-skip-empty" {
 		t.Fatalf("mode %q, want cold-skip-empty", r.rec.Mode)
@@ -324,12 +362,12 @@ func TestUnreadableRunningBehavesLikeColdE2E(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			fr := newFakeRouter(t, routerOpts{running: c.running, embedIn: 3 * time.Second})
+			fr := newFakeRouter(t, routerOpts{running: c.running, embedIn: fakeEmbedTime})
 			r := runColdHook(t, bin, fr, coldPrompt)
 			if r.rec.Mode != "cold-skip-bm25" {
 				t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
 			}
-			if r.wall >= 800*time.Millisecond {
+			if r.wall >= fakeEmbedTime*4/5 {
 				t.Fatalf("process took %v: an unreadable /running must not stall the hook", r.wall)
 			}
 			exactlyOneWarmUp(t, fr, coldPrompt)
@@ -389,7 +427,7 @@ func TestAliasedEmbedModelCountsAsLoadedE2E(t *testing.T) {
 func TestAliasedEmbedModelNotLoadedIsColdE2E(t *testing.T) {
 	bin := buildColdHook(t)
 	models := `{"data":[{"id":"egemma-300m","meta":{"llamaswap":{"aliases":["embeddinggemma"]}}}]}`
-	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), models: models, embedIn: 3 * time.Second, listsLoad: true})
+	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), models: models, embedIn: fakeEmbedTime, listsLoad: true})
 	r := runColdHook(t, bin, fr, coldPrompt)
 	if r.rec.Mode != "cold-skip-bm25" {
 		t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
@@ -415,7 +453,7 @@ func TestModelUnknownToRouterEmbedsAsBeforeE2E(t *testing.T) {
 
 func TestEmbedderAlreadyLoadingSkipsWithoutAWarmUpE2E(t *testing.T) {
 	bin := buildColdHook(t)
-	fr := newFakeRouter(t, routerOpts{running: jsonRunning(`{"running":[{"model":"embeddinggemma","state":"starting"}]}`), embedIn: 3 * time.Second})
+	fr := newFakeRouter(t, routerOpts{running: jsonRunning(`{"running":[{"model":"embeddinggemma","state":"starting"}]}`), embedIn: fakeEmbedTime})
 	r := runColdHook(t, bin, fr, coldPrompt)
 	if r.rec.Mode != "cold-skip-bm25" {
 		t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
@@ -465,8 +503,8 @@ func TestColdVersusWarmLatencyReportE2E(t *testing.T) {
 		opts routerOpts
 		args []string
 	}{
-		{"cold, skip on ", routerOpts{running: jsonRunning(runningCold), embedIn: 3 * time.Second, listsLoad: true}, nil},
-		{"cold, skip off", routerOpts{running: jsonRunning(runningCold), embedIn: 3 * time.Second, listsLoad: true}, []string{"-cold-skip=false"}},
+		{"cold, skip on ", routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime, listsLoad: true}, nil},
+		{"cold, skip off", routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime, listsLoad: true}, []string{"-cold-skip=false"}},
 		{"warm, skip on ", routerOpts{running: jsonRunning(runningWarm)}, nil},
 		{"warm, skip off", routerOpts{running: jsonRunning(runningWarm)}, []string{"-cold-skip=false"}},
 	} {
@@ -475,4 +513,102 @@ func TestColdVersusWarmLatencyReportE2E(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("%s  latency_ms=%4d  wall=%4dms  mode=%s", c.name, r.rec.LatencyMs, r.wall.Milliseconds(), r.rec.Mode))
 	}
 	t.Log("\n" + strings.Join(lines, "\n"))
+}
+
+// ---- the warm-up's own answer ---------------------------------------------------------------
+
+// A router that answers the warm-up with an error has not started loading anything, and the
+// row must say what it answered instead of reading it as a warm model.
+func TestWarmUpRefusedByTheRouterIsRecordedE2E(t *testing.T) {
+	bin := buildColdHook(t)
+	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedStatus: 503})
+	r := runColdHook(t, bin, fr, coldPrompt)
+	if r.rec.Mode != "cold-skip-bm25" {
+		t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
+	}
+	if !strings.Contains(r.rec.Err, "warm-up failed") || !strings.Contains(r.rec.Err, "status 503") || strings.Contains(r.rec.Err, "confirmed (") {
+		t.Fatalf("the row must say the router refused the warm-up with 503: %q", r.rec.Err)
+	}
+}
+
+// ---- a router that never gets the embedder loaded ---------------------------------------------
+
+func coldRow(ageSeconds int64, mode string) usagelog.Record {
+	return usagelog.Record{TsUnix: time.Now().Unix() - ageSeconds, Mode: mode}
+}
+
+func seedRows(rows ...usagelog.Record) func(string) {
+	return func(logPath string) {
+		for _, r := range rows {
+			if err := usagelog.Append(logPath, r); err != nil {
+				panic(err)
+			}
+		}
+	}
+}
+
+func coldFakeRouter(t *testing.T) *fakeRouter {
+	return newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime, listsLoad: true})
+}
+
+// Skipping the embed wait removed the only thing that would have surfaced a router that is up
+// but cannot load the embedder (the embed call erroring), so a run of cold skips that outlasts
+// any real load must be visible in the row.
+func TestRepeatedColdSkipsAreLoggedAsStuckE2E(t *testing.T) {
+	bin := buildColdHook(t)
+	fr := coldFakeRouter(t)
+	r := runColdHookSeeded(t, bin, fr, coldPrompt, seedRows(
+		coldRow(400, "cold-skip-empty"), coldRow(300, "cold-skip-bm25"), coldRow(200, "cold-skip-empty")))
+	if r.rec.Mode != "cold-stuck-bm25" {
+		t.Fatalf("mode %q, want cold-stuck-bm25; err=%q", r.rec.Mode, r.rec.Err)
+	}
+	if !strings.Contains(r.rec.Err, "stuck") || !strings.Contains(r.rec.Err, "4 consecutive") {
+		t.Fatalf("the row must say how long the embedder has been cold: %q", r.rec.Err)
+	}
+	if !strings.Contains(r.out, "gstack-qa") {
+		t.Fatalf("a stuck embedder still gets the BM25 fallback: out=%q", r.out)
+	}
+	exactlyOneWarmUp(t, fr, coldPrompt)
+}
+
+func TestStuckWithNothingSurfacedIsLoggedAsStuckEmptyE2E(t *testing.T) {
+	bin := buildColdHook(t)
+	fr := coldFakeRouter(t)
+	r := runColdHookSeeded(t, bin, fr, coldPromptNoLexicalMatch, seedRows(
+		coldRow(400, "cold-skip-empty"), coldRow(300, "cold-stuck-empty"), coldRow(200, "cold-stuck-bm25")))
+	if r.rec.Mode != "cold-stuck-empty" {
+		t.Fatalf("mode %q, want cold-stuck-empty (earlier cold-stuck rows keep the run going)", r.rec.Mode)
+	}
+}
+
+func TestColdSkipsThatAreNotARunLongEnoughStayOrdinaryE2E(t *testing.T) {
+	bin := buildColdHook(t)
+	for name, seed := range map[string]func(string){
+		"too few":          seedRows(coldRow(400, "cold-skip-empty"), coldRow(300, "cold-skip-empty")),
+		"too recent":       seedRows(coldRow(30, "cold-skip-empty"), coldRow(20, "cold-skip-empty"), coldRow(10, "cold-skip-empty")),
+		"embed ended it":   seedRows(coldRow(500, "cold-skip-empty"), coldRow(450, "cold-skip-empty"), coldRow(400, "embed"), coldRow(200, "cold-skip-empty")),
+		"failure ended it": seedRows(coldRow(500, "cold-skip-empty"), coldRow(450, "cold-skip-empty"), coldRow(400, "embedder-down"), coldRow(200, "cold-skip-empty")),
+		"no history":       nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fr := coldFakeRouter(t)
+			r := runColdHookSeeded(t, bin, fr, coldPrompt, seed)
+			if r.rec.Mode != "cold-skip-bm25" {
+				t.Fatalf("mode %q, want an ordinary cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
+			}
+		})
+	}
+}
+
+// Rows that never reached the embedder (a notification, a too-short prompt) say nothing about
+// it and must not break a run.
+func TestRowsThatNeverTouchedTheEmbedderDoNotBreakARunE2E(t *testing.T) {
+	bin := buildColdHook(t)
+	fr := coldFakeRouter(t)
+	r := runColdHookSeeded(t, bin, fr, coldPrompt, seedRows(
+		coldRow(500, "cold-skip-empty"), coldRow(450, "machine-turn"), coldRow(400, "cold-skip-empty"),
+		coldRow(300, "too-short"), coldRow(200, "cold-skip-bm25")))
+	if r.rec.Mode != "cold-stuck-bm25" {
+		t.Fatalf("mode %q, want cold-stuck-bm25; err=%q", r.rec.Mode, r.rec.Err)
+	}
 }

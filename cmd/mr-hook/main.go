@@ -250,10 +250,14 @@ func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetr
 		// F42: a cold embedder is not a dead one. Same BM25 gate, but the row says what
 		// happened; logging it as embedder-down would read as an outage on every idle spell.
 		if errors.Is(err, errColdEmbedder) {
-			if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
-				return ids, 0, "cold-skip-bm25", nil, err.Error()
+			kind := "cold-skip"
+			if errors.Is(err, errColdStuck) {
+				kind = "cold-stuck" // the same skip, but too many in a row to be a load in progress
 			}
-			return nil, 0, "cold-skip-empty", nil, err.Error()
+			if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
+				return ids, 0, kind + "-bm25", nil, err.Error()
+			}
+			return nil, 0, kind + "-empty", nil, err.Error()
 		}
 		if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
 			return ids, 0, "bm25-fallback", nil, err.Error()
@@ -379,7 +383,7 @@ func main() {
 	minLen := flag.Int("min-len", 6, "min prompt length (chars, trimmed) to attempt retrieval")
 	k := flag.Int("k", 3, "max skills to surface")
 	timeoutMs := flag.Int("timeout-ms", 300, "hard deadline for the whole retrieve")
-	coldSkip := flag.Bool("cold-skip", true, "ask the model router whether the embedder is loaded before embedding; when it is not, use BM25 at once and start the load with one warm-up request instead of waiting the embed budget out (F42). false restores the old always-embed path")
+	coldSkip := flag.Bool("cold-skip", true, "ask the model router whether the embedder is loaded before embedding; when it is not, use BM25 at once and start the load with one warm-up request instead of waiting the embed budget out (F42). pass -cold-skip=false (with the =; Go reads '-cold-skip false' as true plus a stray argument) to restore the old always-embed path")
 	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only), "rerank" (embed then bge-reranker-v2-m3 reorder; measured better on REAL mined prompts) or "hybrid" (BM25+embed RRF)`)
 	quotaHintOn := flag.Bool("quota-hint", true, "append the mr-orchestrate quota+route hint (ledger-direct, fail-open, zero policy)")
 	showVersion := flag.Bool("version", false, "print this binary's build revision and exit (deployed-fleet freshness — a deployed hook that cannot be asked what it is stayed 3 releases stale)")
@@ -396,13 +400,7 @@ func main() {
 	rec := usagelog.Record{TsUnix: start.Unix(), Mode: "error"}
 	logIt := func() {
 		rec.LatencyMs = time.Since(start).Milliseconds()
-		lp := *logPath
-		if lp == "" {
-			if p, err := usagelog.DefaultLogPath(); err == nil {
-				lp = p
-			}
-		}
-		if lp != "" {
+		if lp := usageLogPath(*logPath); lp != "" {
 			_ = usagelog.Append(lp, rec) // log failure must not break the hook
 		}
 	}
@@ -470,7 +468,7 @@ func main() {
 
 	// Per-prompt embedder timeout is a fraction of the hard deadline; with the cold skip on,
 	// the router probe's ceiling is carved out of it so probe + embed still fit.
-	embedTO, probeTO := hookBudgets(*timeoutMs, *coldSkip)
+	embedTO, probeTO, warmTO := hookBudgets(*timeoutMs, *coldSkip)
 	primaryMode := *ranker
 	var sr scoredRetriever
 	var degradable *rerankOrEmbed // non-nil only in rerank mode
@@ -567,7 +565,7 @@ func main() {
 		// F42: every ranker above needs the embedder, so one wrapper covers all of them. A
 		// ranker that never got built (failedRetriever) has nothing to wait on or warm up.
 		if _, failed := sr.(failedRetriever); *coldSkip && !failed {
-			sr = newColdSkip(sr, *endpoint, spec.Model, probeTO)
+			sr = newColdSkip(sr, *endpoint, spec.Model, probeTO, warmTO, usageLogPath(*logPath))
 		}
 		bm25 = retrievers.NewBM25(skills)
 	}
@@ -688,6 +686,18 @@ func main() {
 		stampDeadline(&rec)
 		// surface nothing
 	}
+}
+
+// usageLogPath resolves the usage log: the -log flag, else the default under the home
+// directory, else "" (no log). The row writer and the cold-run reader must agree on it.
+func usageLogPath(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if p, err := usagelog.DefaultLogPath(); err == nil {
+		return p
+	}
+	return ""
 }
 
 // stampDeadline marks a record as deadline-killed, folding the overrun into
