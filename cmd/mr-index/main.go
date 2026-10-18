@@ -298,7 +298,24 @@ func reuseRoots(existing []catalog.Root, claudeDir string) (reuse bool, notes []
 			r.Pack, r.Path))
 		deadPacks = append(deadPacks, r.Pack)
 	}
-	return len(dead) == 0, notes, deadPacks
+	// A root that still exists but is no longer the plugin's installed version (an update
+	// leaves the old version dir in the cache) would keep the index on skills that no
+	// longer load. The manifest saying so is positive evidence, so it rediscovers too.
+	gone := map[string]bool{}
+	for _, r := range dead {
+		gone[r.Path] = true
+	}
+	superseded := 0
+	for _, r := range roots.Superseded(existing, claudeDir) {
+		if gone[r.Path] {
+			continue
+		}
+		superseded++
+		notes = append(notes, fmt.Sprintf("roots.json: pack %q root is not the installed version any more (%s) — rediscovering",
+			r.Pack, r.Path))
+		deadPacks = append(deadPacks, r.Pack)
+	}
+	return len(dead) == 0 && superseded == 0, notes, deadPacks
 }
 
 func ownerLabel(r catalog.Root) string {
