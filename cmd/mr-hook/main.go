@@ -641,7 +641,11 @@ func main() {
 				hint = appendHint(hint, p)
 			}
 		}
-		ch <- result{ids, topCos, mode, cands, hint, loadSkillVisibility(claudeConfigDir(), in.Cwd), degradeErr, primaryErr}
+		// The visibility read and the SKILL.md reads for the few ranked ids happen here, inside
+		// the deadline, so filterInvocable below stays pure.
+		vis := loadSkillVisibility(claudeConfigDir(), in.Cwd)
+		vis.unloadable = unloadableSkills(byID, ids)
+		ch <- result{ids, topCos, mode, cands, hint, vis, degradeErr, primaryErr}
 	}()
 
 	select {

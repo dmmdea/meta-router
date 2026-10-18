@@ -215,7 +215,8 @@ func Discover(claudeDir string) []catalog.Root {
 	if isDir(userSkills) {
 		out = append(out, catalog.Root{Path: userSkills, Pack: catalog.UserPack})
 	}
-	plug := fromManifest(filepath.Join(claudeDir, "plugins", "installed_plugins.json"))
+	plug := preferEnabled(manifestRoots(filepath.Join(claudeDir, "plugins", "installed_plugins.json")),
+		userEnabledPlugins(claudeDir))
 	if len(plug) == 0 {
 		plug = scanCache(filepath.Join(claudeDir, "plugins", "cache"))
 	}
@@ -252,6 +253,93 @@ type manifestEntry struct {
 // Each key's first entry with a resolvable skills root wins. Plugins without
 // any SKILL.md (MCP-only plugins like context7/github) are skipped.
 func fromManifest(path string) []catalog.Root {
+	var out []catalog.Root
+	for _, kr := range manifestRoots(path) {
+		out = append(out, kr.root)
+	}
+	return out
+}
+
+// keyedRoot is a manifest root plus the installed key it came from (name@marketplace).
+type keyedRoot struct {
+	key  string
+	root catalog.Root
+}
+
+// preferEnabled resolves one plugin installed from several marketplaces. Every copy
+// carries the same invocable ids and harvest keeps the first, so indexing all of them
+// could keep the copy Claude Code does not load. When at least one copy's key is
+// enabled in the user's settings.json, the other copies are dropped; otherwise every
+// copy is kept and the hook filters disabled plugins at prompt time.
+func preferEnabled(rs []keyedRoot, enabled map[string]bool) []catalog.Root {
+	copies := map[string]int{}
+	anyOn := map[string]bool{}
+	for _, kr := range rs {
+		copies[kr.root.Pack]++
+		if enabled[kr.key] {
+			anyOn[kr.root.Pack] = true
+		}
+	}
+	var out []catalog.Root
+	for _, kr := range rs {
+		if copies[kr.root.Pack] > 1 && anyOn[kr.root.Pack] && !enabled[kr.key] {
+			continue
+		}
+		out = append(out, kr.root)
+	}
+	return out
+}
+
+// userEnabledPlugins reads enabledPlugins from <claudeDir>/settings.json. Any read or
+// parse error yields an empty map, which keeps every installed copy.
+func userEnabledPlugins(claudeDir string) map[string]bool {
+	var f struct {
+		EnabledPlugins map[string]bool `json:"enabledPlugins"`
+	}
+	if raw, err := os.ReadFile(filepath.Join(claudeDir, "settings.json")); err == nil {
+		_ = json.Unmarshal(raw, &f)
+	}
+	return f.EnabledPlugins
+}
+
+// Superseded returns the discovery-owned plugin roots that installed_plugins.json no
+// longer lists for their pack. A plugin update leaves the previous version directory
+// in the cache, so Stale still sees the old root as live while Claude Code loads the
+// new version, and the index keeps serving skills that no longer load. A pack the
+// manifest does not list, an operator-owned root, and a missing or unreadable manifest
+// yield nothing: without positive evidence there is no rediscovery.
+func Superseded(rs []catalog.Root, claudeDir string) []catalog.Root {
+	active := map[string]map[string]bool{}
+	for _, r := range fromManifest(filepath.Join(claudeDir, "plugins", "installed_plugins.json")) {
+		if active[r.Pack] == nil {
+			active[r.Pack] = map[string]bool{}
+		}
+		active[r.Pack][pathKey(r.Path)] = true
+	}
+	var out []catalog.Root
+	for _, r := range rs {
+		if r.Pack == catalog.UserPack || isOperatorOwned(r, claudeDir) {
+			continue
+		}
+		if paths, ok := active[r.Pack]; ok && !paths[pathKey(r.Path)] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// pathKey normalises a path for equality: cleaned, and case-folded on Windows, where
+// the manifest and roots.json can spell the same directory differently.
+func pathKey(p string) string {
+	p = filepath.Clean(p)
+	if runtime.GOOS == "windows" {
+		p = strings.ToLower(p)
+	}
+	return p
+}
+
+// manifestRoots is fromManifest with each root's installed key kept.
+func manifestRoots(path string) []keyedRoot {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -262,7 +350,7 @@ func fromManifest(path string) []catalog.Root {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil
 	}
-	var out []catalog.Root
+	var out []keyedRoot
 	for key, entries := range m.Plugins {
 		pack := key
 		for i := 0; i < len(key); i++ {
@@ -279,7 +367,7 @@ func fromManifest(path string) []catalog.Root {
 				continue
 			}
 			if r := skillRootUnder(e.InstallPath); r != "" {
-				out = append(out, catalog.Root{Path: r, Pack: pack})
+				out = append(out, keyedRoot{key: key, root: catalog.Root{Path: r, Pack: pack}})
 				break
 			}
 		}
