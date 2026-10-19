@@ -119,8 +119,8 @@ func TestCopilotReviewRequestsVerifiesAndMeters(t *testing.T) {
 	if !res.Requested || res.Skipped || res.CreditsMetered != 25 || res.Reviewer != "copilot-pull-request-reviewer" {
 		t.Fatalf("want requested+verified with the default 25-credit estimate, got %+v", res)
 	}
-	if len(*calls) != 2 {
-		t.Fatalf("want the edit then the verification read, got %v", *calls)
+	if len(*calls) != 3 {
+		t.Fatalf("want the edit, the verification read, then the refusal read, got %v", *calls)
 	}
 	want := []string{"pr", "edit", "12", "--repo", "Acct/Repo", "--add-reviewer", "@copilot"}
 	if strings.Join((*calls)[0], " ") != strings.Join(want, " ") {
@@ -192,7 +192,7 @@ func TestCopilotReviewForceRequestsPastExhaustion(t *testing.T) {
 	}
 	var res reviewResult
 	_ = json.Unmarshal(out.Bytes(), &res)
-	if !res.Requested || !res.Forced || len(*calls) != 2 {
+	if !res.Requested || !res.Forced || len(*calls) != 3 {
 		t.Fatalf("force must request, verify and say so: %+v calls=%v", res, *calls)
 	}
 }
