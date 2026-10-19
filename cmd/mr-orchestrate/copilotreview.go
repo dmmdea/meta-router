@@ -33,6 +33,15 @@ import (
 // code alone would have metered a review that never existed. Only a Copilot
 // bot present in the PR's reviewRequests counts as requested.
 //
+// A recorded reviewer is still not a review: live on 2026-10-18 (claude-config
+// #187, #188) GitHub recorded the Copilot reviewer while the gate read the month
+// at 81.7 %, and about 6 s later the bot posted "Copilot was unable to review
+// this pull request because the user who requested the review has reached their
+// quota limit". So after the reviewer is recorded the PR's reviews are watched
+// briefly for that refusal. On it nothing is metered and the month is marked
+// exhausted from the vendor's own denial (ObserveLimit), so the next request is
+// skipped by the gate instead of sent to be refused.
+//
 // Account separation is enforced here because the request is a gh WRITE the
 // PreToolUse guard never sees (it runs inside this binary): the repository
 // owner must be the subscription account (copilot_token_user), and gh runs
@@ -51,12 +60,22 @@ var runGH = func(token string, args ...string) (string, error) {
 // mintReviewToken is copilotlane.MintToken behind a var for the same reason.
 var mintReviewToken = copilotlane.MintToken
 
+// The refusal arrived about 6 s after the request both times it was seen, and a
+// real review takes minutes, so a 20 s watch catches the refusal without
+// waiting on the review itself. Vars so tests need not sleep.
+var (
+	refusalWatchFor   = 20 * time.Second
+	refusalWatchEvery = 4 * time.Second
+	reviewSleep       = time.Sleep
+)
+
 // reviewResult is the command's one JSON document: what happened and why.
 type reviewResult struct {
 	Repo           string     `json:"repo"`
 	PR             int        `json:"pr"`
-	Requested      bool       `json:"requested"` // a Copilot reviewer is RECORDED on the PR
-	Skipped        bool       `json:"skipped"`   // the lane's gate refused; nothing was sent
+	Requested      bool       `json:"requested"`         // a Copilot reviewer is RECORDED on the PR
+	Refused        bool       `json:"refused,omitempty"` // recorded, then the bot refused (quota): no review will come
+	Skipped        bool       `json:"skipped"`           // the lane's gate refused; nothing was sent
 	AdmitState     string     `json:"admit_state"`
 	Reason         string     `json:"reason,omitempty"`
 	ResumeAt       *time.Time `json:"resume_at,omitempty"`
@@ -135,6 +154,15 @@ func copilotReview(out io.Writer, repo string, pr int, force bool, now time.Time
 			class = "not_recorded"
 			res.Reason = "gh accepted the request but GitHub recorded no Copilot reviewer — Copilot code review is unavailable for this account right now (AI credits exhausted, or code review disabled under Copilot features); nothing was metered"
 		default:
+			if refusal := copilotQuotaRefusal(tok, owner, strings.TrimSpace(name), pr); refusal != "" {
+				class = "vendor_quota"
+				res.Reviewer, res.Refused = bot, true
+				res.Reason = "GitHub recorded the Copilot reviewer, then the bot refused: " + refusal + " — nothing was metered and the copilot month is marked exhausted until " + ledger.NextMonthlyReset(now).Format(time.RFC3339)
+				warnIf(updateLedger(func(fresh *ledger.Ledger) {
+					fresh.ObserveLimit("copilot", "", ledger.WinMonth, ledger.NextMonthlyReset(now), now)
+				}), "ledger update (review refused)")
+				break
+			}
 			// The review's credits are unknown until the vendor bills them; the
 			// configured estimate keeps the month honest between polls, and the
 			// next poll replaces the estimate with the vendor's figure.
@@ -202,6 +230,38 @@ func copilotReviewerOn(token, owner, name string, pr int) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// copilotQuotaRefusal watches the PR's reviews for refusalWatchFor and returns
+// the Copilot bot's refusal text when it posts one ("" when none appears, or when
+// the reviews cannot be read: the request then stands and is metered as before).
+func copilotQuotaRefusal(token, owner, name string, pr int) string {
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, pr)
+	for waited := time.Duration(0); ; waited += refusalWatchEvery {
+		raw, err := runGH(token, "api", path)
+		if err != nil {
+			return ""
+		}
+		var reviews []struct {
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Body string `json:"body"`
+		}
+		if json.Unmarshal([]byte(raw), &reviews) != nil {
+			return ""
+		}
+		for _, r := range reviews {
+			body := strings.ToLower(r.Body)
+			if strings.Contains(strings.ToLower(r.User.Login), "copilot") && strings.Contains(body, "unable to review") && strings.Contains(body, "quota") {
+				return strings.TrimSpace(r.Body)
+			}
+		}
+		if waited >= refusalWatchFor {
+			return ""
+		}
+		reviewSleep(refusalWatchEvery)
+	}
 }
 
 func emitReview(out io.Writer, r reviewResult) error {
