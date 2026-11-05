@@ -78,7 +78,9 @@ func leadingVerb(d string) (string, bool) {
 // tokenised on non-alphanumerics (so "yes/no" and "multi-file" are the token
 // sequences [yes no] and [multi file]) and a keyword matches only as a run of
 // complete tokens: "client" no longer hits "cli", "description" and
-// "transcript" no longer hit "script", "aggregate" no longer hits "gate".
+// "transcript" no longer hit "script", "aggregate" no longer hits "gate". A
+// token still matches its keyword with a plain inflection on the end
+// ("scripts", "refactoring", "gated"), which the substring test used to catch.
 func containsAny(d string, subs ...string) bool {
 	toks := tokenize(d)
 	for _, s := range subs {
@@ -102,7 +104,7 @@ func hasTokenRun(toks, run []string) bool {
 	for i := 0; i+len(run) <= len(toks); i++ {
 		match := true
 		for j, w := range run {
-			if toks[i+j] != w {
+			if !tokenIs(toks[i+j], w) {
 				match = false
 				break
 			}
@@ -110,6 +112,18 @@ func hasTokenRun(toks, run []string) bool {
 		if match {
 			return true
 		}
+	}
+	return false
+}
+
+// tokenIs reports whether token t is keyword token w, bare or inflected.
+func tokenIs(t, w string) bool {
+	if !strings.HasPrefix(t, w) {
+		return false
+	}
+	switch t[len(w):] {
+	case "", "s", "es", "d", "ed", "ing":
+		return true
 	}
 	return false
 }

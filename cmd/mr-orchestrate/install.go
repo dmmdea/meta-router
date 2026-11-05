@@ -40,9 +40,9 @@ import (
 var statuslineTeeJS []byte
 
 const (
-	// mcpServerName is the registered MCP server name. The session guard and
-	// the hook matcher look for tools named mcp__mr-orchestrate__*, so the
-	// server must be registered under exactly this name.
+	// mcpServerName is the registered MCP server name, which is the tool
+	// namespace: permission rules and hook matchers written for this binary
+	// name its tools mcp__mr-orchestrate__*, so it registers under its own name.
 	mcpServerName = "mr-orchestrate"
 	teeFileName   = "mr-statusline-tee.js"
 )

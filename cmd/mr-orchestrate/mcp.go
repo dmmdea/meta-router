@@ -341,7 +341,7 @@ func toolRoute(args json.RawMessage) toolResult {
 		b, _ := json.MarshalIndent(dj, "", "  ")
 		return okText(string(b)) // relegation is an answer, not an error
 	}
-	return okText(string(routeJSON(d, buildQuotaSignal(snap, cfg, now))))
+	return okText(string(routeJSON(d, buildQuotaSignal(snap, cfg, now, d.Lane, loadPollState()))))
 }
 
 // toolRun dispatches via the shared doRun core with lane defaulted to "auto"

@@ -410,50 +410,77 @@ func writeRouteReceipt(d router.Decision, class router.Class, desc, origin strin
 }
 
 // quotaSignal says how old the provider-sourced quota signal behind a route
-// answer is. "open" computed from a six-week-old observation is not the same
-// statement as "open" computed from a live one; route must say which it is.
+// answer is, for the lane the answer chose. "open" computed from a six-week-old
+// observation is not the same statement as "open" computed from a live one;
+// route must say which it is. It is about the CHOSEN lane: another lane polled
+// an hour ago says nothing about this one.
 // Computed here, not in the router package (B2: no I/O there).
 type quotaSignal struct {
-	NewestObservedAt *time.Time `json:"newest_observed_at,omitempty"` // newest provider-sourced bucket observation; absent when there is none
+	Lane             string     `json:"lane,omitempty"`
+	Polled           bool       `json:"polled"`                       // the lane has a provider usage poll at all
+	NewestObservedAt *time.Time `json:"newest_observed_at,omitempty"` // the lane's newest provider-sourced bucket observation; absent when there is none
 	AgeHours         *float64   `json:"age_hours,omitempty"`
-	Live             bool       `json:"live"` // observed within the configured stale threshold
+	Live             bool       `json:"live"`                // observed within the configured stale threshold
+	LastPoll         string     `json:"last_poll,omitempty"` // why the lane's last poll failed (not_logged_in, http_401, ...); absent when it worked or never ran
 }
 
-// buildQuotaSignal reads the ledger snapshot's provider-sourced buckets. The
-// stale threshold is the same quota_stale_hours the status quota_health block
-// uses (default 48h).
-func buildQuotaSignal(snap []ledger.Bucket, cfg orchcfg.Config, now time.Time) quotaSignal {
+// polledLanes are the lanes a provider usage poll exists for (fetchPolls and
+// pollCopilot). Every other lane's state comes from its own admission, so an
+// absent observation there is not a stale signal.
+var polledLanes = map[string]bool{"claude": true, "codex": true, "copilot": true}
+
+// buildQuotaSignal reads the chosen lane's provider-sourced buckets from the
+// ledger snapshot, and from the poll state why its last poll failed, if it did.
+// The stale threshold is the same quota_stale_hours the status quota_health
+// block uses (default 48h).
+func buildQuotaSignal(snap []ledger.Bucket, cfg orchcfg.Config, now time.Time, lane string, ps pollState) quotaSignal {
+	sig := quotaSignal{Lane: lane, Polled: polledLanes[lane]}
+	if !sig.Polled {
+		return sig
+	}
+	if r, ok := ps.Results[stampKey(lane, "")]; ok && !r.OK {
+		sig.LastPoll = r.Reason
+		if sig.LastPoll == "" {
+			sig.LastPoll = "failed"
+		}
+	}
 	staleAfter := time.Duration(cfg.QuotaStaleHours) * time.Hour
 	if staleAfter <= 0 {
 		staleAfter = 48 * time.Hour
 	}
 	var newest time.Time
 	for _, b := range snap {
-		if b.Source == "provider" && b.ObservedAt.After(newest) {
+		if b.Lane == lane && b.Source == "provider" && b.ObservedAt.After(newest) {
 			newest = b.ObservedAt
 		}
 	}
 	if newest.IsZero() {
-		return quotaSignal{}
+		return sig
 	}
 	age := now.Sub(newest)
 	if age < 0 {
 		age = 0
 	}
 	hours := math.Round(age.Hours()*10) / 10
-	return quotaSignal{NewestObservedAt: &newest, AgeHours: &hours, Live: age <= staleAfter}
+	sig.NewestObservedAt, sig.AgeHours, sig.Live = &newest, &hours, age <= staleAfter
+	return sig
 }
 
-// staleNote is the sentence appended to a route reason when the quota signal
-// is not live.
+// staleNote is the sentence appended to a route reason when the chosen lane has
+// a provider poll and its signal is not live.
 func (q quotaSignal) staleNote() string {
-	if q.Live {
+	if q.Live || !q.Polled {
 		return ""
 	}
-	if q.AgeHours == nil {
-		return "no live quota signal (no provider observation); run mr-orchestrate poll"
+	seen := "no provider observation"
+	if q.AgeHours != nil {
+		seen = fmt.Sprintf("newest observation %dh old", int(*q.AgeHours))
 	}
-	return fmt.Sprintf("no live quota signal (newest observation %dh old); run mr-orchestrate poll", int(*q.AgeHours))
+	// A poll that already failed is the answer; telling the operator to run it again is not.
+	if q.LastPoll != "" {
+		return "no live quota signal for " + q.Lane + " (" + seen + "; last poll: " + q.LastPoll + ")"
+	}
+	return "no live quota signal for " + q.Lane + " (" + seen + "); run mr-orchestrate poll"
 }
 
 func routeJSON(d router.Decision, sig quotaSignal) []byte {
@@ -547,7 +574,7 @@ func runRoute(args []string) error {
 		os.Exit(exitDeferred)
 	}
 
-	fmt.Println(string(routeJSON(d, buildQuotaSignal(snap, cfg, now))))
+	fmt.Println(string(routeJSON(d, buildQuotaSignal(snap, cfg, now, d.Lane, loadPollState()))))
 
 	// Consult receipt: the delegation-coverage numerator (RS9 / S2R-1). Origin
 	// is faithfully plumbed so coverage counts Origin-tagged receipts, NOT
