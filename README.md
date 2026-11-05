@@ -24,9 +24,9 @@ Claude Code can install far more skills than it can keep in context. The skill l
 - **Fixes the dropped-long-tail problem** — relevant skills get surfaced regardless of how many you have installed.
 - **Covers plugin skills too** — indexes `~/.claude/skills` *and* every installed plugin's skills (superpowers, huggingface-skills, …), surfacing them under their invocable names (`superpowers:brainstorming`).
 - **Embed-primary retrieval** — EmbeddingGemma cosine ranking (measured better than the previous BM25+RRF hybrid on the gold-set; the hybrid remains available via `-ranker=hybrid`).
-- **Confidence-gated** — only surfaces when the top semantic match clears a cosine threshold, so quiet prompts stay quiet (no noise).
+- **Confidence-gated** — only surfaces when the top semantic match clears a cosine threshold, and every skill it shows clears that threshold itself and is one the model can invoke, so quiet prompts stay quiet (no noise).
 - **Fully local & private** — embeddings run against a local OpenAI-compatible endpoint; prompts are never sent to any cloud, and the usage log stores only a hash + length, never raw text.
-- **Fail-open by design** — a hard per-prompt deadline, a ~200 ms connect timeout so a dead embedder fails fast, a *precision-gated* BM25 fallback when the embedder is down (it surfaces the single top lexical match only on overwhelming evidence — otherwise silence), and an unconditional clean exit. It cannot wedge your prompt.
+- **Fail-open by design** — a hard per-prompt deadline, a ~200 ms connect timeout so a dead embedder fails fast, silence when the embedder is down or not loaded (there is no lexical fallback: measured in production, its 206 hints were followed 3 times), and an unconditional clean exit. An unknown flag is recorded and ignored rather than failing the hook. It cannot wedge your prompt.
 - **Cheap incremental index** — a hash-diff `refresh` re-embeds only the skills whose content changed, fast enough to run on every session start; a `refresh.log` status line and a mass-removal guard (`--force` to override) make it safe to run unattended.
 - **Fast per-prompt loads** — a binary `index.bin` sidecar (float32 vectors, gob) parses ~10× faster than the JSON index; JSON stays the source of truth and the automatic fallback.
 - **Single static Go binaries** — no runtime, no daemon of its own.
@@ -126,15 +126,19 @@ Tuning flags (pass them in the hook `command`, e.g. `mr-hook -min-cosine 0.60`):
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `-min-cosine` | `0.55` | Confidence gate: minimum top cosine to surface anything. Raise it if irrelevant skills appear; lower it if relevant ones are missed. |
+| `-min-cosine` | `0.55` | Confidence gate: the top cosine must reach it for anything to surface, and each skill shown must reach it itself. Raise it if irrelevant skills appear; lower it if relevant ones are missed. |
 | `-k` | `3` | Max skills to surface per prompt. |
 | `-min-len` | `6` | Min trimmed prompt length (chars) before retrieval is attempted. |
+| `-max-prompt-len` | `0` (off) | Prompts longer than this many bytes are logged `too-long` and not embedded. A long prompt is usually pasted material or a full brief, and a three-line skill hint under it is rarely the thing acted on: measured over 30 days, hints on prompts of 600 bytes or more were followed 1 time in 381, against 13 in 278 below that. Also settable per machine in `hook.json` (below). |
+| `-holdout-pct` | `0` (off) | Percent (0..100) of **sessions**, chosen by a hash of the session id, that get everything computed and logged but are never shown the skill list. Rows carry `arm` (`treat` or `holdout`), and a holdout row lists what it withheld in `would_surface`, so `mr-outcomes` can compare how often a listed skill is invoked with and without the hint. Also settable per machine in `hook.json`. |
 | `-ranker` | `embed` | Primary ranking: `embed` (cosine-only), `rerank` (embed, then a `bge-reranker-v2-m3` reorder — better recall on real prompts, but see the deadline note below), or `hybrid` (BM25+embed RRF). An unrecognized value runs `embed` and records why in `err`. |
 | `-timeout-ms` | `300` | Hard deadline for the whole retrieve. On overrun, surface nothing. **`-ranker=rerank` requires ≥ 6000 and works best at 8000** — the cross-encoder is CPU-bound and costs ~2.1 s p50 / ~4.5 s worst case. Below 6000 the ranker refuses, logs why, and serves `embed`. |
-| `-cold-skip` | `true` | Before embedding, ask the model router (llama-swap `GET /running`, 100 ms ceiling) whether the embed model is loaded. When it is not, or the router cannot be read, the hook uses the BM25 fallback at once and sends one warm-up request, held open only until the router lists the model as loading (a few milliseconds; 150 ms ceiling) and then abandoned, instead of waiting out the embed budget for a model that needs seconds to load. Servers without a `/running` route embed exactly as before. Rows log `cold-skip-bm25` / `cold-skip-empty`; a run of cold skips that outlasts any real load (three earlier ones, the oldest two minutes old) logs `cold-stuck-bm25` / `cold-stuck-empty` so an embedder that never loads is visible. **To turn it off pass `-cold-skip=false`, with the `=`:** Go's flag package reads `-cold-skip false` as `true` plus a stray argument. |
+| `-cold-skip` | `true` | Before embedding, ask the model router (llama-swap `GET /running`, 100 ms ceiling) whether the embed model is loaded. When it is not, or the router cannot be read, the hook surfaces nothing at once and sends one warm-up request, held open only until the router lists the model as loading (a few milliseconds; 150 ms ceiling) and then abandoned, instead of waiting out the embed budget for a model that needs seconds to load. Servers without a `/running` route embed exactly as before. Rows log `cold-skip-empty`; a run of cold skips that outlasts any real load (three earlier ones, the oldest two minutes old) logs `cold-stuck-empty` so an embedder that never loads is visible. **To turn it off pass `-cold-skip=false`, with the `=`:** Go's flag package reads `-cold-skip false` as `true` plus a stray argument. |
 | `-endpoint` | *(empty)* | Embedding endpoint. Empty = per-machine resolution: `$MR_EMBED_ENDPOINT`, then `~/.meta-router/endpoints.json`, then the `:11436`→`:18793` failover chain. Set it to pin one endpoint exactly. |
 | `-index` | `~/.meta-router/index.json` | Index path (`index.bin` sidecar is used automatically when fresh). The index's recorded identity (`model`, optionally `model/tplN`) decides how the query is embedded; an unknown template version is refused fail-open (`mode:"tpl-mismatch"`, quota hint only). |
 | `-log` | `~/.meta-router/usage.jsonl` | Usage-log path. |
+
+**Per-machine settings: `hook.json`.** `-max-prompt-len` and `-holdout-pct` can also be set in a file named `hook.json` beside the usage log (`~/.meta-router/hook.json` by default), for example `{"max_prompt_len": 600, "holdout_pct": 50}`. A flag given on the command line wins over the file. The file exists so these two knobs do not have to travel in a `settings.json` that several machines share: a hook binary older than 0.43.0 exits 2 on a flag it does not know, and exit 2 on `UserPromptSubmit` blocks the prompt. From 0.43.0 the hook itself parses flags fail-open: an unknown flag is recorded in the row's `err`, the flags after it are ignored, and the hook still exits 0.
 
 ### Installing into a host
 
@@ -264,20 +268,32 @@ mr-eval -goldset testdata/goldset.jsonl
 
 ### `mr-outcomes` — did surfaced skills get used?
 
-Joins `usage.jsonl` surfacings with Skill-tool invocations and reports the surfaced→invoked hit-rate, overall and per skill:
+Joins `usage.jsonl` with Skill-tool invocations and reports how often a prompt that had a skill list was followed by a call of one of those skills, per holdout arm and per skill:
 
 ```bash
-mr-outcomes                 # ~/.meta-router/{usage,outcomes}.jsonl, 30-minute window
-mr-outcomes -window-min 10  # stricter attribution
+mr-outcomes            # ~/.meta-router/{usage,outcomes}.jsonl, last 30 days
+mr-outcomes -days 7    # a shorter window; -days 0 reads every row
 ```
 
-It reads `~/.meta-router/outcomes.jsonl`, one JSON object per line:
+```
+| arm     | prompts | followed | rate   |
+| treat   |     ... |      ... |   ...% |   list shown
+| holdout |     ... |      ... |   ...% |   list computed, withheld
+treat minus holdout: ... points
+skill calls: N, hinted: M, never hinted: ...%
+```
+
+**What the numbers mean.** A followed hint is agreement, not effect: the model may have invoked that skill anyway. The holdout row is the base rate, and the difference between the arms is what the hint adds. Run the hook with `-holdout-pct` (or `holdout_pct` in `hook.json`) to have a holdout arm; rows written without one are printed on a separate `no arm` line and are never mixed into the comparison.
+
+The join is exact. An outcome is attributed to the prompt with the same `prompt_id`, or, without one, to the latest operator prompt of the same session before it; background-task notifications never count as that prompt. It reads `~/.meta-router/outcomes.jsonl`, one JSON object per line:
 
 ```json
-{"ts_unix": 1751600000, "skill": "superpowers:brainstorming"}
+{"ts_unix": 1751600000, "skill": "superpowers:brainstorming", "session_id": "...", "prompt_id": "...", "tool_use_id": "..."}
 ```
 
-where `skill` is the invocable skill name exactly as the Skill tool receives it (identical to the ids mr-hook surfaces). The file is expected to be written by a `PostToolUse` hook on the Skill tool — wiring that hook is a deployment step outside these binaries; until it exists, `mr-outcomes` reports the surfacing side against zero invocations.
+where `skill` is the invocable skill name exactly as the Skill tool receives it (identical to the ids `mr-hook` surfaces) and the three ids are the ones Claude Code puts on the `PostToolUse` payload. A row without a `session_id` cannot be attributed and is counted as skipped. The file is written by a `PostToolUse` hook on the Skill tool that you wire yourself; until it exists, `mr-outcomes` reports the surfacing side against zero invocations.
+
+`-window-min N` additionally prints the older report, which credits any invocation within N minutes of a surfacing in any session. It reads high whenever sessions run concurrently and is kept only for comparison with old figures.
 
 ## How it works
 
@@ -286,32 +302,36 @@ The pipeline is **retrieve → gate → inject**:
 ```
 prompt (stdin JSON)
    │
-   ├─ too short? ───────────────────────────────────► surface nothing
+   ├─ too short, or longer than -max-prompt-len? ────► surface nothing
    │
    ▼
 Load ~/.meta-router/index.bin (fast sidecar; falls back to index.json)
    │
    ▼
-EmbeddingGemma cosine ranking          embedder down?
-(embed the QUERY once,          ──────► BM25 fallback under a strict
- score vs cached vectors)               precision gate: surface the single
-   │  └─► top cosine = confidence       top lexical match only on
-   ▼      signal                        overwhelming evidence, else silence
+EmbeddingGemma cosine ranking          embedder down or not loaded?
+(embed the QUERY once,          ──────► surface nothing (embedder-down,
+ score vs cached vectors)               cold-skip-empty); a cold one gets
+   │  └─► top cosine = confidence       one warm-up request for next time
+   ▼      signal
 top cosine ≥ -min-cosine ?  ──no──►  surface nothing (gated-empty)
    │ yes
    ▼
-inject top-k skills as additionalContext  →  stdout hook JSON
+keep the candidates the model can invoke
+whose own cosine ≥ -min-cosine  ──none──►  surface nothing (gated-empty)
+   │
+   ▼
+inject up to k skills as additionalContext  →  stdout hook JSON
 ```
 
 Key properties:
 
 - **The index is built once; only the query is embedded per prompt.** Skill vectors are cached on disk (the gob/float32 `index.bin` sidecar parses in ~3 ms; the JSON is the source of truth and automatic fallback), so the hot path is a single small embedding call plus in-memory math.
 - **Embed-primary ranking** — measured better than the BM25+RRF hybrid on the 236-case gold-set (covered-only recall@3 0.829 vs 0.732); the hybrid remains one flag away (`-ranker=hybrid`) and in `mr-eval` for comparison.
-- **The gate uses the top raw cosine** as a confidence floor: a prompt with no good semantic match surfaces nothing, which is what keeps the hook quiet and trustworthy.
+- **The gate uses the top raw cosine** as a confidence floor: a prompt with no good semantic match surfaces nothing, which is what keeps the hook quiet and trustworthy. Eligibility is decided before the cut: a skill the model cannot invoke (hidden by `skillOverrides`, from a disabled plugin, or with `disable-model-invocation`) takes no slot and cannot carry the gate for the others, and each skill shown clears the floor itself.
 - **Machine turns get no skill hint.** Claude Code delivers background-task notifications (a finished background command or subagent, a Monitor event, including ones queued while the model was busy) through the same `UserPromptSubmit` event, as a prompt starting with `<task-notification>`. They are not requests: no retrieval runs, nothing reaches the embedder, and the row logs `mode:"machine-turn"`. The quota banner is decided exactly as on any other prompt, so a GLM hard-stop latch still shows on these turns.
-- **Fail-open is absolute.** No index, malformed input, or blown deadline resolve to "inject nothing, exit 0." A dead embedder fails the dial in ~200 ms, and a cold one (a model router that has unloaded the model) is detected before the embed call and skipped at once, both dropping to the precision-gated BM25 fallback — tuned on the gold-set for zero wrong surfacings (a wrong fallback surfacing is worse than silence).
+- **Fail-open is absolute.** No index, malformed input, an unknown flag, or a blown deadline all resolve to "inject nothing, exit 0." A dead embedder fails the dial in ~200 ms, and a cold one (a model router that has unloaded the model) is detected before the embed call and skipped at once. Either way the hook stays silent: an earlier lexical fallback was removed because its hints were almost never followed (206 shown, 3 followed, measured in production).
 - **Hash-diff refresh** keeps the index current: each entry stores a hash of exactly the embedded text, so `refresh` re-embeds only what changed — with a status line per run in `refresh.log`, a >30% mass-removal guard, and a single dated `.bak` of the replaced index.
-- **Privacy:** the usage log (`~/.meta-router/usage.jsonl`) records a SHA-256 hash of the prompt, its length, the `session_id`/`prompt_id` Claude Code supplies on the hook payload, which skills were surfaced, which ranked skills were withheld because the model cannot invoke them (`hidden`: skill IDs, never prompt text), the top cosine, latency, and the decision mode — never the raw prompt. Note that `session_id` is the filename of the session transcript, which does contain prompt text: see [SECURITY.md](SECURITY.md) before sharing the log.
+- **Privacy:** the usage log (`~/.meta-router/usage.jsonl`) records a SHA-256 hash of the prompt, its length, the `session_id`/`prompt_id` Claude Code supplies on the hook payload, which skills were surfaced, which ranked skills were withheld because the model cannot invoke them (`hidden`: skill IDs, never prompt text), the holdout arm and what a holdout row withheld (`arm`, `would_surface`: skill IDs again), the top cosine, latency, and the decision mode — never the raw prompt. Note that `session_id` is the filename of the session transcript, which does contain prompt text: see [SECURITY.md](SECURITY.md) before sharing the log.
 
 ## Requirements
 
@@ -343,7 +363,7 @@ Being honest about scope:
 - **It does not edit your `settings.json` behind your back.** The hook binaries never write to it. `mr-orchestrate install` does — that is its whole job — but only when you run it, only to entries it records in a manifest, and never over anything it did not write. Run it with `-dry-run` first; it prints the exact plan and writes nothing.
 - **It does not install, modify, or recommend installing skills.** It only ranks and surfaces what you already have.
 - **It does not guarantee a suggestion every prompt.** By design it stays silent when nothing clears the confidence gate — empty output is correct, not a failure.
-- **It depends on a local embedder for the semantic ranking.** If that endpoint is down, the hook only surfaces the single top lexical match when the BM25 evidence is overwhelming (a gate tuned for precision on the gold-set) — otherwise it surfaces nothing rather than guessing.
+- **It depends on a local embedder for the semantic ranking.** If that endpoint is down or the model is not loaded, the hook surfaces nothing rather than guessing.
 
 ## Roadmap
 

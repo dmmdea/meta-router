@@ -13,7 +13,7 @@ set -euo pipefail
 BIN="${1:-$HOME/.meta-router/bin}"
 REV="$(git rev-parse HEAD)"
 mkdir -p "$BIN"
-for c in mr-orchestrate mr-hook mr-index mr-scorecard mr-goldreplay mr-goldverify mr-promote; do
+for c in mr-orchestrate mr-hook mr-index mr-scorecard mr-goldreplay mr-goldverify mr-promote mr-outcomes; do
   [ -d "./cmd/$c" ] || continue
   go build -ldflags "-X main.buildRev=$REV" -o "$BIN/$c.exe" "./cmd/$c"
   echo "built $c @ ${REV:0:12}"

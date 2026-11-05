@@ -25,9 +25,6 @@ type skillVisibility struct {
 	installed map[string]bool            // plugin names in plugins/installed_plugins.json
 	enabled   map[string]bool            // plugin names with at least one enabledPlugins key set true
 	installs  map[string][]pluginInstall // plugin name -> each installed copy and whether its own key is enabled
-	// unloadable holds ranked candidates whose SKILL.md is gone or sets
-	// disable-model-invocation. It is filled per prompt by unloadableSkills, not from settings.
-	unloadable map[string]bool
 }
 
 // pluginInstall is one installed copy of a plugin. The same plugin name can be installed
@@ -161,14 +158,11 @@ func loadSkillVisibility(userDir, projectDir string) skillVisibility {
 //     and the installed copies are known, the copy the path sits in decides, and a path
 //     under no installed copy is a stale version directory (an update leaves the old
 //     version in the cache), so it is hidden;
-//   - a ranked candidate whose SKILL.md is gone or sets disable-model-invocation is
-//     hidden whatever the settings say.
+//   - (eligibleFunc adds the per-candidate SKILL.md check: a candidate whose SKILL.md is gone or sets
+//     disable-model-invocation is hidden whatever the settings say.)
 func (v skillVisibility) modelInvocable(s catalog.Skill) bool {
 	if strings.HasPrefix(s.ID, "agent:") || strings.HasPrefix(s.ID, "tool:") || strings.HasPrefix(s.ID, "/") {
 		return true
-	}
-	if v.unloadable[s.ID] {
-		return false
 	}
 	if !v.ok {
 		return true
@@ -262,16 +256,22 @@ func disablesModelInvocation(head []byte) bool {
 	return false
 }
 
-// filterInvocable splits ranked ids into those the model can act on and those it cannot.
-// An id missing from byID is kept: formatContext already skips it, and dropping it here
-// would change nothing but the log.
-func filterInvocable(byID map[string]catalog.Skill, ids []string, v skillVisibility) (shown, hidden []string) {
-	for _, id := range ids {
-		if s, ok := byID[id]; ok && !v.modelInvocable(s) {
-			hidden = append(hidden, id)
-			continue
+// eligibleFunc returns the per-candidate check decide applies BEFORE its cut: can the model
+// invoke this id right now. The settings view is already loaded; the SKILL.md read behind
+// unloadableSkills runs lazily, once per candidate decide actually evaluates (memoised), inside
+// the hook's deadline window. An id missing from byID is kept: formatContext skips it and
+// dropping it would change nothing but the log.
+func (v skillVisibility) eligibleFunc(byID map[string]catalog.Skill) func(id string) bool {
+	memo := map[string]bool{}
+	return func(id string) bool {
+		if e, ok := memo[id]; ok {
+			return e
 		}
-		shown = append(shown, id)
+		e := true
+		if s, ok := byID[id]; ok {
+			e = v.modelInvocable(s) && !unloadableSkills(byID, []string{id})[id]
+		}
+		memo[id] = e
+		return e
 	}
-	return shown, hidden
 }

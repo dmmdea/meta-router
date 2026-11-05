@@ -86,30 +86,20 @@ func TestColdSkipRetriever_WarmAndUnknownEmbedAsBefore(t *testing.T) {
 	}
 }
 
-// decide() must log a cold skip as cold-skip-*, never embedder-down, while keeping the same
-// BM25 precision gate.
+// decide() must log a cold skip as cold-skip-empty, never embedder-down, and surface nothing:
+// there is no lexical fallback.
 func TestDecide_ColdSkipModes(t *testing.T) {
 	cold := failedRetriever{err: errors.Join(errColdEmbedder, errors.New("detail"))}
-	strong := stubLex{{ID: "qa", Score: 30}}
-	ids, cos, mode, cands, errStr := decide("qa test web application", 3, 0.55, 6, cold, "embed", strong)
-	if mode != "cold-skip-bm25" || len(ids) != 1 || ids[0] != "qa" || cos != 0 || cands != nil || !strings.Contains(errStr, "cold") {
-		t.Fatalf("strong lexical match: mode=%q ids=%v cos=%v cands=%v err=%q", mode, ids, cos, cands, errStr)
-	}
-	weak := stubLex{{ID: "qa", Score: 1.0}}
-	ids, _, mode, _, errStr = decide("one two three four five six", 3, 0.55, 6, cold, "embed", weak)
-	if mode != "cold-skip-empty" || len(ids) != 0 || !strings.Contains(errStr, "cold") {
-		t.Fatalf("weak lexical match: mode=%q ids=%v err=%q", mode, ids, errStr)
+	ids, _, cos, mode, cands, errStr := decide("qa test web application", 3, 0.55, 6, 0, cold, "embed", nil)
+	if mode != "cold-skip-empty" || len(ids) != 0 || cos != 0 || cands != nil || !strings.Contains(errStr, "cold") {
+		t.Fatalf("cold embedder: mode=%q ids=%v cos=%v cands=%v err=%q", mode, ids, cos, cands, errStr)
 	}
 	// A genuinely failed embedder keeps its old classification.
 	dead := failedRetriever{err: errors.New("connection refused")}
-	if _, _, mode, _, _ = decide("one two three four five six", 3, 0.55, 6, dead, "embed", weak); mode != "embedder-down" {
+	if _, _, _, mode, _, _ = decide("one two three four five six", 3, 0.55, 6, 0, dead, "embed", nil); mode != "embedder-down" {
 		t.Fatalf("a dead embedder must stay embedder-down, got %q", mode)
 	}
 }
-
-type stubLex []retrievers.Scored
-
-func (s stubLex) RetrieveScored(string, int) []retrievers.Scored { return s }
 
 func TestHookBudgets(t *testing.T) {
 	// Off: exactly the arithmetic the hook always had.
@@ -192,11 +182,8 @@ func TestColdSkipRetriever_WarmPathNeverReadsTheLog(t *testing.T) {
 
 func TestDecide_ColdStuckModes(t *testing.T) {
 	stuck := failedRetriever{err: fmt.Errorf("%w: x [stuck: %w]", errColdEmbedder, errColdStuck)}
-	if _, _, mode, _, _ := decide("qa test web application", 3, 0.55, 6, stuck, "embed", stubLex{{ID: "qa", Score: 30}}); mode != "cold-stuck-bm25" {
-		t.Fatalf("stuck, BM25 surfaced: mode=%q", mode)
-	}
-	if _, _, mode, _, _ := decide("one two three four five six", 3, 0.55, 6, stuck, "embed", stubLex{{ID: "qa", Score: 1}}); mode != "cold-stuck-empty" {
-		t.Fatalf("stuck, BM25 declined: mode=%q", mode)
+	if _, _, _, mode, _, _ := decide("qa test web application", 3, 0.55, 6, 0, stuck, "embed", nil); mode != "cold-stuck-empty" {
+		t.Fatalf("stuck: mode=%q", mode)
 	}
 }
 

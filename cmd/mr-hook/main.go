@@ -39,9 +39,6 @@ type hookInput struct {
 type scoredRetriever interface {
 	RetrieveScored(prompt string, k int) ([]retrievers.Scored, float64, error)
 }
-type lexicalScorer interface {
-	RetrieveScored(prompt string, k int) []retrievers.Scored
-}
 
 // rerankOrEmbed makes the cross-encoder OPTIONAL at surfacing time.
 //
@@ -160,54 +157,11 @@ func (r *rerankOrEmbed) mode(requested string) string {
 }
 
 // failedRetriever stands in for a primary ranker that could not be built, so
-// decide uniformly takes its BM25-fallback branch (no untested side path in main).
+// decide uniformly takes its embedder-down branch (no untested side path in main).
 type failedRetriever struct{ err error }
 
 func (f failedRetriever) RetrieveScored(string, int) ([]retrievers.Scored, float64, error) {
 	return nil, 0, f.err
-}
-
-// BM25-fallback precision gate, derived 2026-07-04 from the 236-case goldset
-// (testdata/goldset*.jsonl) over the real 148-skill corpus:
-//   - raw top-1 BM25 >= 18 OR top-1/(prompt tokens) >= 1.5 fired on 14
-//     winnable cases with 14 correct top-1s (precision 1.000, recall 0.165),
-//     and on only 3/151 cases whose target skill is not installed — each a
-//     plausible neighbor (e.g. "execute all plans in the current GSD phase"
-//     → superpowers:executing-plans).
-//   - the obvious alternative — an exact skill-name token in the prompt —
-//     measured only 0.25 precision (a name mention usually refers to the
-//     FAMILY: "use gstack to investigate…" expects gstack-investigate), so
-//     it is deliberately NOT a gate here.
-//
-// The per-token component catches short, sharply lexical prompts; the raw
-// component catches longer prompts with an overwhelming match. Only the
-// single top match is surfaced: this path runs with the embedder down, where
-// a wrong surfacing is worse than silence (the reason the old ungated
-// fallback was removed). ~16% recall is acceptable for a fallback whose
-// alternative is surfacing nothing.
-const (
-	bm25RawGate      = 18.0
-	bm25PerTokenGate = 1.5
-)
-
-// bm25Fallback returns at most one id: the top BM25 match, and only when it
-// clears the precision gate above.
-func bm25Fallback(prompt string, lex lexicalScorer) []string {
-	if lex == nil {
-		return nil
-	}
-	top := lex.RetrieveScored(prompt, 1)
-	if len(top) == 0 {
-		return nil
-	}
-	qTokens := len(strings.Fields(prompt))
-	if qTokens < 1 {
-		qTokens = 1
-	}
-	if top[0].Score >= bm25RawGate || top[0].Score/float64(qTokens) >= bm25PerTokenGate {
-		return []string{top[0].ID}
-	}
-	return nil
 }
 
 // logDepth is how many scored candidates each cosine-path event records
@@ -217,83 +171,89 @@ func bm25Fallback(prompt string, lex lexicalScorer) []string {
 const logDepth = 8
 
 // decide is the pure surfacing decision: rank with the primary retriever
-// (embed-only by default; hybrid RRF behind -ranker=hybrid) and gate on the
-// top cosine. If the embedder errored, fall back to BM25 under a strict
-// precision gate (mode "bm25-fallback") or stay silent (mode
-// "embedder-down"); if the prompt is too short, surface nothing (mode
-// "too-short"). Returns the ids to surface, the top cosine (0 when not
-// applicable), the mode for logging, the scored candidate list (W9
-// R9.2b) — populated on BOTH surfaced and gated-empty cosine paths (the
-// gated region is 27% of live traffic and exactly where the gate decision
-// needs scores), nil on modes where no cosine ran, so a BM25 score can never
-// recontaminate the cosine denominator the R9.2 analysis just cleaned — and
-// the primary retriever's error string ("" when it didn't fail). That last
-// return exists because dropping the error made every failure class read as
-// a generic outage: a dim mismatch, an index-recorded model the endpoint
-// doesn't serve, and a genuinely down embedder all logged an EMPTY Err under
-// "embedder-down", and the one message that says "rebuild the index or pin
-// the right endpoint" never reached any log (review 2026-08-16, HIGH).
+// (embed-only by default; hybrid RRF behind -ranker=hybrid), keep only the
+// candidates the model can invoke, and gate on cosine. A prompt shorter than
+// minLen (mode "too-short") or longer than maxLen bytes when maxLen > 0 (mode
+// "too-long") is never embedded. A cold embedder yields "cold-skip-empty" /
+// "cold-stuck-empty" and any other primary error "embedder-down": there is no
+// lexical fallback, because the 206 lexical hints it produced in production
+// were followed 1.5% of the time.
 //
-// Retrieval depth is max(k, logDepth) but ONLY the first k surface: the
-// ranking is one deterministic sort, so the top-k of a deeper retrieval is
-// identical to a k-retrieval — pinned by TestSurfacedIsPrefixOfCandidates.
-func decide(prompt string, k int, minCos float64, minLen int, primary scoredRetriever, primaryMode string, lex lexicalScorer) ([]string, float64, string, []usagelog.Cand, string) {
+// Eligibility is applied BEFORE the cut. Candidates the model cannot invoke used
+// to take the k slots and carry the gate, and were dropped afterwards: over 30
+// days one took a slot on 600 of 883 gate-passing prompts (68%), and on 157 of
+// them (17.8%) all three, so nothing was shown. On the cosine modes (embed, rerank) a
+// candidate is shown only if it is eligible AND its own cosine is at least
+// minCos, in rank order, at most k; none shown is "gated-empty". On hybrid the
+// scores are not cosines, so the gate stays on topCos and only the
+// eligible-first cut applies. hidden lists the retrieved candidates that clear
+// the cosine floor, would have taken a slot and are not eligible.
+//
+// Returns the ids to surface, the hidden ids, the top cosine (0 when not
+// applicable), the mode for logging, the scored candidate list (W9 R9.2b) --
+// populated on BOTH surfaced and gated-empty cosine paths, nil on modes where
+// no cosine ran so a lexical score can never recontaminate the cosine
+// denominator -- and the primary retriever's error string ("" when it didn't
+// fail), so a dim mismatch, an index-recorded model the endpoint doesn't serve
+// and a genuinely down embedder stay distinguishable in the log.
+//
+// Retrieval depth is max(k, logDepth) and cands and topCos are logged as
+// retrieved. A nil eligible keeps every candidate.
+func decide(prompt string, k int, minCos float64, minLen, maxLen int, primary scoredRetriever, primaryMode string, eligible func(id string) bool) (ids, hidden []string, topCos float64, mode string, cands []usagelog.Cand, primaryErr string) {
 	if len(strings.TrimSpace(prompt)) < minLen {
-		return nil, 0, "too-short", nil, ""
+		return nil, nil, 0, "too-short", nil, ""
 	}
-	kRetrieve := k
-	if kRetrieve < logDepth {
-		kRetrieve = logDepth
+	if maxLen > 0 && len(prompt) > maxLen {
+		return nil, nil, 0, "too-long", nil, ""
 	}
-	res, topCos, err := primary.RetrieveScored(prompt, kRetrieve)
+	res, topCos, err := primary.RetrieveScored(prompt, max(k, logDepth))
 	if err != nil {
-		// F42: a cold embedder is not a dead one. Same BM25 gate, but the row says what
-		// happened; logging it as embedder-down would read as an outage on every idle spell.
+		// F42: a cold embedder is not a dead one; the row says what happened, because
+		// logging it as embedder-down would read as an outage on every idle spell.
 		if errors.Is(err, errColdEmbedder) {
 			kind := "cold-skip"
 			if errors.Is(err, errColdStuck) {
 				kind = "cold-stuck" // the same skip, but too many in a row to be a load in progress
 			}
-			if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
-				return ids, 0, kind + "-bm25", nil, err.Error()
-			}
-			return nil, 0, kind + "-empty", nil, err.Error()
+			return nil, nil, 0, kind + "-empty", nil, err.Error()
 		}
-		if ids := bm25Fallback(prompt, lex); len(ids) > 0 {
-			return ids, 0, "bm25-fallback", nil, err.Error()
-		}
-		return nil, 0, "embedder-down", nil, err.Error()
+		return nil, nil, 0, "embedder-down", nil, err.Error()
 	}
 	// cands carries COSINES OR NOTHING. Hybrid's RetrieveScored returns RRF
-	// fused scores in .Score (~0.03 scale, 1/(60+rank) sums) — real cosines
+	// fused scores in .Score (~0.03 scale, 1/(60+rank) sums) -- real cosines
 	// exist only in its topCos return. Logging those under "cos" would put
 	// 0.03-scale numbers into the cosine denominator with no discriminator on
-	// gated-empty rows (review 2026-07-30, MAJOR): the exact contamination
-	// class this field exists to prevent. So candidates are logged on the
-	// embed path only; hybrid rows carry none.
-	// "rerank" qualifies alongside "embed": EmbedRerank.RetrieveScored returns
-	// each candidate's own EMBED cosine in .Score (only the ORDER comes from the
-	// cross-encoder), so these rows carry real cosines. Its raw logits are never
-	// exposed here. Hybrid remains excluded — its .Score is an RRF fused rank
-	// score, which is the contamination this field exists to prevent.
-	var cands []usagelog.Cand
-	if primaryMode == "embed" || primaryMode == "rerank" {
+	// gated-empty rows (review 2026-07-30, MAJOR). So candidates are logged on
+	// the embed path only; hybrid rows carry none. "rerank" qualifies alongside
+	// "embed": EmbedRerank.RetrieveScored returns each candidate's own EMBED
+	// cosine in .Score (only the ORDER comes from the cross-encoder).
+	cosine := primaryMode == "embed" || primaryMode == "rerank"
+	if cosine {
 		cands = make([]usagelog.Cand, len(res))
 		for i, s := range res {
 			cands[i] = usagelog.Cand{ID: s.ID, Cos: s.Score}
 		}
 	}
 	if topCos < minCos {
-		return nil, topCos, "gated-empty", cands, ""
+		return nil, nil, topCos, "gated-empty", cands, ""
 	}
-	if len(res) > k {
-		res = res[:k]
+	for _, s := range res {
+		if len(ids) >= k {
+			break
+		}
+		if cosine && s.Score < minCos {
+			continue // a rerank order is not cosine order: a later candidate may still clear
+		}
+		if eligible != nil && !eligible(s.ID) {
+			hidden = append(hidden, s.ID)
+			continue
+		}
+		ids = append(ids, s.ID)
 	}
-	ids := make([]string, len(res))
-	for i, s := range res {
-		ids[i] = s.ID
+	if len(ids) == 0 {
+		return nil, hidden, topCos, "gated-empty", cands, ""
 	}
-	return ids, topCos, primaryMode, cands, ""
+	return ids, hidden, topCos, primaryMode, cands, ""
 }
 
 func formatContext(byID map[string]catalog.Skill, ids []string) string {
@@ -311,8 +271,9 @@ func formatContext(byID map[string]catalog.Skill, ids []string) string {
 			continue
 		}
 		desc := s.Description
-		if len(desc) > 140 {
-			desc = desc[:140] + "…"
+		// Cut on a rune boundary: a byte cut split multi-byte characters into invalid UTF-8.
+		if r := []rune(desc); len(r) > 140 {
+			desc = string(r[:140]) + "…"
 		}
 		// s.ID is the INVOCABLE name ("gstack-qa", "superpowers:brainstorming",
 		// "/insights") — surface exactly what the invoking tool accepts, never
@@ -383,11 +344,26 @@ func main() {
 	minLen := flag.Int("min-len", 6, "min prompt length (chars, trimmed) to attempt retrieval")
 	k := flag.Int("k", 3, "max skills to surface")
 	timeoutMs := flag.Int("timeout-ms", 300, "hard deadline for the whole retrieve")
-	coldSkip := flag.Bool("cold-skip", true, "ask the model router whether the embedder is loaded before embedding; when it is not, use BM25 at once and start the load with one warm-up request instead of waiting the embed budget out (F42). pass -cold-skip=false (with the =; Go reads '-cold-skip false' as true plus a stray argument) to restore the old always-embed path")
+	coldSkip := flag.Bool("cold-skip", true, "ask the model router whether the embedder is loaded before embedding; when it is not, surface nothing at once and start the load with one warm-up request instead of waiting the embed budget out (F42). pass -cold-skip=false (with the =; Go reads '-cold-skip false' as true plus a stray argument) to restore the old always-embed path")
+	maxPromptLen := flag.Int("max-prompt-len", 0, "prompts longer than this many bytes are logged too-long and not embedded; 0 = off. Also settable per machine in ~/.meta-router/hook.json")
+	holdoutPct := flag.Int("holdout-pct", 0, "percent (0..100) of sessions, by session id, that are logged but never shown the skill list; 0 = off. Also settable per machine in ~/.meta-router/hook.json")
 	ranker := flag.String("ranker", "embed", `primary ranking: "embed" (cosine-only), "rerank" (embed then bge-reranker-v2-m3 reorder; measured better on REAL mined prompts) or "hybrid" (BM25+embed RRF)`)
 	quotaHintOn := flag.Bool("quota-hint", true, "append the mr-orchestrate quota+route hint (ledger-direct, fail-open, zero policy)")
 	showVersion := flag.Bool("version", false, "print this binary's build revision and exit (deployed-fleet freshness — a deployed hook that cannot be asked what it is stayed 3 releases stale)")
-	flag.Parse()
+	// Flag parsing fails open. The default flag.Parse exits 2 on a flag it does not
+	// know, and exit 2 on UserPromptSubmit blocks the prompt: a machine whose
+	// settings.json named a newer flag than its binary knows would lose every prompt.
+	// Parsing stops at the first bad flag; what was parsed before it stands.
+	flag.CommandLine.Init(os.Args[0], flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	flagErr := flag.CommandLine.Parse(os.Args[1:])
+	if errors.Is(flagErr, flag.ErrHelp) {
+		// -h asked for the flag list. Parsing discards its own output, so print it here.
+		fmt.Fprintln(os.Stderr, "Usage of mr-hook:")
+		flag.CommandLine.SetOutput(os.Stderr)
+		flag.CommandLine.PrintDefaults()
+		return
+	}
 	if *showVersion {
 		fmt.Println("mr-hook", buildRevision())
 		return
@@ -398,6 +374,22 @@ func main() {
 
 	start := time.Now()
 	rec := usagelog.Record{TsUnix: start.Unix(), Mode: "error"}
+	if flagErr != nil {
+		rec.Err = joinErr(rec.Err, "flags: "+flagErr.Error())
+	}
+	// Per-machine knobs: a key applies only when its flag was not given on the command line.
+	given := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	hc, hcErr := readHookConfig(hookConfigPath(usageLogPath(*logPath)))
+	if !given["max-prompt-len"] {
+		*maxPromptLen = hc.MaxPromptLen
+	}
+	if !given["holdout-pct"] {
+		*holdoutPct = hc.HoldoutPct
+	}
+	if hcErr != nil {
+		rec.Err = joinErr(rec.Err, "hook.json: "+hcErr.Error())
+	}
 	logIt := func() {
 		rec.LatencyMs = time.Since(start).Milliseconds()
 		if lp := usageLogPath(*logPath); lp != "" {
@@ -408,7 +400,7 @@ func main() {
 
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		rec.Err = "stdin: " + err.Error()
+		rec.Err = joinErr(rec.Err, "stdin: "+err.Error())
 		return
 	}
 	var in hookInput
@@ -423,7 +415,7 @@ func main() {
 	// malformed JSON still leaves Prompt empty and is still caught below.
 	_ = json.Unmarshal(raw, &in)
 	if strings.TrimSpace(in.Prompt) == "" {
-		rec.Err = "no prompt"
+		rec.Err = joinErr(rec.Err, "no prompt")
 		return
 	}
 	rec.PromptHash = usagelog.HashPrompt(in.Prompt)
@@ -442,7 +434,7 @@ func main() {
 	}
 	idx, err := index.LoadFast(ip) // index.bin sidecar when fresh, else JSON
 	if err != nil {
-		rec.Err = "load index: " + err.Error()
+		rec.Err = joinErr(rec.Err, "load index: "+err.Error())
 		return // no index yet → surface nothing (run mr-index build)
 	}
 	skills := idx.Skills()
@@ -458,12 +450,12 @@ func main() {
 	// written raw by a pre-template binary) is a REFUSAL: embedding the query
 	// raw against templated vectors — or under a guessed template — is a
 	// silent vector-space mix that ranks garbage while looking healthy. Fail
-	// open: no retrieval at all (not even the BM25 fallback — per the W9-P
+	// open: no retrieval at all (per the W9-P
 	// spec the mismatch surfaces nothing but the quota hint), exit 0, and the
 	// row says exactly why.
 	spec, tplErr := idx.SpecForIndex()
 	if tplErr != nil {
-		rec.Err = "index identity: " + tplErr.Error()
+		rec.Err = joinErr(rec.Err, "index identity: "+tplErr.Error())
 	}
 
 	// Per-prompt embedder timeout is a fraction of the hard deadline; with the cold skip on,
@@ -472,7 +464,6 @@ func main() {
 	primaryMode := *ranker
 	var sr scoredRetriever
 	var degradable *rerankOrEmbed // non-nil only in rerank mode
-	var bm25 lexicalScorer
 	// On a template mismatch no retriever is built at all — the goroutine
 	// below skips decide() and computes only the quota hint.
 	if tplErr == nil {
@@ -502,8 +493,8 @@ func main() {
 			// every prompt, looking exactly like a healthy hook. Refuse instead,
 			// say so in the row, and serve embed.
 			if *timeoutMs < rerankMinTimeoutMs {
-				rec.Err = fmt.Sprintf("-ranker=rerank needs -timeout-ms >= %d (measured p95 ~2.3s end-to-end); got %d — running embed",
-					rerankMinTimeoutMs, *timeoutMs)
+				rec.Err = joinErr(rec.Err, fmt.Sprintf("-ranker=rerank needs -timeout-ms >= %d (measured p95 ~2.3s end-to-end); got %d — running embed",
+					rerankMinTimeoutMs, *timeoutMs))
 				primaryMode = "embed"
 				sr = retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO, spec)
 				break
@@ -519,7 +510,7 @@ func main() {
 			rerankEP := liveEndpoint(retrievers.ResolveEndpoints(*endpoint))
 			emb := retrievers.NewEmbedFromVectors(ids, vecs, *endpoint, embedTO, spec)
 			if rerankEP == "" {
-				rec.Err = "-ranker=rerank: no endpoint answered /v1/models — running embed"
+				rec.Err = joinErr(rec.Err, "-ranker=rerank: no endpoint answered /v1/models — running embed")
 				primaryMode = "embed"
 				sr = emb
 				break
@@ -548,7 +539,7 @@ func main() {
 			// running a configuration nobody believed" failure this system has
 			// already paid for once. Still fail-open, but say so in the row.
 			if *ranker != "" && *ranker != "embed" {
-				rec.Err = fmt.Sprintf("unknown -ranker %q — running embed", *ranker)
+				rec.Err = joinErr(rec.Err, fmt.Sprintf("unknown -ranker %q — running embed", *ranker))
 			}
 			primaryMode = "embed"
 			vecs := idx.Vectors()
@@ -567,7 +558,6 @@ func main() {
 		if _, failed := sr.(failedRetriever); *coldSkip && !failed {
 			sr = newColdSkip(sr, *endpoint, spec.Model, probeTO, warmTO, usageLogPath(*logPath))
 		}
-		bm25 = retrievers.NewBM25(skills)
 	}
 
 	// Run the decision AND the quota hint under ONE hard deadline; if either
@@ -580,13 +570,14 @@ func main() {
 		mode   string
 		cands  []usagelog.Cand // W9 R9.2b: scored candidates (cosine paths only)
 		hint   string          // §6c RS1 quota+route hint ("" on any error / disabled)
-		// vis is loaded INSIDE the deadline-bounded goroutine: a slow or locked settings
-		// file must degrade to "inject nothing" like every other per-prompt read, never
-		// block the hook past its deadline (review of PR #70).
-		vis skillVisibility
+		// hidden are the retrieved candidates the model cannot invoke (see decide). The
+		// visibility settings are read INSIDE the deadline-bounded goroutine: a slow or
+		// locked settings file must degrade to "inject nothing" like every other
+		// per-prompt read, never block the hook past its deadline (review of PR #70).
+		hidden []string
 		// degradeErr carries a cross-encoder failure OUT of the goroutine so it
 		// is stamped on EVERY outcome. Reading `degraded` only on the surfaced
-		// path hid the outage on gated-empty / bm25-fallback / embedder-down
+		// path hid the outage on gated-empty / cold-skip-empty / embedder-down
 		// rows — roughly half of live traffic — leaving them byte-identical to
 		// healthy ones. A subsystem silently not running, with a log that looks
 		// correct, is the exact failure this system already paid weeks for.
@@ -599,23 +590,26 @@ func main() {
 	}
 	ch := make(chan result, 1)
 	go func() {
-		var ids []string
+		var ids, hidden []string
 		var topCos float64
 		var cands []usagelog.Cand
 		var degradeErr, primaryErr string
-		// The mismatch refusal surfaces NOTHING — not even the BM25 fallback
-		// (a lexical consolation would mask an index the operator must
-		// rebuild) — but the quota hint below still runs: it reads ledgers,
-		// not vectors, and is the one thing the W9-P spec says survives.
+		// The mismatch refusal surfaces NOTHING, but the quota hint below
+		// still runs: it reads ledgers, not vectors, and is the one thing
+		// the W9-P spec says survives.
 		mode := "tpl-mismatch"
 		if tplErr == nil && machine {
 			mode = "machine-turn" // nothing is ranked, so the notification never reaches the embedder
 		} else if tplErr == nil {
-			ids, topCos, mode, cands, primaryErr = decide(in.Prompt, *k, *minCos, *minLen, sr, primaryMode, bm25)
+			// Eligibility is decided BEFORE the cut, so a candidate the model cannot invoke
+			// takes no slot and carries no gate. The settings are read once here; the
+			// per-candidate SKILL.md read happens lazily, only for candidates decide reaches.
+			eligible := loadSkillVisibility(claudeConfigDir(), in.Cwd).eligibleFunc(byID)
+			ids, hidden, topCos, mode, cands, primaryErr = decide(in.Prompt, *k, *minCos, *minLen, *maxPromptLen, sr, primaryMode, eligible)
 			// If the cross-encoder failed and the embed ordering was used
 			// instead, the row must say "embed" — never claim a rerank that
 			// did not run. Only rewrite the ranker modes; decide's own
-			// outcomes (gated-empty, too-short, bm25-fallback,
+			// outcomes (gated-empty, too-short, too-long,
 			// embedder-down) already describe themselves.
 			if degradable != nil {
 				if mode == primaryMode {
@@ -641,19 +635,27 @@ func main() {
 				hint = appendHint(hint, p)
 			}
 		}
-		// The visibility read and the SKILL.md reads for the few ranked ids happen here, inside
-		// the deadline, so filterInvocable below stays pure.
-		vis := loadSkillVisibility(claudeConfigDir(), in.Cwd)
-		vis.unloadable = unloadableSkills(byID, ids)
-		ch <- result{ids, topCos, mode, cands, hint, vis, degradeErr, primaryErr}
+		ch <- result{ids, topCos, mode, cands, hint, hidden, degradeErr, primaryErr}
 	}()
 
 	select {
 	case r := <-ch:
-		// Suggest only skills the model can act on. Filtered BEFORE Surfaced is recorded, so
-		// the outcome join sees what was shown; the dropped ids are kept in Hidden.
-		r.ids, rec.Hidden = filterInvocable(byID, r.ids, r.vis) // pure: no I/O past the deadline
-		rec.Surfaced, rec.TopCosine, rec.Mode, rec.Cands = r.ids, r.topCos, r.mode, r.cands
+		// decide already dropped what the model cannot invoke; those ids are kept in Hidden,
+		// so the outcome join sees only what was shown.
+		rec.Hidden = r.hidden
+		rec.TopCosine, rec.Mode, rec.Cands = r.topCos, r.mode, r.cands
+		// A holdout session gets everything computed and logged the same, but no skill list:
+		// what would have been shown goes to WouldSurface and Surfaced stays empty. Hints
+		// stay in context for the rest of a session, so the arm is chosen per session, not
+		// per prompt. The offload nudge and the quota hint below are not part of the arm.
+		shown := r.ids
+		if *holdoutPct > 0 {
+			rec.Arm = "treat"
+			if holdoutArm(in.SessionID, *holdoutPct) {
+				rec.Arm, rec.WouldSurface, shown = "holdout", r.ids, nil
+			}
+		}
+		rec.Surfaced = shown
 		// One Err slot, causes JOINED — never dropped on conflict. A
 		// first-cause-wins chain here let three non-fatal -ranker notices
 		// (sub-floor timeout, no live rerank endpoint, unknown ranker) mask
@@ -667,7 +669,7 @@ func main() {
 		if r.degradeErr != "" {
 			rec.Err = joinErr(rec.Err, "ranker degraded to embed: "+r.degradeErr)
 		}
-		ctx := formatContext(byID, r.ids)
+		ctx := formatContext(byID, shown)
 		// The nudge is prompt-shaped, not index-shaped — but the tpl-mismatch
 		// contract is "nothing but the quota hint", and appendNudge("") would
 		// happily emit the bare nudge on a refusal (review 2026-08-16).

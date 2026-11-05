@@ -24,8 +24,12 @@ This repo ships **two** tools with different data boundaries. Read the one you r
   SHA-256 hash of the prompt plus its length — never the raw text. It also records the
   `session_id` and `prompt_id` that Claude Code supplies on the hook payload, the skills
   surfaced, the skills withheld because the model cannot invoke them (`hidden` — skill IDs from
-  the index, the same kind of value as `surfaced`, never prompt text), the top cosine, latency and the decision mode. Those two identifiers are opaque
+  the index, the same kind of value as `surfaced`, never prompt text), the holdout arm (`arm`) and, on a
+  holdout row, the skills that were computed but not shown (`would_surface`, skill IDs again), the top
+  cosine, latency and the decision mode. Those two identifiers are opaque
   and carry no prompt content.
+  The outcome log (`~/.meta-router/outcomes.jsonl`, written by a `PostToolUse` hook you wire
+  yourself) stores a skill name and the same opaque `session_id`, `prompt_id` and `tool_use_id`.
   **Know what `session_id` is before you share this file, though:** Claude Code names each
   session transcript `~/.claude/projects/<project>/<session_id>.jsonl`, and those transcripts
   DO contain verbatim prompt text. So the log still holds no prompt text, but it now holds a

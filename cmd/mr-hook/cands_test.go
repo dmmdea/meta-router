@@ -51,7 +51,7 @@ func TestRerankDegradesToEmbedOrderWhenRerankerFails(t *testing.T) {
 		depth:     20,
 	}
 
-	ids, top, mode, cands, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
+	ids, _, top, mode, cands, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, 0, ro, "rerank", nil)
 
 	if len(ids) != 2 || ids[0] != "a" {
 		t.Fatalf("a reranker outage must still surface the EMBED ordering, got %v", ids)
@@ -86,7 +86,7 @@ func TestRerankDegradationIsRecordedOnGatedEmptyToo(t *testing.T) {
 		reorderer: failReorder{errors.New("HTTP 503")},
 		depth:     20,
 	}
-	_, _, mode, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
+	_, _, _, mode, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, 0, ro, "rerank", nil)
 	if mode != "gated-empty" {
 		t.Fatalf("expected the gated outcome, got %q", mode)
 	}
@@ -104,8 +104,8 @@ func TestRerankOrEmbedPropagatesEmbedderFailure(t *testing.T) {
 		reorderer: failReorder{errors.New("unused")},
 		depth:     20,
 	}
-	_, _, mode, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
-	if mode != "embedder-down" && mode != "bm25-fallback" {
+	_, _, _, mode, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, 0, ro, "rerank", nil)
+	if mode != "embedder-down" {
 		t.Fatalf("an embedder failure must not be masked by the rerank wrapper, got %q", mode)
 	}
 	if ro.degraded {
@@ -171,7 +171,7 @@ func TestRerankOrEmbedReportsRerankWhenHealthy(t *testing.T) {
 		reorderer: flipReorder{},
 		depth:     20,
 	}
-	ids, _, _, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, ro, "rerank", fakeLex{})
+	ids, _, _, _, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, 0, ro, "rerank", nil)
 	if len(ids) != 2 || ids[0] != "b" {
 		t.Fatalf("healthy rerank ordering must win, got %v", ids)
 	}
@@ -196,7 +196,7 @@ func TestRerankModeGatesIdenticallyToEmbed(t *testing.T) {
 		retrievers.Scored{ID: "b", Score: 0.20},
 	)
 	for _, mode := range []string{"embed", "rerank"} {
-		ids, top, m, cands, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, pri, mode, fakeLex{})
+		ids, _, top, m, cands, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, 0, pri, mode, nil)
 		if m != "gated-empty" || len(ids) != 0 {
 			t.Fatalf("%s: below-gate must surface nothing, got mode=%q ids=%v", mode, m, ids)
 		}
@@ -214,7 +214,7 @@ func TestRerankModeGatesIdenticallyToEmbed(t *testing.T) {
 		retrievers.Scored{ID: "b", Score: 0.55},
 	)
 	for _, mode := range []string{"embed", "rerank"} {
-		ids, _, m, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, pri, mode, fakeLex{})
+		ids, _, _, m, _, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, 0, pri, mode, nil)
 		if m != mode || len(ids) != 2 {
 			t.Fatalf("%s: above-gate must surface, got mode=%q ids=%v", mode, m, ids)
 		}
@@ -228,7 +228,7 @@ func TestRerankModeLogsCosineCandidates(t *testing.T) {
 		retrievers.Scored{ID: "deploy", Score: 0.52}, // reranked to the front
 		retrievers.Scored{ID: "ship", Score: 0.71},
 	)
-	_, _, _, cands, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, pri, "rerank", fakeLex{})
+	_, _, _, _, cands, _ := decide("a long enough prompt to pass minLen", 3, 0.40, 5, 0, pri, "rerank", nil)
 	if len(cands) != 2 {
 		t.Fatalf("rerank rows must log candidates, got %d", len(cands))
 	}
@@ -250,7 +250,7 @@ func TestRerankModeLogsCosineCandidates(t *testing.T) {
 // decision needs scores for.
 func TestDecideLogsCandidatesOnGatedEmpty(t *testing.T) {
 	pri := scoredPri(retrievers.Scored{ID: "a", Score: 0.42}, retrievers.Scored{ID: "b", Score: 0.31})
-	ids, _, mode, cands, _ := decide("long enough prompt here", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
+	ids, _, _, mode, cands, _ := decide("long enough prompt here", 3, 0.55, testMinLen, 0, pri, "embed", nil)
 	if mode != "gated-empty" || ids != nil {
 		t.Fatalf("expected gated-empty surface-nothing, got mode=%s ids=%v", mode, ids)
 	}
@@ -262,42 +262,41 @@ func TestDecideLogsCandidatesOnGatedEmpty(t *testing.T) {
 	}
 }
 
-// When the gate passes, the surfaced ids must be exactly the FIRST k logged
-// candidates — retrieving deeper for logging must never change what surfaces.
-func TestSurfacedIsPrefixOfCandidates(t *testing.T) {
+// The incident this change fixes: candidates the model cannot invoke took the k slots and
+// carried the gate, and were dropped only afterwards, so 43% of gate-passing prompts surfaced
+// nothing. An ineligible candidate takes no slot, carries no gate, and each shown candidate
+// must clear the cosine floor itself.
+func TestIneligibleCandidatesNeitherTakeSlotNorCarryGate(t *testing.T) {
+	notH := func(id string) bool { return id != "H" }
 	pri := scoredPri(
-		retrievers.Scored{ID: "a", Score: 0.70}, retrievers.Scored{ID: "b", Score: 0.65},
-		retrievers.Scored{ID: "c", Score: 0.60}, retrievers.Scored{ID: "d", Score: 0.58},
+		retrievers.Scored{ID: "H", Score: 0.60}, retrievers.Scored{ID: "A", Score: 0.44}, retrievers.Scored{ID: "B", Score: 0.38},
 	)
-	ids, topCos, mode, cands, _ := decide("long enough prompt here", 2, 0.55, testMinLen, pri, "embed", fakeLex{})
-	if mode != "embed" || topCos != 0.70 {
-		t.Fatalf("mode=%s topCos=%v", mode, topCos)
+	ids, hidden, _, mode, _, _ := decide("long enough prompt here", 3, 0.40, testMinLen, 0, pri, "embed", notH)
+	if mode != "embed" || len(ids) != 1 || ids[0] != "A" || len(hidden) != 1 || hidden[0] != "H" {
+		t.Fatalf("want ids=[A] hidden=[H] mode=embed, got ids=%v hidden=%v mode=%q", ids, hidden, mode)
 	}
-	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
-		t.Fatalf("surface must stay the first k: %v", ids)
-	}
-	if len(cands) != 4 || cands[3].ID != "d" {
-		t.Fatalf("all retrieved candidates must be logged: %+v", cands)
-	}
-	for i, c := range cands[:2] {
-		if c.ID != ids[i] {
-			t.Fatalf("surfaced must be a prefix of cands: ids=%v cands=%+v", ids, cands)
-		}
+	// The best ELIGIBLE cosine is below the floor: the ineligible 0.60 must not carry the gate.
+	pri = scoredPri(
+		retrievers.Scored{ID: "H", Score: 0.60}, retrievers.Scored{ID: "A", Score: 0.39}, retrievers.Scored{ID: "B", Score: 0.38},
+	)
+	ids, _, _, mode, _, _ = decide("long enough prompt here", 3, 0.40, testMinLen, 0, pri, "embed", notH)
+	if mode != "gated-empty" || len(ids) != 0 {
+		t.Fatalf("want no ids and gated-empty, got ids=%v mode=%q", ids, mode)
 	}
 }
 
-// No cosine ran → no candidates. The analysis slices by mode; a bm25 score in
+// No cosine ran → no candidates. The analysis slices by mode; a non-cosine score in
 // the cosine field would recontaminate the denominator R9.2 just cleaned.
 func TestNoCandidatesOnNonCosineModes(t *testing.T) {
 	pri := fakePrimary{err: errors.New("embedder down")}
-	_, _, mode, cands, _ := decide("one two three four five six seven eight", 3, 0.55, testMinLen, pri, "embed", fakeLex{res: []retrievers.Scored{{ID: "x", Score: 99}}})
-	if mode != "bm25-fallback" {
+	_, _, _, mode, cands, _ := decide("one two three four five six seven eight", 3, 0.55, testMinLen, 0, pri, "embed", nil)
+	if mode != "embedder-down" {
 		t.Fatalf("mode=%s", mode)
 	}
 	if cands != nil {
-		t.Fatalf("bm25-fallback must log no cosine candidates: %+v", cands)
+		t.Fatalf("embedder-down must log no cosine candidates: %+v", cands)
 	}
-	_, _, mode, cands, _ = decide("hi", 3, 0.55, testMinLen, pri, "embed", fakeLex{})
+	_, _, _, mode, cands, _ = decide("hi", 3, 0.55, testMinLen, 0, pri, "embed", nil)
 	if mode != "too-short" || cands != nil {
 		t.Fatalf("too-short must log no candidates: %s %+v", mode, cands)
 	}
@@ -321,14 +320,14 @@ func TestRecordMarshalsCandsCompactAndOmitsWhenAbsent(t *testing.T) {
 // embed-only (review 2026-07-30, MAJOR).
 func TestNoCandidatesOnHybridRanker(t *testing.T) {
 	pri := scoredPri(retrievers.Scored{ID: "a", Score: 0.033}, retrievers.Scored{ID: "b", Score: 0.016})
-	ids, _, mode, cands, _ := decide("long enough prompt here", 3, 0.01, testMinLen, pri, "hybrid", fakeLex{})
+	ids, _, _, mode, cands, _ := decide("long enough prompt here", 3, 0.01, testMinLen, 0, pri, "hybrid", nil)
 	if mode != "hybrid" || len(ids) == 0 {
 		t.Fatalf("expected surfaced hybrid, got mode=%s ids=%v", mode, ids)
 	}
 	if cands != nil {
 		t.Fatalf("hybrid rows must log no cands (RRF scores are not cosines): %+v", cands)
 	}
-	_, _, mode, cands, _ = decide("long enough prompt here", 3, 0.99, testMinLen, pri, "hybrid", fakeLex{})
+	_, _, _, mode, cands, _ = decide("long enough prompt here", 3, 0.99, testMinLen, 0, pri, "hybrid", nil)
 	if mode != "gated-empty" || cands != nil {
 		t.Fatalf("hybrid gated-empty must also log no cands: %s %+v", mode, cands)
 	}

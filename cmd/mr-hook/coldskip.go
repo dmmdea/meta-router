@@ -15,9 +15,9 @@ import (
 
 // F42: the embedder behind the model router is unloaded after five idle minutes and needs
 // seconds to load, but the hook's whole deadline is one second. Embedding into a cold router
-// therefore waited out the embed budget, was cancelled, and fell back to BM25 anyway. The
+// therefore waited out the embed budget, was cancelled, and surfaced nothing anyway. The
 // retriever below asks the router first (retrievers.ProbeEmbedder) and, when the model is not
-// loaded, returns errColdEmbedder at once so decide() takes its BM25 branch, after starting the
+// loaded, returns errColdEmbedder at once so decide() logs cold-skip-empty, after starting the
 // load with ONE warm-up request that does not hold the hook open.
 //
 // The two ceilings are CHOSEN, not fitted. The router answers /running in about a millisecond

@@ -34,10 +34,16 @@ type Record struct {
 	// Hidden are ranked candidates dropped because the model cannot invoke them (hidden by
 	// skillOverrides, or from an installed-but-disabled plugin). They are NOT in Surfaced,
 	// so the surfaced-vs-invoked outcome join counts only what was actually shown.
-	Hidden       []string `json:"hidden,omitempty"`
-	TopCosine    float64  `json:"top_cosine"`
-	LatencyMs    int64    `json:"latency_ms"`
-	Mode         string   `json:"mode"` // embed | rerank | hybrid | bm25-fallback | cold-skip-bm25 | cold-skip-empty | gated-empty | embedder-down | too-short | tpl-mismatch | machine-turn | error
+	Hidden    []string `json:"hidden,omitempty"`
+	TopCosine float64  `json:"top_cosine"`
+	LatencyMs int64    `json:"latency_ms"`
+	Mode      string   `json:"mode"` // embed | rerank | hybrid | cold-skip-empty | cold-stuck-empty | gated-empty | embedder-down | too-short | too-long | tpl-mismatch | machine-turn | error (older rows may also carry bm25-fallback, cold-skip-bm25, cold-stuck-bm25)
+	// Arm is the session's holdout arm, "treat" or "holdout", and is absent when the
+	// holdout is off (-holdout-pct 0). A holdout row computes everything the same but
+	// injects no skill list: Surfaced is empty and WouldSurface holds what a treat row
+	// would have shown, so the two arms are compared on identical eligibility and gating.
+	Arm          string   `json:"arm,omitempty"`
+	WouldSurface []string `json:"would_surface,omitempty"`
 	Err          string   `json:"err,omitempty"`
 	NudgeOffload bool     `json:"nudge_offload,omitempty"` // an offload-suitability nudge was appended
 	QuotaHint    bool     `json:"quota_hint,omitempty"`    // a quota+route hint was appended (§6c RS1)

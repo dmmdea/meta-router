@@ -95,12 +95,12 @@ func TestUnreadableSettingsFiltersNothing(t *testing.T) {
 	}
 }
 
-func TestFilterInvocableSplitsShownAndHidden(t *testing.T) {
+func TestEligibleFuncSplitsInvocableFromHidden(t *testing.T) {
 	dir := writeClaudeConfig(t, `{"skillOverrides":{"gstack-review":"user-invocable-only"}}`, nil)
 	byID := map[string]catalog.Skill{"gstack-review": sk("gstack-review", "skills"), "clean-ship": sk("clean-ship", "skills")}
-	shown, hidden := filterInvocable(byID, []string{"gstack-review", "clean-ship"}, loadSkillVisibility(dir, ""))
-	if strings.Join(shown, ",") != "clean-ship" || strings.Join(hidden, ",") != "gstack-review" {
-		t.Fatalf("shown=%v hidden=%v", shown, hidden)
+	eligible := loadSkillVisibility(dir, "").eligibleFunc(byID)
+	if eligible("gstack-review") || !eligible("clean-ship") || !eligible("not-in-the-index") {
+		t.Fatalf("gstack-review=%v clean-ship=%v unknown=%v", eligible("gstack-review"), eligible("clean-ship"), eligible("not-in-the-index"))
 	}
 }
 
