@@ -175,6 +175,26 @@ func windowSnapshots(rl codexRateLimit) ([]Snapshot, map[ledger.WindowKind]bool,
 	return out, seen, shortPresent
 }
 
+// CodexAuth returns the access token and account id from a Codex auth store,
+// read from their documented positions (tokens.access_token and
+// tokens.account_id) and from nowhere else. It replaces a tolerant walk over
+// the whole file: the same walk, pointed at the Claude store, sent another
+// vendor's token to the wrong endpoint (see claudeToken). A store without the
+// tokens block (API-key mode, logged out) yields "" and the caller reports
+// not_logged_in without making a request.
+func CodexAuth(raw []byte) (token, accountID string) {
+	var v struct {
+		Tokens struct {
+			AccessToken string `json:"access_token"`
+			AccountID   string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return "", ""
+	}
+	return v.Tokens.AccessToken, v.Tokens.AccountID
+}
+
 func pollCodexFacts(c *http.Client, baseURL, authPath string, now time.Time) (Result, CodexFacts) {
 	var r Result
 	raw, err := os.ReadFile(authPath)
@@ -182,13 +202,13 @@ func pollCodexFacts(c *http.Client, baseURL, authPath string, now time.Time) (Re
 		r.Absences = append(r.Absences, Absence{Lane: LaneCodex, Window: "all", Reason: "not_logged_in"})
 		return r, CodexFacts{}
 	}
-	tok := FindStringField(raw, "access_token")
+	tok, acct := CodexAuth(raw)
 	if tok == "" {
 		r.Absences = append(r.Absences, Absence{Lane: LaneCodex, Window: "all", Reason: "not_logged_in"})
 		return r, CodexFacts{}
 	}
 	headers := map[string]string{}
-	if acct := FindStringField(raw, "account_id"); acct != "" {
+	if acct != "" {
 		headers["ChatGPT-Account-Id"] = acct
 	}
 	body, code, err := getJSON(c, baseURL+codexUsagePath, tok, headers)

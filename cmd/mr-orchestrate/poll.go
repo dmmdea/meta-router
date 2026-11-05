@@ -43,6 +43,29 @@ type pollState struct {
 	CodexModels         map[string]bool `json:"codex_models,omitempty"`
 	CodexAdditional     []string        `json:"codex_additional_limits,omitempty"`
 	CodexFactsAt        *time.Time      `json:"codex_facts_at,omitempty"`
+	// Results is the LAST outcome of every poll that ran, keyed like Last. The
+	// stamp says when a poll ran; this says whether it worked and, if not, why —
+	// otherwise a failed poll leaves no trace once the command exits.
+	Results map[string]pollResult `json:"results,omitempty"`
+}
+
+// pollResult is one poll's persisted outcome. Reason is the typed absence that
+// failed the poll (not_logged_in, http_401, ...); empty when OK.
+type pollResult struct {
+	At     time.Time `json:"at"`
+	OK     bool      `json:"ok"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+// failReason names why a poll did not reach the endpoint: the first
+// whole-account ("all") absence. Empty when there is none.
+func failReason(res quotapoll.Result) string {
+	for _, a := range res.Absences {
+		if a.Window == "all" {
+			return a.Reason
+		}
+	}
+	return ""
 }
 
 func stampKey(lane, subject string) string {
@@ -211,6 +234,10 @@ func applyPolls(l *ledger.Ledger, f pollFetch, now time.Time) {
 func finishPolls(f pollFetch, ps *pollState, now time.Time) {
 	for _, sf := range f.subjects {
 		ps.Last[stampKey(sf.Lane, sf.Subject)] = now
+		if ps.Results == nil {
+			ps.Results = map[string]pollResult{}
+		}
+		ps.Results[stampKey(sf.Lane, sf.Subject)] = pollResult{At: now, OK: sf.OK, Reason: failReason(sf.Res)}
 		recordCodexFacts(ps, sf, now)
 	}
 	savePollState(*ps)

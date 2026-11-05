@@ -180,10 +180,10 @@ func TestInstallOnScratchHome(t *testing.T) {
 		t.Fatalf("the tee must delegate to the statusline it replaced, got %q", delegate.Command)
 	}
 	// The MCP registry was written by the HOST's cli, not by us.
-	if log := h.stubLog(t); !strings.Contains(log, "claude mcp add --scope user meta-router") {
+	if log := h.stubLog(t); !strings.Contains(log, "claude mcp add --scope user mr-orchestrate") {
 		t.Fatalf("host cli was not used to register the server: %q", log)
 	}
-	p, _, err := probeClaudeMCP(filepath.Join(h.home, ".claude.json"))
+	p, _, err := probeClaudeMCP(filepath.Join(h.home, ".claude.json"), mcpServerName)
 	if err != nil || p != hostcfg.PresentFile {
 		t.Fatalf("server not registered: presence=%v err=%v", p, err)
 	}
@@ -243,7 +243,7 @@ func TestUninstallRestoresByteIdentical(t *testing.T) {
 	if _, err := os.Stat(h.manifestPath()); !os.IsNotExist(err) {
 		t.Fatalf("manifest must be gone after uninstall: %v", err)
 	}
-	p, _, err := probeClaudeMCP(filepath.Join(h.home, ".claude.json"))
+	p, _, err := probeClaudeMCP(filepath.Join(h.home, ".claude.json"), mcpServerName)
 	if err != nil || p != hostcfg.AbsentFile {
 		t.Fatalf("server should have been deregistered: presence=%v err=%v", p, err)
 	}
@@ -573,14 +573,14 @@ func TestCodexHostIsMCPOnly(t *testing.T) {
 		t.Fatal("installing the codex host must not touch Claude Code's settings")
 	}
 	cfg := filepath.Join(h.home, ".codex", "config.toml")
-	p, _, err := probeCodexMCP(cfg)
+	p, _, err := probeCodexMCP(cfg, mcpServerName)
 	if err != nil || p != hostcfg.PresentFile {
 		t.Fatalf("codex server not registered: presence=%v err=%v", p, err)
 	}
 	if _, err := capture(t, func() error { return runUninstall(args) }); err != nil {
 		t.Fatalf("uninstall codex: %v", err)
 	}
-	p, _, err = probeCodexMCP(cfg)
+	p, _, err = probeCodexMCP(cfg, mcpServerName)
 	if err != nil || p != hostcfg.AbsentFile {
 		t.Fatalf("codex server not deregistered: presence=%v err=%v", p, err)
 	}
@@ -748,7 +748,7 @@ func TestUninstallToleratesAnAlreadyDeregisteredServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The operator removes the MCP entry by hand.
-	if code := stubClaudeMCP(filepath.Join(h.home, ".claude.json"), "remove"); code != 0 {
+	if code := stubClaudeMCP(filepath.Join(h.home, ".claude.json"), "remove", mcpServerName); code != 0 {
 		t.Fatalf("stub remove failed: %d", code)
 	}
 	rep, err := capture(t, func() error { return runUninstall(h.args()) })
@@ -760,6 +760,93 @@ func TestUninstallToleratesAnAlreadyDeregisteredServer(t *testing.T) {
 	}
 	if got := h.read(t); got != opSettings {
 		t.Fatalf("the config should still have been fully restored:\n%s", got)
+	}
+}
+
+// A manifest written by an earlier version records the MCP server under the
+// name that version registered. Installing over it would register a second
+// server and drop the record that owns the first, so nothing could ever remove
+// it (the security pass on the rename, 2026-11-05). install refuses and writes
+// nothing; uninstall removes the server the manifest names; a fresh install
+// then registers this binary's name.
+func TestInstallOverAnEarlierServerNameRefusesAndUninstallRemovesIt(t *testing.T) {
+	const legacy = "meta-router"
+	h := newHostFixture(t, opSettings)
+	if _, err := capture(t, func() error { return runInstall(h.args()) }); err != nil {
+		t.Fatal(err)
+	}
+	// Stage what the earlier version left behind: the registry and the manifest's
+	// host-CLI step both name the legacy server.
+	reg := filepath.Join(h.home, ".claude.json")
+	if stubClaudeMCP(reg, "remove", mcpServerName) != 0 || stubClaudeMCP(reg, "add", legacy) != 0 {
+		t.Fatal("could not stage the legacy registration")
+	}
+	raw, err := os.ReadFile(h.manifestPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var man map[string]any
+	if err := json.Unmarshal(raw, &man); err != nil {
+		t.Fatal(err)
+	}
+	staged := false
+	for _, st := range man["steps"].([]any) {
+		step := st.(map[string]any)
+		if step["kind"] != hostcfg.StepHostCLI {
+			continue
+		}
+		step["desc"] = strings.ReplaceAll(step["desc"].(string), mcpServerName, legacy)
+		for _, key := range []string{"ran", "undo"} {
+			argv := step[key].([]any)
+			for i, a := range argv {
+				if a == mcpServerName {
+					argv[i] = legacy
+				}
+			}
+		}
+		staged = true
+	}
+	if !staged {
+		t.Fatal("the manifest has no host-CLI step to stage")
+	}
+	legacyMan, err := json.MarshalIndent(man, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.manifestPath(), legacyMan, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logBefore := h.stubLog(t)
+
+	rep, err := capture(t, func() error { return runInstall(h.args()) })
+	if err == nil || rep.Result != "refused" {
+		t.Fatalf("install over an earlier server name must refuse: err=%v result=%q", err, rep.Result)
+	}
+	if h.stubLog(t) != logBefore {
+		t.Fatalf("a refused install ran the host cli:\n%s", h.stubLog(t))
+	}
+	if got, _ := os.ReadFile(h.manifestPath()); string(got) != string(legacyMan) {
+		t.Fatal("a refused install rewrote the manifest that owns the legacy registration")
+	}
+	if p, _, _ := probeClaudeMCP(reg, mcpServerName); p != hostcfg.AbsentFile {
+		t.Fatalf("a refused install registered a second server: presence=%v", p)
+	}
+
+	if rep, err := capture(t, func() error { return runUninstall(h.args()) }); err != nil {
+		t.Fatalf("uninstall must undo an earlier version's manifest: %v (%+v)", err, rep)
+	}
+	if p, _, _ := probeClaudeMCP(reg, legacy); p != hostcfg.AbsentFile {
+		t.Fatalf("the legacy server is still registered after uninstall: presence=%v", p)
+	}
+	if got := h.read(t); got != opSettings {
+		t.Fatalf("uninstall did not restore the config:\n%s", got)
+	}
+
+	if _, err := capture(t, func() error { return runInstall(h.args()) }); err != nil {
+		t.Fatalf("a fresh install after the uninstall must succeed: %v", err)
+	}
+	if p, _, _ := probeClaudeMCP(reg, mcpServerName); p != hostcfg.PresentFile {
+		t.Fatalf("the fresh install did not register %q: presence=%v", mcpServerName, p)
 	}
 }
 

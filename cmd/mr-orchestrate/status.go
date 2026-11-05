@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/admission"
@@ -113,7 +114,7 @@ func buildResilience() *ResilienceStatus {
 		if rs.Exclusions == nil {
 			rs.Exclusions = map[string]string{}
 		}
-		rs.Exclusions[lane] = exclusion.Reason(exc, lane)
+		rs.Exclusions[lane] = exclusion.ReasonAt(exc, lane, time.Now().UTC())
 	}
 	w, lwarn := slidewin.Load(localLimiterPath())
 	if lwarn != "" {
@@ -141,6 +142,78 @@ type QuotaHealth struct {
 	TraceStale   bool     `json:"trace_stale"`
 	TraceNote    string   `json:"trace_note,omitempty"`
 	StaleBuckets []string `json:"stale_buckets,omitempty"`
+	// PollResults is the last outcome of every vendor poll that ever ran
+	// (sorted by key), so a failed poll's reason survives the command that ran it.
+	PollResults []PollResultView `json:"poll_results,omitempty"`
+}
+
+// PollResultView is one persisted poll outcome, keyed "lane|subject".
+type PollResultView struct {
+	Key    string    `json:"key"`
+	At     time.Time `json:"at"`
+	OK     bool      `json:"ok"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+func pollResultViews(ps pollState) []PollResultView {
+	if len(ps.Results) == 0 {
+		return nil
+	}
+	out := make([]PollResultView, 0, len(ps.Results))
+	for k, r := range ps.Results {
+		out = append(out, PollResultView{Key: k, At: r.At, OK: r.OK, Reason: r.Reason})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// scopedAlertMaxAge bounds a latched scoped alert that carries no reset
+// instant: the vendor refreshes the latch on every successful poll, so one
+// older than this is a leftover, not a live limit.
+const scopedAlertMaxAge = 8 * 24 * time.Hour
+
+// liveScopedAlerts drops scoped alerts that are no longer true: one whose reset
+// instant has passed, or (no reset instant) one latched more than 8 days ago.
+// The latch file is never modified. Returns nil when none remain. Anything it
+// cannot parse is passed through unchanged — an unreadable alarm is not hidden.
+func liveScopedAlerts(raw json.RawMessage, now time.Time) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var latch struct {
+		TS     time.Time         `json:"ts"`
+		Alerts []json.RawMessage `json:"alerts"`
+	}
+	if json.Unmarshal(raw, &latch) != nil || latch.Alerts == nil {
+		return raw
+	}
+	var keep []json.RawMessage
+	for _, a := range latch.Alerts {
+		var sa quotapoll.ScopedAlert
+		if json.Unmarshal(a, &sa) != nil {
+			keep = append(keep, a)
+			continue
+		}
+		if !sa.ResetsAt.IsZero() {
+			if sa.ResetsAt.Before(now) {
+				continue
+			}
+		} else if !latch.TS.IsZero() && now.Sub(latch.TS) > scopedAlertMaxAge {
+			continue
+		}
+		keep = append(keep, a)
+	}
+	if len(keep) == 0 {
+		return nil
+	}
+	out, err := json.Marshal(struct {
+		TS     time.Time         `json:"ts"`
+		Alerts []json.RawMessage `json:"alerts"`
+	}{latch.TS, keep})
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 func buildQuotaHealth(bs []ledger.Bucket, tracePath string, cfg orchcfg.Config, now time.Time) *QuotaHealth {
@@ -316,6 +389,7 @@ func runStatus(args []string) error {
 	down := burnDownshiftByLane(snap, samples, cfg, now)
 	st := buildStatus(snap, fzs, cfg, now, down, spendDownArmedByLane(snap, samples, cfg, now), reg)
 	st.QuotaHealth = buildQuotaHealth(snap, quotaTracePath(), cfg, now)
+	st.QuotaHealth.PollResults = pollResultViews(ps)
 	if raw, err := os.ReadFile(policyAlertPath()); err == nil && json.Valid(raw) {
 		st.PolicyAlert = raw
 		// Watch-staleness alarm: a nightly that silently stops running is
@@ -348,7 +422,7 @@ func runStatus(args []string) error {
 	if _, prov, warn := router.LoadChecked(rankTablePath()); true {
 		st.RankTable, st.RankTableWarn = prov, warn
 	}
-	st.ScopedAlerts = readAlertJSON(statepaths.ScopedAlert())
+	st.ScopedAlerts = liveScopedAlerts(readAlertJSON(statepaths.ScopedAlert()), now)
 	st.A2Alert = readAlertJSON(statepaths.A2Alert())
 	st.A2WatchStale = a2WatchStale(st.A2Alert, now)
 	// S2R-10 receipts audit block: coverage/obedience/deviation/per-lane counts

@@ -82,5 +82,10 @@ send data off the machine. Being explicit about that is the point of this sectio
   the credentials it deliberately uses. An ambient `ANTHROPIC_API_KEY` is otherwise honoured by
   headless Claude Code ahead of OAuth, silently converting a subscription dispatch into metered
   API spend.
+- **A usage poll sends each vendor only its own token.** `status` and `poll` read the Claude
+  subscription token from `claudeAiOauth.accessToken` and the Codex token from
+  `tokens.access_token`, their documented positions, and from nowhere else in those files.
+  Claude Code keeps the OAuth tokens of third-party MCP servers in the same store; when the
+  subscription entry is empty the poll reports `not_logged_in` and makes no request.
 - **Receipts, not prompts.** `~/.meta-router/orchestrate/dispatch.jsonl` records routing
   decisions, quota accounting and gate verdicts. Nothing operator-specific lives in the repo.

@@ -150,8 +150,8 @@ mr-orchestrate uninstall claude          # put everything back
 
 | Host | What gets wired |
 |---|---|
-| `claude` | `UserPromptSubmit` → `mr-hook`, `SessionStart` → `mr-index refresh`, `statusLine` → the quota tee (wrapping whatever statusline you already had), and the `meta-router` MCP server |
-| `codex` | the `meta-router` MCP server (Codex has no hook or statusline surface) |
+| `claude` | `UserPromptSubmit` → `mr-hook`, `SessionStart` → `mr-index refresh`, `statusLine` → the quota tee (wrapping whatever statusline you already had), and the `mr-orchestrate` MCP server |
+| `codex` | the `mr-orchestrate` MCP server (Codex has no hook or statusline surface) |
 
 **Ownership is recorded, never inferred.** Every change is written to a manifest
 at `<home>/.meta-router/orchestrate/install/<host>.json`, and that manifest is

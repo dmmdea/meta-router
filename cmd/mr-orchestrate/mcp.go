@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/orch/profiles"
 	"github.com/dmmdea/meta-router/internal/orch/quotasig"
 	"github.com/dmmdea/meta-router/internal/orch/router"
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
 // MCP stdio transport (hand-rolled, stdlib-only — Task 12 justification): one
@@ -340,7 +341,7 @@ func toolRoute(args json.RawMessage) toolResult {
 		b, _ := json.MarshalIndent(dj, "", "  ")
 		return okText(string(b)) // relegation is an answer, not an error
 	}
-	return okText(string(routeJSON(d)))
+	return okText(string(routeJSON(d, buildQuotaSignal(snap, cfg, now, d.Lane, loadPollState()))))
 }
 
 // toolRun dispatches via the shared doRun core with lane defaulted to "auto"
@@ -457,6 +458,8 @@ func toolQuotaStatus() toolResult {
 	// visible on the machine-facing MCP surface too, or a stalled quota signal is
 	// invisible to the machine that reads quota_status.
 	st.QuotaHealth = buildQuotaHealth(snap, quotaTracePath(), cfg, now)
+	st.QuotaHealth.PollResults = pollResultViews(loadPollState())
+	st.ScopedAlerts = liveScopedAlerts(readAlertJSON(statepaths.ScopedAlert()), now)
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return errText("quota_status marshal: " + err.Error())

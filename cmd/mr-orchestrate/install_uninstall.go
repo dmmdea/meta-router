@@ -342,8 +342,14 @@ func assessUninstall(man *hostcfg.Manifest, docs map[string]*hostcfg.Doc, plan *
 			// exit 1, which aborted the whole uninstall with the config still
 			// fully wired — and every retry hit the same line.
 			u.status = stRemove
-			if c := cliStepFor(plan, s.Desc); c != nil {
-				p, _, err := c.probe()
+			c, name := cliStepFor(plan, s.Desc), mcpServerName
+			if c == nil && len(plan.clis) > 0 {
+				// Recorded by an earlier version under another server name: the
+				// name is the last argument of the undo command it recorded.
+				c, name = &plan.clis[0], s.Undo[len(s.Undo)-1]
+			}
+			if c != nil {
+				p, _, err := c.probeNamed(name)
 				switch {
 				case err != nil:
 					u.status, u.detail, refuse = stDrift,

@@ -1,6 +1,9 @@
 package router
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // Classify is the FALLBACK-ONLY heuristic: the §6c brain normally KNOWS the
 // class and passes --class; this keeps `route` usable on a bare --desc.
@@ -71,11 +74,56 @@ func leadingVerb(d string) (string, bool) {
 	return "", false
 }
 
+// containsAny reports whether any keyword occurs in d as WHOLE tokens. d is
+// tokenised on non-alphanumerics (so "yes/no" and "multi-file" are the token
+// sequences [yes no] and [multi file]) and a keyword matches only as a run of
+// complete tokens: "client" no longer hits "cli", "description" and
+// "transcript" no longer hit "script", "aggregate" no longer hits "gate". A
+// token still matches its keyword with a plain inflection on the end
+// ("scripts", "refactoring", "gated"), which the substring test used to catch.
 func containsAny(d string, subs ...string) bool {
+	toks := tokenize(d)
 	for _, s := range subs {
-		if strings.Contains(d, s) {
+		if hasTokenRun(toks, tokenize(s)) {
 			return true
 		}
+	}
+	return false
+}
+
+func tokenize(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+func hasTokenRun(toks, run []string) bool {
+	if len(run) == 0 {
+		return false
+	}
+	for i := 0; i+len(run) <= len(toks); i++ {
+		match := true
+		for j, w := range run {
+			if !tokenIs(toks[i+j], w) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenIs reports whether token t is keyword token w, bare or inflected.
+func tokenIs(t, w string) bool {
+	if !strings.HasPrefix(t, w) {
+		return false
+	}
+	switch t[len(w):] {
+	case "", "s", "es", "d", "ed", "ing":
+		return true
 	}
 	return false
 }

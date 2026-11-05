@@ -36,7 +36,7 @@ func warnIfExcluded(off bool, lane string, now time.Time) {
 	}
 	s, _ := exclusion.Load(exclusionsPath())
 	if on, _ := exclusion.Excluded(s, lane, now); on {
-		fmt.Fprintln(os.Stderr, "note: "+lane+" is breaker-"+exclusion.Reason(s, lane)+"; this direct dispatch proceeds and its outcome still counts")
+		fmt.Fprintln(os.Stderr, "note: "+lane+" is breaker-"+exclusion.ReasonAt(s, lane, now)+"; this direct dispatch proceeds and its outcome still counts")
 	}
 }
 

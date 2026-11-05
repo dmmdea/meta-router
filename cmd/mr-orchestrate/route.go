@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -380,6 +381,8 @@ type routeOut struct {
 	// PaceSlack is the winning lane's binding pace slack (W1, advisory —
 	// consumed by ranking only under pace_rank_on).
 	PaceSlack *float64 `json:"pace_slack,omitempty"`
+	// QuotaSignal is the age of the provider signal the answer rests on.
+	QuotaSignal quotaSignal `json:"quota_signal"`
 }
 
 // writeRouteReceipt appends the consult receipt for a route recommendation —
@@ -406,13 +409,95 @@ func writeRouteReceipt(d router.Decision, class router.Class, desc, origin strin
 	}), "dispatch append (route receipt)")
 }
 
-func routeJSON(d router.Decision) []byte {
+// quotaSignal says how old the provider-sourced quota signal behind a route
+// answer is, for the lane the answer chose. "open" computed from a six-week-old
+// observation is not the same statement as "open" computed from a live one;
+// route must say which it is. It is about the CHOSEN lane: another lane polled
+// an hour ago says nothing about this one.
+// Computed here, not in the router package (B2: no I/O there).
+type quotaSignal struct {
+	Lane             string     `json:"lane,omitempty"`
+	Polled           bool       `json:"polled"`                       // the lane has a provider usage poll at all
+	NewestObservedAt *time.Time `json:"newest_observed_at,omitempty"` // the lane's newest provider-sourced bucket observation; absent when there is none
+	AgeHours         *float64   `json:"age_hours,omitempty"`
+	Live             bool       `json:"live"`                // observed within the configured stale threshold
+	LastPoll         string     `json:"last_poll,omitempty"` // why the lane's last poll failed (not_logged_in, http_401, ...); absent when it worked or never ran
+}
+
+// polledLanes are the lanes a provider usage poll exists for (fetchPolls and
+// pollCopilot). Every other lane's state comes from its own admission, so an
+// absent observation there is not a stale signal.
+var polledLanes = map[string]bool{"claude": true, "codex": true, "copilot": true}
+
+// buildQuotaSignal reads the chosen lane's provider-sourced buckets from the
+// ledger snapshot, and from the poll state why its last poll failed, if it did.
+// The stale threshold is the same quota_stale_hours the status quota_health
+// block uses (default 48h).
+func buildQuotaSignal(snap []ledger.Bucket, cfg orchcfg.Config, now time.Time, lane string, ps pollState) quotaSignal {
+	sig := quotaSignal{Lane: lane, Polled: polledLanes[lane]}
+	if !sig.Polled {
+		return sig
+	}
+	if r, ok := ps.Results[stampKey(lane, "")]; ok && !r.OK {
+		sig.LastPoll = r.Reason
+		if sig.LastPoll == "" {
+			sig.LastPoll = "failed"
+		}
+	}
+	staleAfter := time.Duration(cfg.QuotaStaleHours) * time.Hour
+	if staleAfter <= 0 {
+		staleAfter = 48 * time.Hour
+	}
+	var newest time.Time
+	for _, b := range snap {
+		if b.Lane == lane && b.Source == "provider" && b.ObservedAt.After(newest) {
+			newest = b.ObservedAt
+		}
+	}
+	if newest.IsZero() {
+		return sig
+	}
+	age := now.Sub(newest)
+	if age < 0 {
+		age = 0
+	}
+	hours := math.Round(age.Hours()*10) / 10
+	sig.NewestObservedAt, sig.AgeHours, sig.Live = &newest, &hours, age <= staleAfter
+	return sig
+}
+
+// staleNote is the sentence appended to a route reason when the chosen lane has
+// a provider poll and its signal is not live.
+func (q quotaSignal) staleNote() string {
+	if q.Live || !q.Polled {
+		return ""
+	}
+	seen := "no provider observation"
+	if q.AgeHours != nil {
+		seen = fmt.Sprintf("newest observation %dh old", int(*q.AgeHours))
+	}
+	// A poll that already failed is the answer; telling the operator to run it again is not.
+	if q.LastPoll != "" {
+		return "no live quota signal for " + q.Lane + " (" + seen + "; last poll: " + q.LastPoll + ")"
+	}
+	return "no live quota signal for " + q.Lane + " (" + seen + "); run mr-orchestrate poll"
+}
+
+func routeJSON(d router.Decision, sig quotaSignal) []byte {
+	reason := d.Reason
+	if note := sig.staleNote(); note != "" {
+		if reason != "" {
+			reason += "; "
+		}
+		reason += note
+	}
 	o := routeOut{
 		Lane: d.Lane, Model: d.Model, Effort: d.Effort, Strategy: d.Strategy,
-		QuotaState: d.QuotaState, Reason: d.Reason, Class: string(d.Class),
+		QuotaState: d.QuotaState, Reason: reason, Class: string(d.Class),
 		Rule: d.Rule, DispatchVia: dispatchVia(d.Lane),
 		Masked: d.Masked, Alternatives: d.Alternatives,
 		SpendDownBoost: d.SpendDownBoost, PaceSlack: d.PaceSlack,
+		QuotaSignal: sig,
 	}
 	b, _ := json.MarshalIndent(o, "", "  ")
 	return b
@@ -489,7 +574,7 @@ func runRoute(args []string) error {
 		os.Exit(exitDeferred)
 	}
 
-	fmt.Println(string(routeJSON(d)))
+	fmt.Println(string(routeJSON(d, buildQuotaSignal(snap, cfg, now, d.Lane, loadPollState()))))
 
 	// Consult receipt: the delegation-coverage numerator (RS9 / S2R-1). Origin
 	// is faithfully plumbed so coverage counts Origin-tagged receipts, NOT

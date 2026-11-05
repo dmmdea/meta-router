@@ -22,75 +22,44 @@ func ClaudeCredPath() string {
 	return filepath.Join(home, ".claude", ".credentials.json")
 }
 
+// claudeToken returns the subscription OAuth token Claude Code keeps under
+// claudeAiOauth.accessToken, read from that one documented position and from
+// nowhere else.
+//
+// The same store carries an `mcpOAuth` block with one accessToken per
+// authorised third-party MCP server. This function used to fall back to a
+// tolerant walk over the whole store ("first accessToken found") whenever the
+// claudeAiOauth entry was missing, and that fallback leaked twice:
+//
+//   - 2026-07 to 2026-09: the walk met an MCP token first on nearly every
+//     attempt, the usage endpoint answered 401, and the claude lane had no live
+//     quota signal. The fix preferred claudeAiOauth but KEPT the walk for "a
+//     store without that block".
+//   - 2026-09 to 2026-11: the store kept the claudeAiOauth block with an EMPTY
+//     accessToken (the client had moved its token elsewhere), so the kept
+//     fallback ran on every poll and sent a third-party server's OAuth token
+//     to the vendor's usage endpoint as a Bearer credential.
+//
+// A credential is not something to guess at. An empty or absent entry means
+// "not logged in here": the caller reports that typed absence and makes no
+// request at all.
 func claudeToken(credPath string) (string, error) {
 	b, err := os.ReadFile(credPath)
 	if err != nil {
 		return "", err
 	}
-	// Claude Code's store also carries an `mcpOAuth` block: one accessToken per
-	// authorised MCP server (39 of them on 2026-09-02), listed BEFORE
-	// claudeAiOauth. The tolerant walk below returns whichever accessToken its
-	// map iteration meets first - Go randomises map order, so with 39 MCP tokens
-	// beside one subscription token the poll sent an MCP token on nearly every
-	// attempt and the usage endpoint answered 401 from late July 2026 until this
-	// fix, leaving the claude lane with no live quota signal (found via
-	// delegate-mode: proposal + RS1 masking were inert). The
-	// subscription token lives under claudeAiOauth; take it explicitly and keep
-	// the walk only as the fallback for a store without that block.
-	if tok := claudeAiOAuthToken(b); tok != "" {
-		return tok, nil
-	}
-	tok := FindStringField(b, "accessToken")
-	if tok == "" {
-		return "", os.ErrNotExist
-	}
-	return tok, nil
-}
-
-// claudeAiOAuthToken returns claudeAiOauth.accessToken, or "" when the store has
-// no such block (older layouts fall back to the tolerant walk).
-func claudeAiOAuthToken(raw []byte) string {
 	var v struct {
 		ClaudeAiOauth struct {
 			AccessToken string `json:"accessToken"`
 		} `json:"claudeAiOauth"`
 	}
-	if json.Unmarshal(raw, &v) != nil {
-		return ""
+	if err := json.Unmarshal(b, &v); err != nil {
+		return "", err
 	}
-	return v.ClaudeAiOauth.AccessToken
-}
-
-// FindStringField walks arbitrary JSON for the first string value under key.
-// Tolerant by design: vendor credential-store layouts are undocumented.
-// (Moved from cmd/mr-orchestrate/probe.go — one definition, both callers.)
-func FindStringField(raw []byte, key string) string {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return ""
+	if v.ClaudeAiOauth.AccessToken == "" {
+		return "", os.ErrNotExist
 	}
-	var walk func(any) string
-	walk = func(n any) string {
-		switch t := n.(type) {
-		case map[string]any:
-			if s, ok := t[key].(string); ok && s != "" {
-				return s
-			}
-			for _, c := range t {
-				if s := walk(c); s != "" {
-					return s
-				}
-			}
-		case []any:
-			for _, c := range t {
-				if s := walk(c); s != "" {
-					return s
-				}
-			}
-		}
-		return ""
-	}
-	return walk(v)
+	return v.ClaudeAiOauth.AccessToken, nil
 }
 
 type claudeWindow struct {

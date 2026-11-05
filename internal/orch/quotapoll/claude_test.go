@@ -91,12 +91,29 @@ func TestPollClaudePrefersClaudeAiOauthTokenOverMCPTokens(t *testing.T) {
 	}
 }
 
-func TestClaudeAiOAuthTokenFallsBackToWalkWithoutBlock(t *testing.T) {
-	raw := []byte(`{"legacy": {"accessToken": "walked"}}`)
-	if got := claudeAiOAuthToken(raw); got != "" {
-		t.Fatalf("no claudeAiOauth block must yield empty, got %q", got)
+// The incident this guards (2026-09 to 2026-11): the store kept its
+// claudeAiOauth block with an EMPTY accessToken while a third-party MCP
+// server's token sat under mcpOAuth, and a fallback walk sent that token to
+// the usage endpoint on every poll. An empty subscription token is "not logged
+// in": a typed absence and no request, whatever else the store holds.
+func TestPollClaudeSendsNothingWhenSubscriptionTokenIsEmpty(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		t.Errorf("a request was made with Authorization %q", r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+	store := filepath.Join(t.TempDir(), "credentials.json")
+	body := `{"mcpOAuth": {"some-server|0123": {"accessToken": "third-party-token", "expiresAt": 99999999999}},
+	          "claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0}}`
+	if err := os.WriteFile(store, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if got := FindStringField(raw, "accessToken"); got != "walked" {
-		t.Fatalf("walk fallback broken: %q", got)
+	r := pollClaude(guardedClient(), srv.URL, store, time.Now())
+	if hits != 0 {
+		t.Fatalf("the poll contacted the endpoint %d time(s) without a subscription token", hits)
+	}
+	if len(r.Snapshots) != 0 || len(r.Absences) != 1 || r.Absences[0].Reason != "not_logged_in" {
+		t.Fatalf("want one typed not_logged_in absence, got %+v", r)
 	}
 }

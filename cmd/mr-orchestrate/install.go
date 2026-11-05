@@ -40,7 +40,10 @@ import (
 var statuslineTeeJS []byte
 
 const (
-	mcpServerName = "meta-router"
+	// mcpServerName is the registered MCP server name, which is the tool
+	// namespace: permission rules and hook matchers written for this binary
+	// name its tools mcp__mr-orchestrate__*, so it registers under its own name.
+	mcpServerName = "mr-orchestrate"
 	teeFileName   = "mr-statusline-tee.js"
 )
 
@@ -100,11 +103,16 @@ type cliStep struct {
 	bin  string
 	run  []string
 	undo []string
-	// probe answers "is this already registered?" by READING the host's config,
-	// never by running the CLI: a probe that spawns the host is slow, and its
-	// failure would be indistinguishable from "not registered".
-	probe func() (hostcfg.Presence, string, error)
+	// probeNamed answers "is a server of this name registered?" by READING the
+	// host's config, never by running the CLI: a probe that spawns the host is
+	// slow, and its failure would be indistinguishable from "not registered".
+	// It takes the name because a manifest written by an earlier version
+	// records the server under the name that version registered.
+	probeNamed func(name string) (hostcfg.Presence, string, error)
 }
+
+// probe asks about the name this binary registers.
+func (c *cliStep) probe() (hostcfg.Presence, string, error) { return c.probeNamed(mcpServerName) }
 
 type hostPlan struct {
 	host     string
@@ -206,12 +214,12 @@ func planFor(host, home, binDir, stateDir string) (*hostPlan, error) {
 			},
 		)
 		p.clis = append(p.clis, cliStep{
-			desc: "MCP server 'meta-router' registered with Claude Code (user scope)",
+			desc: "MCP server 'mr-orchestrate' registered with Claude Code (user scope)",
 			bin:  "claude",
 			run:  []string{"mcp", "add", "--scope", "user", mcpServerName, "--", orchBin, "mcp"},
 			undo: []string{"mcp", "remove", "--scope", "user", mcpServerName},
-			probe: func() (hostcfg.Presence, string, error) {
-				return probeClaudeMCP(filepath.Join(home, ".claude.json"))
+			probeNamed: func(name string) (hostcfg.Presence, string, error) {
+				return probeClaudeMCP(filepath.Join(home, ".claude.json"), name)
 			},
 		})
 		return p, nil
@@ -220,12 +228,12 @@ func planFor(host, home, binDir, stateDir string) (*hostPlan, error) {
 		// MCP server. Saying so beats inventing a step to look symmetric.
 		p := &hostPlan{host: host}
 		p.clis = append(p.clis, cliStep{
-			desc: "MCP server 'meta-router' registered with Codex CLI",
+			desc: "MCP server 'mr-orchestrate' registered with Codex CLI",
 			bin:  "codex",
 			run:  []string{"mcp", "add", mcpServerName, "--", orchBin, "mcp"},
 			undo: []string{"mcp", "remove", mcpServerName},
-			probe: func() (hostcfg.Presence, string, error) {
-				return probeCodexMCP(filepath.Join(home, ".codex", "config.toml"))
+			probeNamed: func(name string) (hostcfg.Presence, string, error) {
+				return probeCodexMCP(filepath.Join(home, ".codex", "config.toml"), name)
 			},
 		})
 		return p, nil
@@ -353,7 +361,7 @@ func findOurs(d *hostcfg.Doc, path []string, ident string) (idx int, ambiguous, 
 }
 
 // probeClaudeMCP reads Claude Code's user-scope registry WITHOUT writing to it.
-func probeClaudeMCP(path string) (hostcfg.Presence, string, error) {
+func probeClaudeMCP(path, name string) (hostcfg.Presence, string, error) {
 	b, p, err := hostcfg.ReadFile(path)
 	if err != nil || p != hostcfg.PresentFile {
 		return p, "", err
@@ -364,7 +372,7 @@ func probeClaudeMCP(path string) (hostcfg.Presence, string, error) {
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return hostcfg.UnknownFile, "", fmt.Errorf("%s: %w", path, err)
 	}
-	if _, ok := doc.MCPServers[mcpServerName]; ok {
+	if _, ok := doc.MCPServers[name]; ok {
 		return hostcfg.PresentFile, path, nil
 	}
 	return hostcfg.AbsentFile, path, nil
@@ -372,16 +380,16 @@ func probeClaudeMCP(path string) (hostcfg.Presence, string, error) {
 
 // probeCodexMCP looks for the server's TOML table header. A header scan, not a
 // parse: this repo ships no TOML parser, and presence is all the probe needs.
-func probeCodexMCP(path string) (hostcfg.Presence, string, error) {
+func probeCodexMCP(path, name string) (hostcfg.Presence, string, error) {
 	b, p, err := hostcfg.ReadFile(path)
 	if err != nil || p != hostcfg.PresentFile {
 		return p, "", err
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		t := strings.TrimSpace(line)
-		if t == "[mcp_servers."+mcpServerName+"]" ||
-			t == `[mcp_servers."`+mcpServerName+`"]` ||
-			t == "[mcp_servers.'"+mcpServerName+"']" {
+		if t == "[mcp_servers."+name+"]" ||
+			t == `[mcp_servers."`+name+`"]` ||
+			t == "[mcp_servers.'"+name+"']" {
 			return hostcfg.PresentFile, path, nil
 		}
 	}
