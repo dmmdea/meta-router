@@ -355,6 +355,7 @@ func main() {
 	default:
 		releaseLock = release
 		defer releaseLock()
+		pruneStaleTemps(outPath)
 	}
 	rs, staleNotes, err := resolveRoots(cfg, outPath)
 	if err != nil {

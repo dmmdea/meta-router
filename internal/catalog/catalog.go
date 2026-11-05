@@ -426,7 +426,9 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 		cands := []string{filepath.Join(cleanRoot, "SKILL.md")}
 		ents, _ := os.ReadDir(cleanRoot)
 		for _, d := range ents {
-			if SkipDirName(d.Name()) || d.Name() == "synced" {
+			// "synced" is the account-synced folder of the user skills root only;
+			// a plugin is free to ship a skill of that name.
+			if SkipDirName(d.Name()) || (d.Name() == "synced" && (root.Pack == "" || root.Pack == UserPack)) {
 				continue
 			}
 			if fi, err := os.Stat(filepath.Join(cleanRoot, d.Name())); err == nil && fi.IsDir() {

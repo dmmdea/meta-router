@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -37,6 +38,23 @@ func acquireLock(indexPath string) (release func(), held bool, err error) {
 		os.Remove(lockPath) // stale: take it over on the next pass
 	}
 	return nil, true, nil
+}
+
+// pruneStaleTemps removes save temp files next to the index that no run can
+// still be writing: older than lockStaleAfter. Saves use a unique temp name per
+// call, so a run killed mid-save leaves its temp behind and nothing ever reuses
+// the name; without this they would accumulate (each is a full index). Called
+// with the refresh lock held. Young temps are left alone: a build running
+// beside this refresh may own one.
+func pruneStaleTemps(indexPath string) {
+	base := filepath.Base(indexPath)
+	stem := strings.TrimSuffix(base, filepath.Ext(base)) // index.json and index.bin share it
+	tmps, _ := filepath.Glob(filepath.Join(filepath.Dir(indexPath), stem+".*.tmp"))
+	for _, t := range tmps {
+		if fi, err := os.Stat(t); err == nil && !fi.IsDir() && time.Since(fi.ModTime()) > lockStaleAfter {
+			os.Remove(t)
+		}
+	}
 }
 
 // releaseLock is set once the lock is held; exit runs it on every path, since
