@@ -273,6 +273,22 @@ func assessInstall(plan *hostPlan, docs map[string]*hostcfg.Doc, man *hostcfg.Ma
 		}
 		out = append(out, dec)
 	}
+
+	// A host-CLI step this binary does not plan was recorded by an earlier
+	// version, under the server name that version registered. Installing over it
+	// would register a second server and write a manifest that no longer owns
+	// the first, so nothing could ever remove it. Refuse; the way out is
+	// uninstall, which reads the recorded undo and so removes the old name.
+	if man != nil {
+		for i := range man.Steps {
+			s := &man.Steps[i]
+			if s.Kind == hostcfg.StepHostCLI && cliStepFor(plan, s.Desc) == nil {
+				out = append(out, decision{desc: s.Desc, kind: s.Kind, status: stDrift, carried: s,
+					detail: "recorded by an earlier version under another server name; run uninstall with this binary, then install"})
+				refuse = true
+			}
+		}
+	}
 	return out, refuse, nil
 }
 

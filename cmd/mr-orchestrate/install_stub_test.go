@@ -43,13 +43,13 @@ func runHostStub(argv []string) int {
 	}
 	switch who {
 	case "claude":
-		return stubClaudeMCP(filepath.Join(home, ".claude.json"), argv[1])
+		return stubClaudeMCP(filepath.Join(home, ".claude.json"), argv[1], stubServerName(argv))
 	case "codex":
 		dir := os.Getenv("CODEX_HOME")
 		if dir == "" {
 			dir = filepath.Join(home, ".codex")
 		}
-		return stubCodexMCP(filepath.Join(dir, "config.toml"), argv[1])
+		return stubCodexMCP(filepath.Join(dir, "config.toml"), argv[1], stubServerName(argv))
 	}
 	fmt.Fprintln(os.Stderr, "stub: unknown host", who)
 	return 2
@@ -80,7 +80,19 @@ func rewriteSettingsLikeTheHost(path string) {
 	_ = os.WriteFile(path, out, 0o644)
 }
 
-func stubClaudeMCP(path, verb string) int {
+// stubServerName is the server a host `mcp add|remove` names: the argument before
+// "--" on add, the last one on remove. The stub registers what it is told to, as
+// the real CLIs do.
+func stubServerName(argv []string) string {
+	for i, a := range argv {
+		if a == "--" && i > 0 {
+			return argv[i-1]
+		}
+	}
+	return argv[len(argv)-1]
+}
+
+func stubClaudeMCP(path, verb, name string) int {
 	doc := map[string]json.RawMessage{}
 	if b, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(b, &doc); err != nil {
@@ -95,9 +107,9 @@ func stubClaudeMCP(path, verb string) int {
 	}
 	switch verb {
 	case "add":
-		servers[mcpServerName] = json.RawMessage(`{"command":"mr-orchestrate","args":["mcp"]}`)
+		servers[name] = json.RawMessage(`{"command":"mr-orchestrate","args":["mcp"]}`)
 	case "remove":
-		delete(servers, mcpServerName)
+		delete(servers, name)
 	default:
 		return 2
 	}
@@ -119,8 +131,8 @@ func stubClaudeMCP(path, verb string) int {
 	return 0
 }
 
-func stubCodexMCP(path, verb string) int {
-	const header = "[mcp_servers." + mcpServerName + "]"
+func stubCodexMCP(path, verb, name string) int {
+	header := "[mcp_servers." + name + "]"
 	body, _ := os.ReadFile(path)
 	lines := strings.Split(string(body), "\n")
 	var kept []string
