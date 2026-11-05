@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -132,6 +133,31 @@ func Build(skills []catalog.Skill, endpoint string, timeout time.Duration, spec 
 	return idx, nil
 }
 
+// writeAtomic streams write() into a uniquely named temp file beside path and
+// renames it over path. The name is unique per call: a fixed "<path>.tmp" is
+// shared by concurrent savers, which measured as 15.6% failed refreshes (one
+// saver renamed the other's temp away). A failed attempt removes only its own
+// temp file.
+func writeAtomic(path string, write func(io.Writer) error) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	err = write(f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		_ = os.Chmod(tmp, 0o644)      // CreateTemp makes it 0600; the index has always been 0644
+		err = renameAtomic(tmp, path) // atomic replace, retried past a transient Windows lock
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
+}
+
 func (idx *Index) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -140,12 +166,7 @@ func (idx *Index) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := renameAtomic(tmp, path); err != nil { // atomic replace, retried past a transient Windows lock
-		os.Remove(tmp) // don't leave a stale .tmp if the replace never lands
+	if err := writeAtomic(path, func(w io.Writer) error { _, err := w.Write(data); return err }); err != nil {
 		return err
 	}
 	// Write the fast-load sidecar AFTER the JSON so its mtime is >= the
@@ -205,6 +226,22 @@ type RefreshPlan struct {
 // Reembeds is the number of entries whose vectors must be recomputed
 // (new + changed).
 func (p *RefreshPlan) Reembeds() int { return len(p.toText) }
+
+// Noop reports whether applying the plan would leave idx exactly as it is: no
+// new, changed or removed skill, and every entry's metadata (path, description,
+// ...) and order already match. A no-op refresh must write nothing — it used to
+// rewrite a 10 MB file and rotate the only backup every time.
+func (p *RefreshPlan) Noop(idx *Index) bool {
+	if p.Added != 0 || len(p.toText) != 0 || len(p.RemovedIDs) != 0 || len(p.entries) != len(idx.Entries) {
+		return false
+	}
+	for i, e := range p.entries {
+		if e.Skill != idx.Entries[i].Skill {
+			return false
+		}
+	}
+	return true
+}
 
 // RemovalExceeds reports whether removing `removed` of `before` entries
 // crosses maxFrac (e.g. 0.30). An empty index never triggers the guard.

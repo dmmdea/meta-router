@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -418,24 +417,31 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 		cleanRoot := filepath.Clean(root.Path)
 		owned := ownedSkillDirs(cleanRoot, root.Pack)
 		var hs []harvested
-		_ = filepath.WalkDir(cleanRoot, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
+		// One level deep only: <root>/SKILL.md and <root>/<name>/SKILL.md are
+		// the skills the Skill tool can invoke by that name. Deeper files
+		// (pack-internal copies, test fixtures) and the account-synced folder
+		// are not invocable as named, so they never enter the index. A
+		// top-level entry that is a symlink or junction to a directory is
+		// followed: os.Stat resolves either, where WalkDir never descended.
+		cands := []string{filepath.Join(cleanRoot, "SKILL.md")}
+		ents, _ := os.ReadDir(cleanRoot)
+		for _, d := range ents {
+			if SkipDirName(d.Name()) || d.Name() == "synced" {
+				continue
 			}
-			if d.IsDir() {
-				if p != cleanRoot && SkipDirName(d.Name()) {
-					return fs.SkipDir
-				}
-				return nil
+			if fi, err := os.Stat(filepath.Join(cleanRoot, d.Name())); err == nil && fi.IsDir() {
+				cands = append(cands, filepath.Join(cleanRoot, d.Name(), "SKILL.md"))
 			}
-			if d.Name() != "SKILL.md" {
-				return nil
+		}
+		for _, p := range cands {
+			if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+				continue
 			}
 			// Ownership filter: skip a skill this pack does not own.
 			if owned != nil {
 				dn := filepath.Base(filepath.Dir(p))
 				if !owned[dn] {
-					return nil
+					continue
 				}
 			}
 			// parseFrontmatterMD, NOT ParseSkillMD: a `name:` field is not
@@ -449,25 +455,23 @@ func HarvestRoots(roots []Root) ([]Skill, error) {
 			// still skipped.
 			s, perr := parseFrontmatterMD(p)
 			if perr != nil {
-				return nil // skip bad
+				continue // skip bad
 			}
 			dir := filepath.Dir(p)
 			dirName := filepath.Base(dir)
 			if dir == cleanRoot { // SKILL.md directly at the root
 				dirName = filepath.Base(cleanRoot)
 			}
-			rel, rerr := filepath.Rel(cleanRoot, p)
 			depth := 1
-			if rerr == nil {
-				depth = strings.Count(filepath.ToSlash(rel), "/")
+			if dir == cleanRoot {
+				depth = 0
 			}
 			nameMatch := s.Name == dirName
 			s.Name = dirName
 			s.Source = root.Pack
 			s.ID = InvocableID(root.Pack, dirName)
 			hs = append(hs, harvested{skill: s, depth: depth, nameMatch: nameMatch})
-			return nil
-		})
+		}
 		// Top-level invocable copies first so downstream keep-first dedup
 		// (by description or ID) always keeps the copy that can be invoked.
 		// Among same-depth description twins (alias dirs like _gstack-command /
