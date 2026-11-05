@@ -4,6 +4,18 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.43.1] — 2026-11-05
+
+### Fixed — the index survives concurrent refreshes and a torn file, and holds only skills that can be invoked as named
+`mr-index refresh` runs on every session start, and sessions start in parallel. Three defects followed from that, each measured on a workstation's own logs.
+
+- **Concurrent refreshes no longer lose a save.** Every save wrote to the one fixed name `index.json.tmp`, so two overlapping runs renamed or truncated each other's temp file: 458 of 2,941 refreshes in 30 days failed (15.6%), 453 of them on that temp file. A save now writes to a unique temp name, and a refresh takes `index.json.lock` first; a second run that finds it held logs `"skipped":"locked"` and exits 0. A lock older than 10 minutes belongs to a killed run and is taken over. With the lock held, save temps older than that are removed, since a killed run's unique temp is never reused; younger ones are left for a build that may be running beside the refresh. Pinned by `TestSave_ConcurrentSavesAllSucceed`.
+- **A torn `index.json` no longer blinds the hook.** The sidecar was consulted only when it was at least as fresh as the JSON, so a JSON that did not parse failed every load: 454 hook rows over 40 hours in September logged a load error and surfaced nothing. `index.LoadWithFallback` now falls back, in order, to the sidecar regardless of its age and to the newest dated backup that parses, and reports which it used (`bin`, `json`, `bin-stale`, `bak`); `LoadFast`, which the hook calls, wraps it. A refresh that loaded from a fallback rewrites the JSON, logs `"repaired_from"`, and does not rotate the torn file into the backup slot. Pinned by `TestLoadFast_TornJSONRecovers`.
+- **A refresh that changes nothing writes nothing.** It used to rewrite the whole index and replace the one backup with an identical copy on every session start. It now logs `"noop":true` and leaves the files alone.
+- **The harvest takes only skills the Skill tool can invoke by that name:** `<root>/SKILL.md` and `<root>/<name>/SKILL.md`. Deeper files (pack-internal copies, test fixtures) and the user root's account-synced folder (`synced/`, whose skills are listed natively under another namespace) were indexed under ids nothing can invoke, and they took hint slots: on the audited machine the 33 such ids filled 383 slots on 367 of 1,140 hinted rows in 30 days (32%). A top-level entry that is a symlink or junction to a directory is now followed; four such skills were invisible before.
+- **Real run** on a copy of a live 253-entry index: `refreshed: +7 ~0 -33 (now 227 skills)` (the 33 removed ids are the un-invocable ones, 13% and under the 30% guard; the 7 added include the four symlinked skills); a second run printed `refreshed: no changes (227 skills)` and left the index's mtime untouched; a staged 25-minute-old temp and a legacy `index.json.tmp` were removed while a fresh temp was kept. On scratch copies, two overlapping refreshes both exited 0 with one `"skipped":"locked"`, and a truncated `index.json` was repaired from the sidecar and then from the backup.
+- **B12:** +187 non-test LOC (`cmd/mr-index/lock.go`, `index.LoadWithFallback`, the unique-temp writer, the no-op path); `docs/complexity-budget.json` raised to 32433.
+
 ## [0.43.0] — 2026-11-05
 
 ### Changed — the skill hint is narrowed to where it is acted on, and put under a holdout

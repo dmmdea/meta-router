@@ -329,15 +329,33 @@ func main() {
 	cfg, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		exit(2)
 	}
 	outPath := cfg.out
 	if outPath == "" {
 		outPath, err = index.DefaultIndexPath()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exit(1)
 		}
+	}
+	// One writer at a time: build and refresh both rewrite the index (and
+	// roots.json). A second run stands down cleanly instead of racing the first.
+	release, held, lerr := acquireLock(outPath)
+	switch {
+	case lerr != nil:
+		fmt.Fprintf(os.Stderr, "warning: index lock: %v (continuing without it)\n", lerr)
+	case held:
+		now := time.Now()
+		_ = appendRefreshStatus(filepath.Join(filepath.Dir(outPath), "refresh.log"), refreshStatus{
+			Ts: now.Format(time.RFC3339), TsUnix: now.Unix(), OK: true, Skipped: "locked",
+		})
+		fmt.Printf("another mr-index run holds %s.lock; skipping this run\n", outPath)
+		exit(0)
+	default:
+		releaseLock = release
+		defer releaseLock()
+		pruneStaleTemps(outPath)
 	}
 	rs, staleNotes, err := resolveRoots(cfg, outPath)
 	if err != nil {
@@ -353,7 +371,7 @@ func main() {
 			})
 		}
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		exit(1)
 	}
 
 	switch cfg.cmd {
@@ -361,24 +379,24 @@ func main() {
 		spec, err := buildSpec(cfg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
+			exit(2)
 		}
 		skills, err := index.HarvestSkills(rs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "harvest: %v\n", err)
-			os.Exit(1)
+			exit(1)
 		}
 		idx, err := index.Build(skills, cfg.endpoint, 60*time.Second, spec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "build: %v\n", err)
-			os.Exit(1)
+			exit(1)
 		}
 		if _, err := index.RotateBackup(outPath); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: backup: %v\n", err)
 		}
 		if err := idx.Save(outPath); err != nil {
 			fmt.Fprintf(os.Stderr, "save: %v\n", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("built %d skills (dim %d, identity %s) from %d roots → %s\n", len(idx.Entries), idx.Dim, idx.Model, len(rs), outPath)
 	case "refresh":
@@ -404,10 +422,13 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 			fmt.Fprintf(os.Stderr, "warning: refresh.log: %v\n", err)
 		}
 		fmt.Fprintln(os.Stderr, msg)
-		os.Exit(1)
+		exit(1)
 	}
 
-	idx, err := index.Load(outPath)
+	// A torn index.json no longer blinds refresh: load falls back to the
+	// sidecar or the newest parseable backup, and the run then rewrites the
+	// JSON (repair) whatever the plan says.
+	idx, source, err := index.LoadWithFallback(outPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			fail("load: %v", err)
@@ -472,12 +493,34 @@ func runRefresh(cfg config, rs []catalog.Root, outPath string, staleNotes []stri
 		fail("refresh aborted: would remove %d/%d entries (>30%%); rerun with --force if intended", len(plan.RemovedIDs), len(idx.Entries))
 	}
 
+	// Loaded from the sidecar or a backup because index.json did not parse:
+	// always rewrite the JSON, and say so in the log row.
+	repaired := source == "bin-stale" || source == "bak"
+	if repaired {
+		st.RepairedFrom = source
+	}
+	// A refresh that changes nothing writes nothing: no 10 MB rewrite, and no
+	// backup rotation (which would replace the only backup with an identical copy).
+	if !repaired && plan.Noop(idx) {
+		st.OK, st.Noop = true, true
+		st.EntriesAfter = len(idx.Entries)
+		st.DurationMs = time.Since(start).Milliseconds()
+		if err := appendRefreshStatus(logPath, st); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: refresh.log: %v\n", err)
+		}
+		fmt.Printf("refreshed: no changes (%d skills) → %s\n", len(idx.Entries), outPath)
+		return
+	}
 	if err := idx.ApplyRefresh(plan, cfg.endpoint, 60*time.Second); err != nil {
 		fail("refresh: %v", err)
 	}
-	// MR-16: keep exactly one dated .bak of the index being replaced.
-	if _, err := index.RotateBackup(outPath); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: backup: %v\n", err)
+	// MR-16: keep exactly one dated .bak of the index being replaced. A torn
+	// index.json is not worth keeping, and rotating it in would prune the good
+	// backup the repair may have just loaded from.
+	if !repaired {
+		if _, err := index.RotateBackup(outPath); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: backup: %v\n", err)
+		}
 	}
 	if err := idx.Save(outPath); err != nil {
 		fail("save: %v", err)

@@ -33,6 +33,13 @@ type refreshStatus struct {
 	// channel that actually reaches a human, and it is where the 155→112 index
 	// decay was eventually diagnosed from.
 	StaleRoots []string `json:"stale_roots,omitempty"`
+	// Noop: the harvest matched the index exactly, so nothing was written and
+	// no backup rotated. Skipped: why the run did nothing at all ("locked" =
+	// another refresh holds the lock). RepairedFrom: the index.json could not
+	// be parsed and this run rebuilt it from "bin-stale" (the sidecar) or "bak".
+	Noop         bool   `json:"noop,omitempty"`
+	Skipped      string `json:"skipped,omitempty"`
+	RepairedFrom string `json:"repaired_from,omitempty"`
 }
 
 func appendRefreshStatus(path string, st refreshStatus) (err error) {
