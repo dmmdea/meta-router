@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -380,6 +381,8 @@ type routeOut struct {
 	// PaceSlack is the winning lane's binding pace slack (W1, advisory —
 	// consumed by ranking only under pace_rank_on).
 	PaceSlack *float64 `json:"pace_slack,omitempty"`
+	// QuotaSignal is the age of the provider signal the answer rests on.
+	QuotaSignal quotaSignal `json:"quota_signal"`
 }
 
 // writeRouteReceipt appends the consult receipt for a route recommendation —
@@ -406,13 +409,68 @@ func writeRouteReceipt(d router.Decision, class router.Class, desc, origin strin
 	}), "dispatch append (route receipt)")
 }
 
-func routeJSON(d router.Decision) []byte {
+// quotaSignal says how old the provider-sourced quota signal behind a route
+// answer is. "open" computed from a six-week-old observation is not the same
+// statement as "open" computed from a live one; route must say which it is.
+// Computed here, not in the router package (B2: no I/O there).
+type quotaSignal struct {
+	NewestObservedAt *time.Time `json:"newest_observed_at,omitempty"` // newest provider-sourced bucket observation; absent when there is none
+	AgeHours         *float64   `json:"age_hours,omitempty"`
+	Live             bool       `json:"live"` // observed within the configured stale threshold
+}
+
+// buildQuotaSignal reads the ledger snapshot's provider-sourced buckets. The
+// stale threshold is the same quota_stale_hours the status quota_health block
+// uses (default 48h).
+func buildQuotaSignal(snap []ledger.Bucket, cfg orchcfg.Config, now time.Time) quotaSignal {
+	staleAfter := time.Duration(cfg.QuotaStaleHours) * time.Hour
+	if staleAfter <= 0 {
+		staleAfter = 48 * time.Hour
+	}
+	var newest time.Time
+	for _, b := range snap {
+		if b.Source == "provider" && b.ObservedAt.After(newest) {
+			newest = b.ObservedAt
+		}
+	}
+	if newest.IsZero() {
+		return quotaSignal{}
+	}
+	age := now.Sub(newest)
+	if age < 0 {
+		age = 0
+	}
+	hours := math.Round(age.Hours()*10) / 10
+	return quotaSignal{NewestObservedAt: &newest, AgeHours: &hours, Live: age <= staleAfter}
+}
+
+// staleNote is the sentence appended to a route reason when the quota signal
+// is not live.
+func (q quotaSignal) staleNote() string {
+	if q.Live {
+		return ""
+	}
+	if q.AgeHours == nil {
+		return "no live quota signal (no provider observation); run mr-orchestrate poll"
+	}
+	return fmt.Sprintf("no live quota signal (newest observation %dh old); run mr-orchestrate poll", int(*q.AgeHours))
+}
+
+func routeJSON(d router.Decision, sig quotaSignal) []byte {
+	reason := d.Reason
+	if note := sig.staleNote(); note != "" {
+		if reason != "" {
+			reason += "; "
+		}
+		reason += note
+	}
 	o := routeOut{
 		Lane: d.Lane, Model: d.Model, Effort: d.Effort, Strategy: d.Strategy,
-		QuotaState: d.QuotaState, Reason: d.Reason, Class: string(d.Class),
+		QuotaState: d.QuotaState, Reason: reason, Class: string(d.Class),
 		Rule: d.Rule, DispatchVia: dispatchVia(d.Lane),
 		Masked: d.Masked, Alternatives: d.Alternatives,
 		SpendDownBoost: d.SpendDownBoost, PaceSlack: d.PaceSlack,
+		QuotaSignal: sig,
 	}
 	b, _ := json.MarshalIndent(o, "", "  ")
 	return b
@@ -489,7 +547,7 @@ func runRoute(args []string) error {
 		os.Exit(exitDeferred)
 	}
 
-	fmt.Println(string(routeJSON(d)))
+	fmt.Println(string(routeJSON(d, buildQuotaSignal(snap, cfg, now))))
 
 	// Consult receipt: the delegation-coverage numerator (RS9 / S2R-1). Origin
 	// is faithfully plumbed so coverage counts Origin-tagged receipts, NOT

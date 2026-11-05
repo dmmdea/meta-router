@@ -117,7 +117,7 @@ func TestDispatchViaField(t *testing.T) {
 func TestRouteJSONContract(t *testing.T) {
 	t.Setenv("MR_ORCH_STATE", t.TempDir()) // hermeticity: buildRouteDecision loads the real quota trace + rank table
 	d := buildRouteDecision(orchcfg.Defaults(), fuses.Seed(), nil, router.HardRepo, 0, rnow, spendDownReq{})
-	b := routeJSON(d)
+	b := routeJSON(d, quotaSignal{Live: true})
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)

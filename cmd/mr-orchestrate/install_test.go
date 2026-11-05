@@ -180,7 +180,7 @@ func TestInstallOnScratchHome(t *testing.T) {
 		t.Fatalf("the tee must delegate to the statusline it replaced, got %q", delegate.Command)
 	}
 	// The MCP registry was written by the HOST's cli, not by us.
-	if log := h.stubLog(t); !strings.Contains(log, "claude mcp add --scope user meta-router") {
+	if log := h.stubLog(t); !strings.Contains(log, "claude mcp add --scope user mr-orchestrate") {
 		t.Fatalf("host cli was not used to register the server: %q", log)
 	}
 	p, _, err := probeClaudeMCP(filepath.Join(h.home, ".claude.json"))

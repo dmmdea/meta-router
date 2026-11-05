@@ -1,6 +1,9 @@
 package router
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // Classify is the FALLBACK-ONLY heuristic: the §6c brain normally KNOWS the
 // class and passes --class; this keeps `route` usable on a bare --desc.
@@ -71,9 +74,40 @@ func leadingVerb(d string) (string, bool) {
 	return "", false
 }
 
+// containsAny reports whether any keyword occurs in d as WHOLE tokens. d is
+// tokenised on non-alphanumerics (so "yes/no" and "multi-file" are the token
+// sequences [yes no] and [multi file]) and a keyword matches only as a run of
+// complete tokens: "client" no longer hits "cli", "description" and
+// "transcript" no longer hit "script", "aggregate" no longer hits "gate".
 func containsAny(d string, subs ...string) bool {
+	toks := tokenize(d)
 	for _, s := range subs {
-		if strings.Contains(d, s) {
+		if hasTokenRun(toks, tokenize(s)) {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenize(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+func hasTokenRun(toks, run []string) bool {
+	if len(run) == 0 {
+		return false
+	}
+	for i := 0; i+len(run) <= len(toks); i++ {
+		match := true
+		for j, w := range run {
+			if toks[i+j] != w {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}

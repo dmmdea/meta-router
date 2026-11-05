@@ -136,9 +136,24 @@ func Excluded(s Set, lane string, now time.Time) (bool, time.Time) {
 // Reason is the human string surfaced for a lane's breaker state — the one
 // place the fail count, failing class, and self-heal instant are legible.
 func Reason(s Set, lane string) string {
+	return ReasonAt(s, lane, time.Now())
+}
+
+// ReasonAt is Reason at an explicit instant. It says what the breaker is doing
+// NOW: a zero Until is armed but not excluding (below threshold), a past Until
+// is an exclusion that has already ended, and only a future Until is excluding.
+func ReasonAt(s Set, lane string, now time.Time) string {
 	e, ok := s[lane]
 	if !ok {
 		return lane + " is not breaker-tracked"
+	}
+	switch {
+	case e.Until.IsZero():
+		return fmt.Sprintf("armed after %d adapter failure(s) (last: %s); not excluding",
+			e.Fails, e.LastNote)
+	case !now.Before(e.Until):
+		return fmt.Sprintf("exclusion ended at %s (after %d adapter failure(s), last: %s)",
+			e.Until.UTC().Format(time.RFC3339), e.Fails, e.LastNote)
 	}
 	return fmt.Sprintf("excluded after %d adapter failure(s) (last: %s); self-heals at %s",
 		e.Fails, e.LastNote, e.Until.UTC().Format(time.RFC3339))

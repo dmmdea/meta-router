@@ -40,7 +40,10 @@ import (
 var statuslineTeeJS []byte
 
 const (
-	mcpServerName = "meta-router"
+	// mcpServerName is the registered MCP server name. The session guard and
+	// the hook matcher look for tools named mcp__mr-orchestrate__*, so the
+	// server must be registered under exactly this name.
+	mcpServerName = "mr-orchestrate"
 	teeFileName   = "mr-statusline-tee.js"
 )
 
@@ -206,7 +209,7 @@ func planFor(host, home, binDir, stateDir string) (*hostPlan, error) {
 			},
 		)
 		p.clis = append(p.clis, cliStep{
-			desc: "MCP server 'meta-router' registered with Claude Code (user scope)",
+			desc: "MCP server 'mr-orchestrate' registered with Claude Code (user scope)",
 			bin:  "claude",
 			run:  []string{"mcp", "add", "--scope", "user", mcpServerName, "--", orchBin, "mcp"},
 			undo: []string{"mcp", "remove", "--scope", "user", mcpServerName},
@@ -220,7 +223,7 @@ func planFor(host, home, binDir, stateDir string) (*hostPlan, error) {
 		// MCP server. Saying so beats inventing a step to look symmetric.
 		p := &hostPlan{host: host}
 		p.clis = append(p.clis, cliStep{
-			desc: "MCP server 'meta-router' registered with Codex CLI",
+			desc: "MCP server 'mr-orchestrate' registered with Codex CLI",
 			bin:  "codex",
 			run:  []string{"mcp", "add", mcpServerName, "--", orchBin, "mcp"},
 			undo: []string{"mcp", "remove", mcpServerName},
