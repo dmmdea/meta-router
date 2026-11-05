@@ -192,7 +192,7 @@ func runCodexUsageCapture() error {
 	if err != nil {
 		return fmt.Errorf("codex auth missing: run `codex login` (R12): %w", err)
 	}
-	tok := quotapoll.FindStringField(raw, "access_token")
+	tok, _ := quotapoll.CodexAuth(raw)
 	if tok == "" {
 		return fmt.Errorf("no access_token in ~/.codex/auth.json (schema drift?) — value intentionally not logged (R10)")
 	}
