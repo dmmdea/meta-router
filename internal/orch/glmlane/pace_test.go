@@ -154,16 +154,19 @@ func TestPaceLockBusyTimesOut(t *testing.T) {
 
 // A2R-#5(a): a lock whose holder is actively HEARTBEATING is NOT stolen, even
 // after LockStale elapses. Real (short) durations: heartbeat 10ms refreshes the
-// mtime faster than the 40ms stale threshold, so a second dispatcher waiting on
-// it keeps seeing a fresh lock and never steals it — it times out on LockWait
-// instead (the live holder wins). This is the exact S2R-6 ban guard: two
-// simultaneous GLM requests (the ban PATTERN) must never happen.
+// mtime far faster than the 250ms stale threshold, so a second dispatcher
+// waiting on it keeps seeing a fresh lock and never steals it — it times out on
+// LockWait (600ms, past the stale threshold) instead (the live holder wins).
+// This is the exact S2R-6 ban guard: two simultaneous GLM requests (the ban
+// PATTERN) must never happen. The threshold was 40ms; under a loaded full-suite
+// run the heartbeat goroutine could be starved that long and the test failed
+// for a reason that is not the lock (twice on 2026-11-05).
 func TestPaceLiveLockNotStolenPastLockStale(t *testing.T) {
 	dir := t.TempDir()
 	// Holder acquires and keeps heartbeating (default real time.Now/time.Sleep).
 	holderPc := DefaultPace(0, 0)
 	holderPc.Heartbeat = 10 * time.Millisecond
-	holderPc.LockStale = 40 * time.Millisecond
+	holderPc.LockStale = 250 * time.Millisecond
 	unlock, _, err := Pace(dir, holderPc, time.Now, time.Sleep)
 	if err != nil {
 		t.Fatalf("holder must acquire: %v", err)
@@ -175,8 +178,8 @@ func TestPaceLiveLockNotStolenPastLockStale(t *testing.T) {
 	// a stale lock → it relegates (busy) rather than stealing a LIVE lock.
 	waiterPc := DefaultPace(0, 0)
 	waiterPc.Heartbeat = 10 * time.Millisecond
-	waiterPc.LockStale = 40 * time.Millisecond
-	waiterPc.LockWait = 120 * time.Millisecond
+	waiterPc.LockStale = 250 * time.Millisecond
+	waiterPc.LockWait = 600 * time.Millisecond
 	waiterPc.Poll = 5 * time.Millisecond
 	u2, _, werr := Pace(dir, waiterPc, time.Now, time.Sleep)
 	if werr == nil {
