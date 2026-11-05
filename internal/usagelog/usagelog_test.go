@@ -95,6 +95,8 @@ func TestRecordFieldsAreAllowlisted(t *testing.T) {
 		"hidden":     true,
 		"top_cosine": true, "latency_ms": true, "mode": true, "err": true,
 		"nudge_offload": true, "quota_hint": true, "cands": true,
+		// arm, would_surface: the holdout arm label and skill IDs from the index -- never prompt text.
+		"arm": true, "would_surface": true,
 	}
 	rt := reflect.TypeOf(Record{})
 	for i := 0; i < rt.NumField(); i++ {

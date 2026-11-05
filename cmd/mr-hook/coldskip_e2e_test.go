@@ -5,10 +5,10 @@ package main
 // by TestHookBudgets), and the embedder
 // behind the model router is unloaded after five idle minutes and needs seconds to load, so
 // the first prompt after every idle spell used to wait out the whole embed budget, get
-// cancelled, and fall back to BM25. The hook now asks the router whether the embed model is
+// cancelled, and surface nothing. The hook now asks the router whether the embed model is
 // loaded BEFORE spending that budget:
 //
-//   - not loaded (or the router cannot be read) -> BM25 at once, plus ONE warm-up request held
+//   - not loaded (or the router cannot be read) -> nothing at once, plus ONE warm-up request held
 //     open only until the router admits it to a load (a few milliseconds), then abandoned;
 //   - loaded -> embed exactly as before.
 //
@@ -35,10 +35,9 @@ import (
 )
 
 const (
-	// coldPrompt is lexical enough that the BM25 fallback gate passes on the fixture index:
-	// every token is rare in it and sits in gstack-qa's description.
+	// coldPrompt matches the fixture skill gstack-qa.
 	coldPrompt = "qa test web application"
-	// coldPromptNoLexicalMatch shares no token with any fixture skill, so BM25 surfaces nothing.
+	// coldPromptNoLexicalMatch shares no token with any fixture skill.
 	coldPromptNoLexicalMatch = "zebra quartz nimbus fjord velvet orchid"
 
 	runningWarm = `{"running":[{"model":"embeddinggemma","state":"ready"}]}`
@@ -275,11 +274,11 @@ func TestColdEmbedderSkipsTheWaitE2E(t *testing.T) {
 	if r.wall >= fakeEmbedTime*4/5 {
 		t.Fatalf("process took %v to exit: the warm-up held the hook open", r.wall)
 	}
-	if r.rec.Mode != "cold-skip-bm25" {
-		t.Fatalf("mode %q, want cold-skip-bm25 (BM25 surfaced the skill); err=%q", r.rec.Mode, r.rec.Err)
+	if r.rec.Mode != "cold-skip-empty" {
+		t.Fatalf("mode %q, want cold-skip-empty; err=%q", r.rec.Mode, r.rec.Err)
 	}
-	if !strings.Contains(r.out, "gstack-qa") || len(r.rec.Surfaced) != 1 {
-		t.Fatalf("the BM25 fallback must surface the lexical match at once: out=%q surfaced=%v", r.out, r.rec.Surfaced)
+	if r.out != "" || len(r.rec.Surfaced) != 0 {
+		t.Fatalf("a cold embedder surfaces nothing (no lexical fallback): out=%q surfaced=%v", r.out, r.rec.Surfaced)
 	}
 	if !strings.Contains(r.rec.Err, "cold") || !strings.Contains(r.rec.Err, "load confirmed (starting)") {
 		t.Fatalf("the row must say why it skipped the embedder and that the load was confirmed: %q", r.rec.Err)
@@ -294,7 +293,7 @@ func TestUnconfirmedWarmUpIsBoundedE2E(t *testing.T) {
 	bin := buildColdHook(t)
 	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime}) // no listsLoad
 	r := runColdHook(t, bin, fr, coldPrompt)
-	if r.rec.Mode != "cold-skip-bm25" || !strings.Contains(r.rec.Err, "load not confirmed") {
+	if r.rec.Mode != "cold-skip-empty" || !strings.Contains(r.rec.Err, "load not confirmed") {
 		t.Fatalf("mode=%q err=%q, want a cold skip that says the load was not confirmed", r.rec.Mode, r.rec.Err)
 	}
 	// Lower bound: it did wait for a confirmation that never came. Upper bound: it stopped at
@@ -305,9 +304,9 @@ func TestUnconfirmedWarmUpIsBoundedE2E(t *testing.T) {
 	exactlyOneWarmUp(t, fr, coldPrompt)
 }
 
-// A cold skip whose BM25 consultation declines must not read as "embedder-down": the
+// A cold skip whose cold skip must not read as "embedder-down": the
 // embedder is fine, it is just unloaded.
-func TestColdEmbedderBM25DeclinesIsNotEmbedderDownE2E(t *testing.T) {
+func TestColdEmbedderIsNotEmbedderDownE2E(t *testing.T) {
 	bin := buildColdHook(t)
 	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedIn: fakeEmbedTime, listsLoad: true})
 	r := runColdHook(t, bin, fr, coldPromptNoLexicalMatch)
@@ -315,7 +314,7 @@ func TestColdEmbedderBM25DeclinesIsNotEmbedderDownE2E(t *testing.T) {
 		t.Fatalf("mode %q, want cold-skip-empty", r.rec.Mode)
 	}
 	if r.out != "" || len(r.rec.Surfaced) != 0 {
-		t.Fatalf("nothing may surface when BM25 declines: out=%q surfaced=%v", r.out, r.rec.Surfaced)
+		t.Fatalf("nothing may surface on a cold skip: out=%q surfaced=%v", r.out, r.rec.Surfaced)
 	}
 	exactlyOneWarmUp(t, fr, coldPromptNoLexicalMatch)
 }
@@ -364,8 +363,8 @@ func TestUnreadableRunningBehavesLikeColdE2E(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			fr := newFakeRouter(t, routerOpts{running: c.running, embedIn: fakeEmbedTime})
 			r := runColdHook(t, bin, fr, coldPrompt)
-			if r.rec.Mode != "cold-skip-bm25" {
-				t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
+			if r.rec.Mode != "cold-skip-empty" {
+				t.Fatalf("mode %q, want cold-skip-empty; err=%q", r.rec.Mode, r.rec.Err)
 			}
 			if r.wall >= fakeEmbedTime*4/5 {
 				t.Fatalf("process took %v: an unreadable /running must not stall the hook", r.wall)
@@ -429,8 +428,8 @@ func TestAliasedEmbedModelNotLoadedIsColdE2E(t *testing.T) {
 	models := `{"data":[{"id":"egemma-300m","meta":{"llamaswap":{"aliases":["embeddinggemma"]}}}]}`
 	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), models: models, embedIn: fakeEmbedTime, listsLoad: true})
 	r := runColdHook(t, bin, fr, coldPrompt)
-	if r.rec.Mode != "cold-skip-bm25" {
-		t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
+	if r.rec.Mode != "cold-skip-empty" {
+		t.Fatalf("mode %q, want cold-skip-empty; err=%q", r.rec.Mode, r.rec.Err)
 	}
 	exactlyOneWarmUp(t, fr, coldPrompt)
 }
@@ -455,8 +454,8 @@ func TestEmbedderAlreadyLoadingSkipsWithoutAWarmUpE2E(t *testing.T) {
 	bin := buildColdHook(t)
 	fr := newFakeRouter(t, routerOpts{running: jsonRunning(`{"running":[{"model":"embeddinggemma","state":"starting"}]}`), embedIn: fakeEmbedTime})
 	r := runColdHook(t, bin, fr, coldPrompt)
-	if r.rec.Mode != "cold-skip-bm25" {
-		t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
+	if r.rec.Mode != "cold-skip-empty" {
+		t.Fatalf("mode %q, want cold-skip-empty; err=%q", r.rec.Mode, r.rec.Err)
 	}
 	time.Sleep(300 * time.Millisecond)
 	if n := fr.embedHits.Load(); n != 0 {
@@ -523,8 +522,8 @@ func TestWarmUpRefusedByTheRouterIsRecordedE2E(t *testing.T) {
 	bin := buildColdHook(t)
 	fr := newFakeRouter(t, routerOpts{running: jsonRunning(runningCold), embedStatus: 503})
 	r := runColdHook(t, bin, fr, coldPrompt)
-	if r.rec.Mode != "cold-skip-bm25" {
-		t.Fatalf("mode %q, want cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
+	if r.rec.Mode != "cold-skip-empty" {
+		t.Fatalf("mode %q, want cold-skip-empty; err=%q", r.rec.Mode, r.rec.Err)
 	}
 	if !strings.Contains(r.rec.Err, "warm-up failed") || !strings.Contains(r.rec.Err, "status 503") || strings.Contains(r.rec.Err, "confirmed (") {
 		t.Fatalf("the row must say the router refused the warm-up with 503: %q", r.rec.Err)
@@ -558,15 +557,15 @@ func TestRepeatedColdSkipsAreLoggedAsStuckE2E(t *testing.T) {
 	bin := buildColdHook(t)
 	fr := coldFakeRouter(t)
 	r := runColdHookSeeded(t, bin, fr, coldPrompt, seedRows(
-		coldRow(400, "cold-skip-empty"), coldRow(300, "cold-skip-bm25"), coldRow(200, "cold-skip-empty")))
-	if r.rec.Mode != "cold-stuck-bm25" {
-		t.Fatalf("mode %q, want cold-stuck-bm25; err=%q", r.rec.Mode, r.rec.Err)
+		coldRow(400, "cold-skip-empty"), coldRow(300, "cold-skip-empty"), coldRow(200, "cold-skip-empty")))
+	if r.rec.Mode != "cold-stuck-empty" {
+		t.Fatalf("mode %q, want cold-stuck-empty; err=%q", r.rec.Mode, r.rec.Err)
 	}
 	if !strings.Contains(r.rec.Err, "stuck") || !strings.Contains(r.rec.Err, "4 consecutive") {
 		t.Fatalf("the row must say how long the embedder has been cold: %q", r.rec.Err)
 	}
-	if !strings.Contains(r.out, "gstack-qa") {
-		t.Fatalf("a stuck embedder still gets the BM25 fallback: out=%q", r.out)
+	if r.out != "" {
+		t.Fatalf("a stuck embedder surfaces nothing: out=%q", r.out)
 	}
 	exactlyOneWarmUp(t, fr, coldPrompt)
 }
@@ -575,7 +574,7 @@ func TestStuckWithNothingSurfacedIsLoggedAsStuckEmptyE2E(t *testing.T) {
 	bin := buildColdHook(t)
 	fr := coldFakeRouter(t)
 	r := runColdHookSeeded(t, bin, fr, coldPromptNoLexicalMatch, seedRows(
-		coldRow(400, "cold-skip-empty"), coldRow(300, "cold-stuck-empty"), coldRow(200, "cold-stuck-bm25")))
+		coldRow(400, "cold-skip-empty"), coldRow(300, "cold-stuck-empty"), coldRow(200, "cold-stuck-empty")))
 	if r.rec.Mode != "cold-stuck-empty" {
 		t.Fatalf("mode %q, want cold-stuck-empty (earlier cold-stuck rows keep the run going)", r.rec.Mode)
 	}
@@ -593,8 +592,8 @@ func TestColdSkipsThatAreNotARunLongEnoughStayOrdinaryE2E(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fr := coldFakeRouter(t)
 			r := runColdHookSeeded(t, bin, fr, coldPrompt, seed)
-			if r.rec.Mode != "cold-skip-bm25" {
-				t.Fatalf("mode %q, want an ordinary cold-skip-bm25; err=%q", r.rec.Mode, r.rec.Err)
+			if r.rec.Mode != "cold-skip-empty" {
+				t.Fatalf("mode %q, want an ordinary cold-skip-empty; err=%q", r.rec.Mode, r.rec.Err)
 			}
 		})
 	}
@@ -607,8 +606,8 @@ func TestRowsThatNeverTouchedTheEmbedderDoNotBreakARunE2E(t *testing.T) {
 	fr := coldFakeRouter(t)
 	r := runColdHookSeeded(t, bin, fr, coldPrompt, seedRows(
 		coldRow(500, "cold-skip-empty"), coldRow(450, "machine-turn"), coldRow(400, "cold-skip-empty"),
-		coldRow(300, "too-short"), coldRow(200, "cold-skip-bm25")))
-	if r.rec.Mode != "cold-stuck-bm25" {
-		t.Fatalf("mode %q, want cold-stuck-bm25; err=%q", r.rec.Mode, r.rec.Err)
+		coldRow(300, "too-short"), coldRow(200, "cold-skip-empty")))
+	if r.rec.Mode != "cold-stuck-empty" {
+		t.Fatalf("mode %q, want cold-stuck-empty; err=%q", r.rec.Mode, r.rec.Err)
 	}
 }

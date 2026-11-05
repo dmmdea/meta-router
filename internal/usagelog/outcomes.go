@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,13 @@ import (
 type Outcome struct {
 	TsUnix int64  `json:"ts_unix"`
 	Skill  string `json:"skill"`
+	// SessionID, PromptID and ToolUseID are the opaque ids Claude Code puts on the
+	// PostToolUse payload. With them an outcome is attributed to the prompt that
+	// preceded it exactly (JoinExact) instead of by a session-blind time window.
+	// All three are omitempty: rows written before they existed leave them absent.
+	SessionID string `json:"session_id,omitempty"`
+	PromptID  string `json:"prompt_id,omitempty"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
 }
 
 // ReadRecords loads a usage.jsonl. Malformed lines are skipped, not fatal:
@@ -115,4 +123,123 @@ func JoinOutcomes(recs []Record, outs []Outcome, window time.Duration) JoinRepor
 		}
 	}
 	return rep
+}
+
+// ArmStat is one holdout arm's follow-through: Prompts that had a skill list (shown, or for the
+// holdout arm computed and withheld) and how many of those were Followed by a call of one of
+// those skills.
+type ArmStat struct{ Prompts, Followed int }
+
+// Rate is Followed / Prompts (0 when there were no prompts).
+func (a ArmStat) Rate() float64 {
+	if a.Prompts == 0 {
+		return 0
+	}
+	return float64(a.Followed) / float64(a.Prompts)
+}
+
+// ExactReport is the session-exact join. Treat and Holdout are the two arms of the holdout;
+// NoArm holds the rows written while the holdout was off or before it existed. Those are
+// reported on their own and never folded into Treat: they were produced under other settings,
+// and most predate the ids an outcome needs to be joined, so mixing them in would lower the
+// treat rate for a reason that has nothing to do with the hint. Calls counts outcomes that
+// carry a session id and CallsHinted those attributed to a prompt whose shown list held the
+// called skill, so Calls-CallsHinted is the share of skill calls nobody hinted.
+// OutcomesNoSession counts outcome rows skipped for lacking a session id.
+type ExactReport struct {
+	Treat, Holdout, NoArm                 ArmStat
+	Calls, CallsHinted, OutcomesNoSession int
+	PerSkill                              map[string]*SkillStat // rows that showed a list (treat and no-arm)
+}
+
+// JoinExact attributes each outcome that has a session id to one usage row of the same session:
+// the row with the same prompt_id when the outcome has one that matches, else the latest row of
+// that session at or before the outcome's time whose mode is not machine-turn (a notification is
+// not a request and never produced a hint). A prompt counts when it had a skill list: Surfaced
+// (treat rows and rows without an arm) or WouldSurface (holdout). It is followed when an
+// attributed outcome names one of those skills (case-insensitive).
+func JoinExact(recs []Record, outs []Outcome) ExactReport {
+	rep := ExactReport{PerSkill: map[string]*SkillStat{}}
+	bySession := map[string][]int{}
+	for i, r := range recs {
+		if r.SessionID != "" {
+			bySession[r.SessionID] = append(bySession[r.SessionID], i)
+		}
+	}
+	for _, idxs := range bySession {
+		sort.SliceStable(idxs, func(a, b int) bool { return recs[idxs[a]].TsUnix < recs[idxs[b]].TsUnix })
+	}
+	invoked := make([]map[string]bool, len(recs)) // row -> lower-cased skills called after it
+	for _, o := range outs {
+		if o.SessionID == "" {
+			rep.OutcomesNoSession++
+			continue
+		}
+		rep.Calls++
+		idxs, row := bySession[o.SessionID], -1
+		if o.PromptID != "" {
+			for j := len(idxs) - 1; j >= 0 && row < 0; j-- {
+				if recs[idxs[j]].PromptID == o.PromptID {
+					row = idxs[j]
+				}
+			}
+		}
+		for j := len(idxs) - 1; j >= 0 && row < 0; j-- {
+			if r := recs[idxs[j]]; r.TsUnix <= o.TsUnix && r.Mode != "machine-turn" {
+				row = idxs[j]
+			}
+		}
+		if row < 0 {
+			continue
+		}
+		if containsFold(recs[row].Surfaced, o.Skill) {
+			rep.CallsHinted++
+		}
+		if invoked[row] == nil {
+			invoked[row] = map[string]bool{}
+		}
+		invoked[row][strings.ToLower(o.Skill)] = true
+	}
+	for i, r := range recs {
+		ids, arm, shown := r.Surfaced, &rep.NoArm, true
+		switch r.Arm {
+		case "treat":
+			arm = &rep.Treat
+		case "holdout":
+			ids, arm, shown = r.WouldSurface, &rep.Holdout, false
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		arm.Prompts++
+		followed := false
+		for _, id := range ids {
+			hit := invoked[i][strings.ToLower(id)]
+			followed = followed || hit
+			if shown {
+				st := rep.PerSkill[id]
+				if st == nil {
+					st = &SkillStat{}
+					rep.PerSkill[id] = st
+				}
+				st.Surfaced++
+				if hit {
+					st.Invoked++
+				}
+			}
+		}
+		if followed {
+			arm.Followed++
+		}
+	}
+	return rep
+}
+
+func containsFold(ids []string, s string) bool {
+	for _, id := range ids {
+		if strings.EqualFold(id, s) {
+			return true
+		}
+	}
+	return false
 }
