@@ -18,6 +18,7 @@ import (
 	"github.com/dmmdea/meta-router/internal/catalog"
 	"github.com/dmmdea/meta-router/internal/embedtpl"
 	"github.com/dmmdea/meta-router/internal/index"
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 	"github.com/dmmdea/meta-router/internal/retrievers"
 	"github.com/dmmdea/meta-router/internal/usagelog"
 )
@@ -425,6 +426,9 @@ func main() {
 	// Only the retrieval is skipped: the index load, the identity check and the quota banner
 	// below behave exactly as on any other prompt.
 	machine := isMachineTurn(in.Prompt)
+	// A lane child is not a person's prompt either. Same treatment, its own mode, and no arm:
+	// a replay must not keep the embedder loaded or add rows to the holdout.
+	laneChild := os.Getenv(childenv.DispatchEnv) != ""
 
 	ip := *indexPath
 	if ip == "" {
@@ -600,6 +604,8 @@ func main() {
 		mode := "tpl-mismatch"
 		if tplErr == nil && machine {
 			mode = "machine-turn" // nothing is ranked, so the notification never reaches the embedder
+		} else if tplErr == nil && laneChild {
+			mode = "lane-child"
 		} else if tplErr == nil {
 			// Eligibility is decided BEFORE the cut, so a candidate the model cannot invoke
 			// takes no slot and carries no gate. The settings are read once here; the
@@ -649,7 +655,7 @@ func main() {
 		// stay in context for the rest of a session, so the arm is chosen per session, not
 		// per prompt. The offload nudge and the quota hint below are not part of the arm.
 		shown := r.ids
-		if *holdoutPct > 0 {
+		if *holdoutPct > 0 && !laneChild {
 			rec.Arm = "treat"
 			if holdoutArm(in.SessionID, *holdoutPct) {
 				rec.Arm, rec.WouldSurface, shown = "holdout", r.ids, nil

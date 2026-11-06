@@ -4,6 +4,24 @@ All notable changes to `meta-router` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.43.2] — 2026-11-06
+
+### Fixed — the Claude lane reads its quota where the login really lives
+Claude Code reads its login from the directory `CLAUDE_SECURESTORAGE_CONFIG_DIR` names when that is set, which is how an account switcher works, and `~/.claude/.credentials.json` then holds an empty token. The poller and the provisioned check looked only at `~/.claude`, so on a logged-in machine the lane read `not_logged_in`, `status` showed no Claude figures, and the budget guard and admission had nothing to compare.
+
+- `statepaths.ClaudeHome()` follows the variable first and falls back to `~/.claude`. The poller and the default subject's credential and provisioned checks all use it. An explicit profile home still wins.
+- A process that does not carry the variable (a scheduled task, a hand-started shell) reads `~/.claude` as before, so set the variable there if the login is elsewhere.
+- A dispatch for a non-default profile now pins the variable as well as `CLAUDE_CONFIG_DIR`. Before, an inherited value would have run the child on the default login while the ledger charged the other profile.
+
+### Fixed — a replay's budget cap reads current figures
+Nothing updated the ledger during a sweep, because a dispatch does not poll, so the 168-cell replay of 2026-09-12 ended with its cap inert and every receipt reading "no signal". `mr-goldreplay` now runs `mr-orchestrate poll` every `-quota-refresh-min` minutes (default 10, 0 turns it off) while cells of a budgeted lane run. A failed poll logs one warning and the sweep goes on with the last figures.
+
+### Fixed — lane children stay out of the hint experiment
+Each `claude -p` the orchestrator or a replay starts runs the operator's hooks, so a replay added hundreds of fresh sessions to the hint holdout (232 rows from 180 sessions in that same replay). Claude Code's own entrypoint variable is inherited from the parent and cannot tell them apart.
+
+- The Claude lane now sets `MR_ORCH_DISPATCH=1` on its children.
+- `mr-hook` runs no retrieval for them and gives them no arm. The row logs `mode:"lane-child"`, and it does not count as a reason to warm the embedder.
+
 ## [0.43.1] — 2026-11-05
 
 ### Fixed — the index survives concurrent refreshes and a torn file, and holds only skills that can be invoked as named

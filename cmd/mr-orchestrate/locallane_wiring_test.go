@@ -13,6 +13,9 @@ import (
 // for faking an external binary — cf. codexlane's binaryName injection). A
 // normal `go test` run leaves the env unset and runs the suite unchanged.
 func TestMain(m *testing.M) {
+	// Tests fake the home directory to stay away from the operator's login. This
+	// variable would lead the default Claude subject straight back to it.
+	os.Unsetenv("CLAUDE_SECURESTORAGE_CONFIG_DIR")
 	switch os.Getenv("MR_TEST_LOCAL_STUB") {
 	case "defer":
 		// Stand in for `offload-harness <verb> - --json` → structured DEFER.

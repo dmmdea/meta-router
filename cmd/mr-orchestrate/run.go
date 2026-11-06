@@ -491,7 +491,9 @@ func doRun(opts runOpts, out io.Writer) (exitCode int, err error) {
 	g := gateSubject(l.Snapshot(), "claude", sel.Subject, resolvedModel, fzs, now, cfg, opts.Force, defaultThresholds)
 	req := claudelane.RunReq{Prompt: opts.Prompt, Model: resolvedModel, Effort: resolvedEffort, CWD: opts.CWD, TimeoutSec: opts.TimeoutSec}
 	if sel.Home != "" { // non-default subject: relocate the credential read (probe-verified 2026-07-23)
-		req.Env = append(req.Env, "CLAUDE_CONFIG_DIR="+sel.Home)
+		// Both variables: an inherited secure-storage dir decides where the CLI reads its login, so
+		// pinning only the config dir would run the child on the default login and charge this subject.
+		req.Env = append(req.Env, "CLAUDE_CONFIG_DIR="+sel.Home, "CLAUDE_SECURESTORAGE_CONFIG_DIR="+sel.Home)
 	}
 	if opts.Extra != "" {
 		req.Extra = extraArgs

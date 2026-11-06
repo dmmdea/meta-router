@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
 // Profile is one credential subject for a lane.
@@ -138,7 +140,7 @@ func provisioned(lane, home, credName string) bool {
 		}
 		switch lane {
 		case "claude":
-			dir = filepath.Join(ud, ".claude")
+			dir = statepaths.ClaudeHome()
 		case "codex":
 			dir = filepath.Join(ud, ".codex")
 		}
@@ -161,7 +163,7 @@ func (p Profile) CredPath(lane string) string {
 		}
 		switch lane {
 		case "claude":
-			dir = filepath.Join(ud, ".claude")
+			dir = statepaths.ClaudeHome()
 		case "codex":
 			dir = filepath.Join(ud, ".codex")
 		}

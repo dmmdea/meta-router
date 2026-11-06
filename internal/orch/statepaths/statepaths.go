@@ -20,6 +20,23 @@ func StateDir() string {
 	return filepath.Join(home, ".meta-router", "orchestrate")
 }
 
+// ClaudeHome is the directory holding Claude Code's login for the default
+// subject. Claude Code reads the login from CLAUDE_SECURESTORAGE_CONFIG_DIR when
+// that is set (an account switcher points it at the active account's store), and
+// ~/.claude then holds an entry with an empty token, so a reader that only knew
+// ~/.claude saw "not logged in" on a machine that was logged in. Same order as
+// the CLI's, so the poller reads the account a dispatch bills.
+func ClaudeHome() string {
+	if d := os.Getenv("CLAUDE_SECURESTORAGE_CONFIG_DIR"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
 func Ledger() string      { return filepath.Join(StateDir(), "ledger.json") }
 func QuotaTrace() string  { return filepath.Join(StateDir(), "quota-trace.jsonl") }
 func Fuses() string       { return filepath.Join(StateDir(), "fuses.json") }

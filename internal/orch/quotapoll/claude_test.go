@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/meta-router/internal/orch/profiles"
 )
 
 func claudeServer(t *testing.T, fixture string, status int) *httptest.Server {
@@ -115,5 +117,23 @@ func TestPollClaudeSendsNothingWhenSubscriptionTokenIsEmpty(t *testing.T) {
 	}
 	if len(r.Snapshots) != 0 || len(r.Absences) != 1 || r.Absences[0].Reason != "not_logged_in" {
 		t.Fatalf("want one typed not_logged_in absence, got %+v", r)
+	}
+}
+
+// The lane read "not logged in" for weeks on a machine that was logged in: Claude Code
+// kept the login in the directory CLAUDE_SECURESTORAGE_CONFIG_DIR names, and the poller
+// and the provisioned check looked only at ~/.claude, whose entry was empty.
+func TestClaudeCredentialFollowsTheStoreClaudeCodeReads(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", store)
+	want := filepath.Join(store, ".credentials.json")
+	if got := ClaudeCredPath(); got != want {
+		t.Fatalf("poller reads %q, want %q", got, want)
+	}
+	if got := (profiles.Profile{}).CredPath("claude"); got != want {
+		t.Fatalf("default profile reads %q, want %q", got, want)
+	}
+	if got := (profiles.Profile{Home: "elsewhere"}).CredPath("claude"); got != filepath.Join("elsewhere", ".credentials.json") {
+		t.Fatalf("an explicit profile home must win, got %q", got)
 	}
 }

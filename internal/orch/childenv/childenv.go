@@ -28,6 +28,14 @@ import (
 	"sync"
 )
 
+// DispatchEnv marks a process as a lane child: a session the orchestrator or a
+// replay started, not a person's. It reaches the operator's hooks through the
+// child's environment. mr-hook keeps such a session out of its retrieval and out
+// of the hint holdout, whose unit is a prompt a person typed. A replay is
+// hundreds of fresh sessions: unmarked, each one drew an arm and added a row to
+// the experiment (232 hook rows from 180 sessions in the replay of 2026-09-12).
+const DispatchEnv = "MR_ORCH_DISPATCH"
+
 // denied are exact environment names removed before any lane binary is spawned.
 var denied = map[string]bool{
 	// Redirect a "subscription" dispatch to metered API billing (R10).
