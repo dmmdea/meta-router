@@ -11,6 +11,7 @@ Claude Code reads its login from the directory `CLAUDE_SECURESTORAGE_CONFIG_DIR`
 
 - `statepaths.ClaudeHome()` follows the variable first and falls back to `~/.claude`. The poller and the default subject's credential and provisioned checks all use it. An explicit profile home still wins.
 - A process that does not carry the variable (a scheduled task, a hand-started shell) reads `~/.claude` as before, so set the variable there if the login is elsewhere.
+- A dispatch for a non-default profile now pins the variable as well as `CLAUDE_CONFIG_DIR`. Before, an inherited value would have run the child on the default login while the ledger charged the other profile.
 
 ### Fixed — a replay's budget cap reads current figures
 Nothing updated the ledger during a sweep, because a dispatch does not poll, so the 168-cell replay of 2026-09-12 ended with its cap inert and every receipt reading "no signal". `mr-goldreplay` now runs `mr-orchestrate poll` every `-quota-refresh-min` minutes (default 10, 0 turns it off) while cells of a budgeted lane run. A failed poll logs one warning and the sweep goes on with the last figures.
