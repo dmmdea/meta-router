@@ -131,7 +131,7 @@ func coldRun(path string) (n int, oldestTs int64) {
 		switch {
 		case strings.HasPrefix(r.Mode, "cold-"):
 			n, oldestTs = n+1, r.Ts
-		case r.Mode == "" || r.Mode == "too-short" || r.Mode == "machine-turn" || r.Mode == "tpl-mismatch" || r.Mode == "error":
+		case r.Mode == "" || r.Mode == "too-short" || r.Mode == "machine-turn" || r.Mode == "lane-child" || r.Mode == "tpl-mismatch" || r.Mode == "error":
 			continue
 		default:
 			return n, oldestTs

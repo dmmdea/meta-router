@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/meta-router/internal/orch/ledger"
+	"github.com/dmmdea/meta-router/internal/orch/statepaths"
 )
 
 const claudeUsagePath = "/api/oauth/usage"
@@ -15,11 +16,11 @@ const claudeUsagePath = "/api/oauth/usage"
 // ClaudeCredPath is Claude Code's own credential store (subscription OAuth —
 // R10: never an API key).
 func ClaudeCredPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := statepaths.ClaudeHome()
+	if home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".claude", ".credentials.json")
+	return filepath.Join(home, ".credentials.json")
 }
 
 // claudeToken returns the subscription OAuth token Claude Code keeps under

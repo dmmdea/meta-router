@@ -675,6 +675,7 @@ func main() {
 	maxNotional := flag.Float64("max-notional", 10, "claude-lane notional guard ceiling (real coding tasks exceed the $2 default)")
 	claudeExtra := flag.String("claude-extra", "--dangerously-skip-permissions",
 		"extra claude-lane flags via run -extra (headless replay agents work tool-enabled in disposable worktrees; empty to disable)")
+	quotaRefreshMin := flag.Int("quota-refresh-min", 10, "minutes between quota refreshes (`mr-orchestrate poll`) while cells of a budgeted lane run, so the probe budget and admission read current figures; 0 disables")
 	planOnly := flag.Bool("plan-only", false, "print the cells this run WOULD dispatch and exit 0 — the zero-spend way to check a resume before an unattended run")
 	reMeasure := flag.Bool("re-measure", false, "override the drift guard: dispatch planned cells even when their identity is already recorded under a different effort or model (deliberate re-measurement / new-model measurement)")
 	copilotBudgetPct := flag.Float64("copilot-budget-pct", 33, "probe spend cap for the copilot lane: a copilot cell is recorded as a deferred HOLE (resumable) once the ledger's month window is at or above this percentage; negative disables. Default a third of the month — a 168-cell probe under `auto` consumed the whole month on 2026-09-05")
@@ -850,8 +851,12 @@ func main() {
 	}
 	defer out.Close()
 
+	refresher := quotaRefresher{bin: *orchBin, every: time.Duration(*quotaRefreshMin) * time.Minute}
 	for _, c := range plan.Run {
 		var row Row
+		if _, budgeted := probeBudgets(*copilotBudgetPct, *codexBudgetPct, *claudeBudgetPct)[c.Config.Lane]; budgeted {
+			refresher.maybe(time.Now())
+		}
 		if hold, why := probeBudgetHold(c.Config.Lane, probeBudgets(*copilotBudgetPct, *codexBudgetPct, *claudeBudgetPct), time.Now().UTC()); hold {
 			row = Row{TS: time.Now().UTC().Format(time.RFC3339), Task: c.Task, Class: c.GoldTask.Class,
 				Lane: c.Config.Lane, Model: c.Config.Model, Effort: c.Config.Effort, Trial: c.Trial,
@@ -870,6 +875,33 @@ func main() {
 	}
 	fmt.Printf("\nreplay complete: %d cells (%d run now, %d already recorded) → %s\n",
 		plan.Total, len(plan.Run), plan.Skipped, *outPath)
+}
+
+// quotaRefresher re-reads the vendors' usage figures through `mr-orchestrate poll`
+// during a replay. Nothing else updates the ledger while a sweep runs (a dispatch
+// does not poll), so without it the probe budget and the run's admission compare
+// against whatever the last status call left: the 168-cell replay of 2026-09-12
+// finished with every receipt reading "no signal" and its budget cap inert.
+// Best effort: a failed poll is logged and the sweep goes on with the last figures.
+type quotaRefresher struct {
+	bin   string
+	every time.Duration
+	last  time.Time
+}
+
+func (q *quotaRefresher) maybe(now time.Time) {
+	if q.every <= 0 || now.Sub(q.last) < q.every {
+		return
+	}
+	q.last = now
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, q.bin, "poll")
+	cmd.Env = childenv.Scrub(os.Environ())
+	cmd.WaitDelay = 5 * time.Second
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: quota refresh failed: %v: %.200s\n", err, out)
+	}
 }
 
 // probeBudget is one lane's probe spend cap: the ledger window that carries

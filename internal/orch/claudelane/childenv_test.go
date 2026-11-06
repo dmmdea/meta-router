@@ -3,6 +3,8 @@ package claudelane
 import (
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/meta-router/internal/orch/childenv"
 )
 
 // Exercises the SAME helper Run composes its environment with (childEnv), rather
@@ -44,7 +46,7 @@ func TestChildEnvScrubsEvenWithNoPins(t *testing.T) {
 	if strings.Contains(strings.Join(got, "\n"), "ANTHROPIC_API_KEY") {
 		t.Fatalf("the no-pins path must still be scrubbed, got %v", got)
 	}
-	if len(got) != 1 || got[0] != "PATH=x" {
-		t.Fatalf("everything else must survive, got %v", got)
+	if len(got) != 2 || got[0] != "PATH=x" || got[1] != childenv.DispatchEnv+"=1" {
+		t.Fatalf("everything else must survive and the lane-child marker must be added, got %v", got)
 	}
 }

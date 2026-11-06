@@ -61,7 +61,8 @@ func Run(ctx context.Context, req RunReq) (Outcome, []byte, error) {
 
 // childEnv composes the environment a spawned lane binary receives: the
 // ambient environment SCRUBBED of credential/routing overrides, then the
-// lane's own deliberate pins. Order matters — the GLM lane intentionally sets
+// lane's own deliberate pins, then the marker that names it a lane child (see
+// childenv.DispatchEnv). Order matters — the GLM lane intentionally sets
 // ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN and must not be scrubbed by its own
 // adapter. Exported to the package's tests so they exercise the composition
 // Run actually performs rather than a copy of it.
@@ -70,5 +71,6 @@ func childEnv(ambient, pins []string) []string {
 	if len(pins) > 0 {
 		env = append(env, pins...)
 	}
+	env = append(env, childenv.DispatchEnv+"=1")
 	return env
 }
